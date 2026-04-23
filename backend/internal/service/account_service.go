@@ -74,6 +74,8 @@ type AccountRepository interface {
 	IncrementQuotaUsed(ctx context.Context, id int64, amount float64) error
 	// ResetQuotaUsed 重置 API Key 账号所有维度的配额用量为 0
 	ResetQuotaUsed(ctx context.Context, id int64) error
+	// ListRecentHealthEvents is used by AccountHealthTracker.Hydrate on startup.
+	ListRecentHealthEvents(ctx context.Context, window time.Duration, perAccountLimit int) ([]HealthEventRow, error)
 }
 
 // AccountBulkUpdate describes the fields that can be updated in a bulk operation.

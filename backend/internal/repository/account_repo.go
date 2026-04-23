@@ -2022,3 +2022,57 @@ func (r *accountRepository) ResetQuotaUsed(ctx context.Context, id int64) error 
 	}
 	return nil
 }
+
+
+// ListRecentHealthEvents returns the last `perAccountLimit` outcomes per account
+// (merged from usage_logs successes and ops_error_logs upstream errors) within
+// the given window. Used by service.HydrateAccountHealth to rebuild in-memory
+// state on startup.
+func (r *accountRepository) ListRecentHealthEvents(ctx context.Context, window time.Duration, perAccountLimit int) ([]service.HealthEventRow, error) {
+	if perAccountLimit <= 0 {
+		perAccountLimit = 20
+	}
+	if window <= 0 {
+		window = time.Hour
+	}
+	secs := int(window / time.Second)
+
+	query := `
+WITH combined AS (
+  SELECT account_id, created_at, FALSE AS is_err
+    FROM usage_logs
+   WHERE created_at > now() - make_interval(secs => $1)
+  UNION ALL
+  SELECT account_id, created_at, TRUE AS is_err
+    FROM ops_error_logs
+   WHERE created_at > now() - make_interval(secs => $1)
+     AND upstream_status_code IS NOT NULL
+     AND upstream_status_code >= 400
+     AND account_id IS NOT NULL
+),
+ranked AS (
+  SELECT account_id, created_at, is_err,
+         row_number() OVER (PARTITION BY account_id ORDER BY created_at DESC) AS rn
+    FROM combined
+)
+SELECT account_id, created_at, is_err
+  FROM ranked
+ WHERE rn <= $2
+ ORDER BY account_id, created_at ASC`
+
+	rows, err := r.sql.QueryContext(ctx, query, secs, perAccountLimit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	out := make([]service.HealthEventRow, 0, perAccountLimit*8)
+	for rows.Next() {
+		var row service.HealthEventRow
+		if err := rows.Scan(&row.AccountID, &row.CreatedAt, &row.IsError); err != nil {
+			return nil, err
+		}
+		out = append(out, row)
+	}
+	return out, rows.Err()
+}

@@ -905,6 +905,7 @@ func (s *GeminiMessagesCompatService) Forward(ctx context.Context, c *gin.Contex
 		// Successful upstream response clears the per-account custom 429
 		// backoff counter so the next 429 (if any) starts from attempt 1.
 		ResetCustom429Counter(account.ID)
+		RecordSuccess(account.ID)
 	}
 	if resp.StatusCode >= 400 {
 		respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 2<<20))
@@ -1388,6 +1389,7 @@ func (s *GeminiMessagesCompatService) ForwardNative(ctx context.Context, c *gin.
 		// Successful upstream response clears the per-account custom 429
 		// backoff counter so the next 429 (if any) starts from attempt 1.
 		ResetCustom429Counter(account.ID)
+		RecordSuccess(account.ID)
 	}
 	if resp.StatusCode >= 400 {
 		respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 2<<20))
@@ -2776,6 +2778,8 @@ func asInt(v any) (int, bool) {
 // account, signalling the retry loop to short-circuit and surface the 429
 // to the outer failover layer instead of retrying the same account.
 func (s *GeminiMessagesCompatService) handleGeminiUpstreamError(ctx context.Context, account *Account, statusCode int, headers http.Header, body []byte) bool {
+	// Record the outcome for health-aware scheduling before any early-exit branch.
+	RecordError(account.ID)
 	// 遵守自定义错误码策略：未命中则跳过所有限流处理
 	if !account.ShouldHandleErrorCode(statusCode) {
 		return false

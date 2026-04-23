@@ -641,6 +641,9 @@ func NewGatewayService(
 	if path := strings.TrimSpace(os.Getenv(debugGatewayBodyEnv)); path != "" {
 		svc.initDebugGatewayBodyFile(path)
 	}
+	// Rebuild per-account health ring from persistent logs so the first
+	// scheduling decision after restart already reflects recent history.
+	HydrateAccountHealth(context.Background(), accountRepo)
 	return svc
 }
 
@@ -1522,13 +1525,18 @@ func (s *GatewayService) SelectAccountWithLoadAwareness(ctx context.Context, gro
 
 			if len(routingAvailable) > 0 {
 				// 排序：优先级 > 负载率 > 最后使用时间
+				// 排序：优先级 > 负载度+健康得分（混合）> 最后使用时间
 				sort.SliceStable(routingAvailable, func(i, j int) bool {
 					a, b := routingAvailable[i], routingAvailable[j]
 					if a.account.Priority != b.account.Priority {
 						return a.account.Priority < b.account.Priority
 					}
-					if a.loadInfo.LoadRate != b.loadInfo.LoadRate {
-						return a.loadInfo.LoadRate < b.loadInfo.LoadRate
+					// Blended health+load score (lower = better).
+					// See account_health.go / tuning/health_load_weights.py.
+					aScore := CombinedScore(a.account.ID, float64(a.loadInfo.LoadRate)/100.0)
+					bScore := CombinedScore(b.account.ID, float64(b.loadInfo.LoadRate)/100.0)
+					if aScore != bScore {
+						return aScore < bScore
 					}
 					switch {
 					case a.account.LastUsedAt == nil && b.account.LastUsedAt != nil:
@@ -2531,6 +2539,16 @@ func sortAccountsByPriorityAndLastUsed(accounts []*Account, preferOAuth bool) {
 		a, b := accounts[i], accounts[j]
 		if a.Priority != b.Priority {
 			return a.Priority < b.Priority
+		}
+		// Blended health score (no load info at this call site).
+		// See account_health.go / tuning/health_load_weights.py.
+		if preferOAuth && a.Type != b.Type {
+			return a.Type == AccountTypeOAuth
+		}
+		aScore := CombinedScore(a.ID, 0)
+		bScore := CombinedScore(b.ID, 0)
+		if aScore != bScore {
+			return aScore < bScore
 		}
 		switch {
 		case a.LastUsedAt == nil && b.LastUsedAt != nil:
