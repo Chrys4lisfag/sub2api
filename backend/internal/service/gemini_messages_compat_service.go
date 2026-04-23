@@ -845,7 +845,18 @@ func (s *GeminiMessagesCompatService) Forward(ctx context.Context, c *gin.Contex
 			}
 			if resp.StatusCode == 429 {
 				// Mark as rate-limited early so concurrent requests avoid this account.
-				s.handleGeminiUpstreamError(ctx, account, resp.StatusCode, resp.Header, respBody)
+				if s.handleGeminiUpstreamError(ctx, account, resp.StatusCode, resp.Header, respBody) {
+					// Custom 429 policy is active on this account. Don't burn more
+					// attempts here; rebuild resp and break so outer failover picks a
+					// different account while this one cools down.
+					logger.LegacyPrintf("service.gemini_messages_compat", "Gemini account %d: custom 429 policy, skipping in-account retries", account.ID)
+					resp = &http.Response{
+						StatusCode: resp.StatusCode,
+						Header:     resp.Header.Clone(),
+						Body:       io.NopCloser(bytes.NewReader(respBody)),
+					}
+					break
+				}
 			}
 			if attempt < geminiMaxRetries {
 				upstreamReqID := resp.Header.Get(requestIDHeader)
@@ -1292,7 +1303,15 @@ func (s *GeminiMessagesCompatService) ForwardNative(ctx context.Context, c *gin.
 				break
 			}
 			if resp.StatusCode == 429 {
-				s.handleGeminiUpstreamError(ctx, account, resp.StatusCode, resp.Header, respBody)
+				if s.handleGeminiUpstreamError(ctx, account, resp.StatusCode, resp.Header, respBody) {
+					logger.LegacyPrintf("service.gemini_messages_compat", "Gemini account %d: custom 429 policy, skipping in-account retries", account.ID)
+					resp = &http.Response{
+						StatusCode: resp.StatusCode,
+						Header:     resp.Header.Clone(),
+						Body:       io.NopCloser(bytes.NewReader(respBody)),
+					}
+					break
+				}
 			}
 			if attempt < geminiMaxRetries {
 				upstreamReqID := resp.Header.Get(requestIDHeader)
@@ -2741,23 +2760,33 @@ func asInt(v any) (int, bool) {
 	}
 }
 
-func (s *GeminiMessagesCompatService) handleGeminiUpstreamError(ctx context.Context, account *Account, statusCode int, headers http.Header, body []byte) {
+// handleGeminiUpstreamError marks the account rate-limited when the upstream
+// returns 429 (and handles 401/403/529 via RateLimitService). The returned
+// bool is true iff the custom per-account 429 policy is enabled on the
+// account, signalling the retry loop to short-circuit and surface the 429
+// to the outer failover layer instead of retrying the same account.
+func (s *GeminiMessagesCompatService) handleGeminiUpstreamError(ctx context.Context, account *Account, statusCode int, headers http.Header, body []byte) bool {
 	// 遵守自定义错误码策略：未命中则跳过所有限流处理
 	if !account.ShouldHandleErrorCode(statusCode) {
-		return
+		return false
 	}
 	if s.rateLimitService != nil && (statusCode == 401 || statusCode == 403 || statusCode == 529) {
 		s.rateLimitService.HandleUpstreamError(ctx, account, statusCode, headers, body)
-		return
+		return false
 	}
 	if statusCode != 429 {
-		return
+		return false
 	}
 
 	oauthType := account.GeminiOAuthType()
 	tierID := account.GeminiTierID()
 	projectID := strings.TrimSpace(account.GetCredential("project_id"))
 	isCodeAssist := account.IsGeminiCodeAssist()
+	// When the per-account custom policy is enabled, we want the in-account
+	// retry loop to stop and the outer failover layer to pick a different
+	// account while this one is cooling down, regardless of which cooldown
+	// branch below actually runs.
+	customEnabled := ReadCustom429Policy(account).Enabled
 
 	resetAt := ParseGeminiRateLimitResetTime(body)
 	if resetAt == nil {
@@ -2767,7 +2796,7 @@ func (s *GeminiMessagesCompatService) handleGeminiUpstreamError(ctx context.Cont
 			ra := time.Now().Add(cd)
 			logger.LegacyPrintf("service.gemini_messages_compat", "[Gemini 429] Account %d custom policy cooldown=%v (oauth_type=%s, tier=%s)", account.ID, cd.Truncate(time.Second), oauthType, tierID)
 			_ = s.accountRepo.SetRateLimited(ctx, account.ID, ra)
-			return
+			return true
 		} else if exceeded {
 			logger.LegacyPrintf("service.gemini_messages_compat", "[Gemini 429] Account %d custom policy exhausted, falling back to default strategy", account.ID)
 		}
@@ -2794,15 +2823,15 @@ func (s *GeminiMessagesCompatService) handleGeminiUpstreamError(ctx context.Cont
 			}
 		}
 		_ = s.accountRepo.SetRateLimited(ctx, account.ID, ra)
-		return
+		return customEnabled
 	}
-
 
 	// 使用解析到的重置时间
 	resetTime := time.Unix(*resetAt, 0)
 	_ = s.accountRepo.SetRateLimited(ctx, account.ID, resetTime)
 	logger.LegacyPrintf("service.gemini_messages_compat", "[Gemini 429] Account %d rate limited until %v (oauth_type=%s, tier=%s)",
 		account.ID, resetTime, oauthType, tierID)
+	return customEnabled
 }
 
 // ParseGeminiRateLimitResetTime 解析 Gemini 格式的 429 响应，返回重置时间的 Unix 时间戳
