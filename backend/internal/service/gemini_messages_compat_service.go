@@ -901,6 +901,11 @@ func (s *GeminiMessagesCompatService) Forward(ctx context.Context, c *gin.Contex
 	}
 	defer func() { _ = resp.Body.Close() }()
 
+	if resp.StatusCode < 400 {
+		// Successful upstream response clears the per-account custom 429
+		// backoff counter so the next 429 (if any) starts from attempt 1.
+		ResetCustom429Counter(account.ID)
+	}
 	if resp.StatusCode >= 400 {
 		respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 2<<20))
 		// 统一错误策略：自定义错误码 + 临时不可调度
@@ -1379,6 +1384,11 @@ func (s *GeminiMessagesCompatService) ForwardNative(ctx context.Context, c *gin.
 
 	isOAuth := account.Type == AccountTypeOAuth
 
+	if resp.StatusCode < 400 {
+		// Successful upstream response clears the per-account custom 429
+		// backoff counter so the next 429 (if any) starts from attempt 1.
+		ResetCustom429Counter(account.ID)
+	}
 	if resp.StatusCode >= 400 {
 		respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 2<<20))
 		// Best-effort fallback for OAuth tokens missing AI Studio scopes when calling countTokens.
