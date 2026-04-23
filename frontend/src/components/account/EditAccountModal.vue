@@ -404,48 +404,6 @@
             </div>
           </div>
         </div>
-
-        <!-- Custom Unknown 429 Timeout Handling -->
-        <div class="border-t border-gray-200 pt-4 dark:border-dark-600">
-          <div class="mb-3 flex items-center justify-between">
-            <div>
-              <label class="input-label mb-0">Custom unknown 429 timeout handling</label>
-              <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">
-                Override cooldown when upstream returns 429 with no Retry-After and no daily-quota hint. After max attempts, the default strategy is used.
-              </p>
-            </div>
-            <button
-              type="button"
-              @click="custom429Enabled = !custom429Enabled"
-              :class="[
-                'relative inline-flex h-6 w-11 flex-shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none focus:ring-2 focus:ring-primary-500 focus:ring-offset-2',
-                custom429Enabled ? 'bg-primary-600' : 'bg-gray-200 dark:bg-dark-600'
-              ]"
-            >
-              <span
-                :class="[
-                  'pointer-events-none inline-block h-5 w-5 transform rounded-full bg-white shadow ring-0 transition duration-200 ease-in-out',
-                  custom429Enabled ? 'translate-x-5' : 'translate-x-0'
-                ]"
-              />
-            </button>
-          </div>
-          <div v-if="custom429Enabled" class="grid grid-cols-1 gap-3 sm:grid-cols-3">
-            <div>
-              <label class="input-label">Base timeout (s)</label>
-              <input v-model.number="custom429BaseSec" type="number" min="1" max="3600" class="input w-full" placeholder="5" />
-            </div>
-            <div>
-              <label class="input-label">Backoff increment (s)</label>
-              <input v-model.number="custom429BackoffSec" type="number" min="0" max="3600" class="input w-full" placeholder="5" />
-            </div>
-            <div>
-              <label class="input-label">Max attempts</label>
-              <input v-model.number="custom429MaxAttempts" type="number" min="1" max="100" class="input w-full" placeholder="5" />
-            </div>
-          </div>
-        </div>
-
       </div>
 
       <!-- OpenAI OAuth Model Mapping (OAuth 类型没有 apikey 容器，需要独立的模型映射区域) -->
@@ -1069,6 +1027,47 @@
               ]"
             />
           </button>
+        </div>
+      </div>
+
+      <!-- Custom Unknown 429 Timeout Handling (all account types) -->
+      <div class="border-t border-gray-200 pt-4 dark:border-dark-600">
+        <div class="mb-3 flex items-center justify-between">
+          <div>
+            <label class="input-label mb-0">Custom unknown 429 timeout handling</label>
+            <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">
+              Override cooldown when upstream returns 429 with no Retry-After and no daily-quota hint. After max attempts, the default strategy is used.
+            </p>
+          </div>
+          <button
+            type="button"
+            @click="custom429Enabled = !custom429Enabled"
+            :class="[
+              'relative inline-flex h-6 w-11 flex-shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none focus:ring-2 focus:ring-primary-500 focus:ring-offset-2',
+              custom429Enabled ? 'bg-primary-600' : 'bg-gray-200 dark:bg-dark-600'
+            ]"
+          >
+            <span
+              :class="[
+                'pointer-events-none inline-block h-5 w-5 transform rounded-full bg-white shadow ring-0 transition duration-200 ease-in-out',
+                custom429Enabled ? 'translate-x-5' : 'translate-x-0'
+              ]"
+            />
+          </button>
+        </div>
+        <div v-if="custom429Enabled" class="grid grid-cols-1 gap-3 sm:grid-cols-3">
+          <div>
+            <label class="input-label">Base timeout (s)</label>
+            <input v-model.number="custom429BaseSec" type="number" min="1" max="3600" class="input w-full" placeholder="5" />
+          </div>
+          <div>
+            <label class="input-label">Backoff increment (s)</label>
+            <input v-model.number="custom429BackoffSec" type="number" min="0" max="3600" class="input w-full" placeholder="5" />
+          </div>
+          <div>
+            <label class="input-label">Max attempts</label>
+            <input v-model.number="custom429MaxAttempts" type="number" min="1" max="100" class="input w-full" placeholder="5" />
+          </div>
         </div>
       </div>
 
