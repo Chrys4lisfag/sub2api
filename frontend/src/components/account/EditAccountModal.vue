@@ -405,6 +405,47 @@
           </div>
         </div>
 
+        <!-- Custom Unknown 429 Timeout Handling -->
+        <div class="border-t border-gray-200 pt-4 dark:border-dark-600">
+          <div class="mb-3 flex items-center justify-between">
+            <div>
+              <label class="input-label mb-0">Custom unknown 429 timeout handling</label>
+              <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">
+                Override cooldown when upstream returns 429 with no Retry-After and no daily-quota hint. After max attempts, the default strategy is used.
+              </p>
+            </div>
+            <button
+              type="button"
+              @click="custom429Enabled = !custom429Enabled"
+              :class="[
+                'relative inline-flex h-6 w-11 flex-shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none focus:ring-2 focus:ring-primary-500 focus:ring-offset-2',
+                custom429Enabled ? 'bg-primary-600' : 'bg-gray-200 dark:bg-dark-600'
+              ]"
+            >
+              <span
+                :class="[
+                  'pointer-events-none inline-block h-5 w-5 transform rounded-full bg-white shadow ring-0 transition duration-200 ease-in-out',
+                  custom429Enabled ? 'translate-x-5' : 'translate-x-0'
+                ]"
+              />
+            </button>
+          </div>
+          <div v-if="custom429Enabled" class="grid grid-cols-1 gap-3 sm:grid-cols-3">
+            <div>
+              <label class="input-label">Base timeout (s)</label>
+              <input v-model.number="custom429BaseSec" type="number" min="1" max="3600" class="input w-full" placeholder="5" />
+            </div>
+            <div>
+              <label class="input-label">Backoff increment (s)</label>
+              <input v-model.number="custom429BackoffSec" type="number" min="0" max="3600" class="input w-full" placeholder="5" />
+            </div>
+            <div>
+              <label class="input-label">Max attempts</label>
+              <input v-model.number="custom429MaxAttempts" type="number" min="1" max="100" class="input w-full" placeholder="5" />
+            </div>
+          </div>
+        </div>
+
       </div>
 
       <!-- OpenAI OAuth Model Mapping (OAuth 类型没有 apikey 容器，需要独立的模型映射区域) -->
@@ -1943,6 +1984,10 @@ const poolModeRetryCount = ref(DEFAULT_POOL_MODE_RETRY_COUNT)
 const customErrorCodesEnabled = ref(false)
 const selectedErrorCodes = ref<number[]>([])
 const customErrorCodeInput = ref<number | null>(null)
+const custom429Enabled = ref(false)
+const custom429BaseSec = ref<number | null>(5)
+const custom429BackoffSec = ref<number | null>(5)
+const custom429MaxAttempts = ref<number | null>(5)
 const interceptWarmupRequests = ref(false)
 const autoPauseOnExpired = ref(false)
 const mixedScheduling = ref(false) // For antigravity accounts: enable mixed scheduling
@@ -2167,6 +2212,13 @@ const syncFormFromAccount = (newAccount: Account | null) => {
   const credentials = newAccount.credentials as Record<string, unknown> | undefined
   interceptWarmupRequests.value = credentials?.intercept_warmup_requests === true
   autoPauseOnExpired.value = newAccount.auto_pause_on_expired === true
+
+  // Load custom unknown 429 timeout policy (applies to all account types)
+  const c429 = (credentials?.custom_429_policy as Record<string, unknown> | undefined) || undefined
+  custom429Enabled.value = c429?.enabled === true
+  custom429BaseSec.value = typeof c429?.base_timeout_sec === 'number' ? (c429!.base_timeout_sec as number) : 5
+  custom429BackoffSec.value = typeof c429?.backoff_increment_sec === 'number' ? (c429!.backoff_increment_sec as number) : 5
+  custom429MaxAttempts.value = typeof c429?.max_attempts === 'number' ? (c429!.max_attempts as number) : 5
 
   // Load mixed scheduling setting (only for antigravity accounts)
   mixedScheduling.value = false
@@ -2771,6 +2823,20 @@ const openMixedChannelDialog = (opts: {
   showMixedChannelWarning.value = true
 }
 
+const applyCustom429Policy = (target: Record<string, unknown>) => {
+  if (custom429Enabled.value) {
+    target.custom_429_policy = {
+      enabled: true,
+      base_timeout_sec: Number(custom429BaseSec.value) || 5,
+      backoff_increment_sec: Number(custom429BackoffSec.value) || 0,
+      max_attempts: Number(custom429MaxAttempts.value) || 5
+    }
+  } else {
+    delete target.custom_429_policy
+  }
+  return target
+}
+
 const withAntigravityConfirmFlag = (payload: Record<string, unknown>) => {
   if (needsMixedChannelCheck() && antigravityMixedChannelConfirmed.value) {
     return {
@@ -3276,6 +3342,12 @@ const handleSubmit = async () => {
       writeQuotaNotifyToExtra(newExtra, 'update')
       updatePayload.extra = newExtra
     }
+
+    // Stamp custom 429 policy on the final credentials map (universal across types).
+    const finalCreds = (updatePayload.credentials as Record<string, unknown> | undefined)
+      ?? ((props.account.credentials as Record<string, unknown>) || {})
+    applyCustom429Policy(finalCreds)
+    updatePayload.credentials = finalCreds
 
     const canContinue = await ensureAntigravityMixedChannelConfirmed(async () => {
       await submitUpdateAccount(accountID, updatePayload)

@@ -2761,6 +2761,17 @@ func (s *GeminiMessagesCompatService) handleGeminiUpstreamError(ctx context.Cont
 
 	resetAt := ParseGeminiRateLimitResetTime(body)
 	if resetAt == nil {
+		// Per-account custom 429 policy takes precedence when enabled.
+		// Only falls through to platform defaults after max_attempts is hit.
+		if cd, used, exceeded := ApplyCustom429Policy(account); used {
+			ra := time.Now().Add(cd)
+			logger.LegacyPrintf("service.gemini_messages_compat", "[Gemini 429] Account %d custom policy cooldown=%v (oauth_type=%s, tier=%s)", account.ID, cd.Truncate(time.Second), oauthType, tierID)
+			_ = s.accountRepo.SetRateLimited(ctx, account.ID, ra)
+			return
+		} else if exceeded {
+			logger.LegacyPrintf("service.gemini_messages_compat", "[Gemini 429] Account %d custom policy exhausted, falling back to default strategy", account.ID)
+		}
+
 		// 根据账号类型使用不同的默认重置时间
 		var ra time.Time
 		if isCodeAssist {
@@ -2785,6 +2796,7 @@ func (s *GeminiMessagesCompatService) handleGeminiUpstreamError(ctx context.Cont
 		_ = s.accountRepo.SetRateLimited(ctx, account.ID, ra)
 		return
 	}
+
 
 	// 使用解析到的重置时间
 	resetTime := time.Unix(*resetAt, 0)

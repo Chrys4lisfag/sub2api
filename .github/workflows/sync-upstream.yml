@@ -1,0 +1,79 @@
+name: sync-upstream
+
+# Keeps fork's `main` in sync with Wei-Shaw/sub2api main.
+# Merges upstream weekly (and on-demand) via `git merge`.
+# On conflict, opens a PR instead of forcing.
+
+on:
+  schedule:
+    - cron: "17 3 * * 1" # Mondays 03:17 UTC
+  workflow_dispatch:
+    inputs:
+      upstream_ref:
+        description: "Upstream ref (branch/tag/SHA) to merge"
+        required: false
+        default: "main"
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout fork main
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Configure git identity
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Add upstream + fetch
+        env:
+          UPSTREAM_REF: ${{ github.event.inputs.upstream_ref || 'main' }}
+        run: |
+          git remote add upstream https://github.com/Wei-Shaw/sub2api.git
+          git fetch upstream --tags --force
+          echo "UPSTREAM_SHA=$(git rev-parse upstream/${UPSTREAM_REF})" >> "$GITHUB_ENV"
+
+      - name: Attempt fast-forward / merge
+        id: merge
+        env:
+          UPSTREAM_REF: ${{ github.event.inputs.upstream_ref || 'main' }}
+        run: |
+          if git merge --no-edit "upstream/${UPSTREAM_REF}"; then
+            echo "status=clean" >> "$GITHUB_OUTPUT"
+          else
+            echo "status=conflict" >> "$GITHUB_OUTPUT"
+            git merge --abort || true
+          fi
+
+      - name: Push merged main
+        if: steps.merge.outputs.status == 'clean'
+        run: git push origin main
+
+      - name: Open PR on conflict
+        if: steps.merge.outputs.status == 'conflict'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          UPSTREAM_REF: ${{ github.event.inputs.upstream_ref || 'main' }}
+        run: |
+          BR="sync/upstream-${UPSTREAM_REF}-${UPSTREAM_SHA:0:7}"
+          git checkout -B "$BR"
+          # Create an empty merge commit marker so the PR reflects the attempt.
+          # Conflicts are left for the maintainer to resolve.
+          git merge --no-ff --no-commit "upstream/${UPSTREAM_REF}" || true
+          git add -A
+          git commit -m "sync: merge upstream/${UPSTREAM_REF} (conflicts, manual resolution needed)" || true
+          git push origin "$BR" --force-with-lease
+          gh pr create \
+            --base main --head "$BR" \
+            --title "sync: upstream/${UPSTREAM_REF} (conflicts)" \
+            --body "Automated sync hit merge conflicts. Resolve locally and push to this branch." \
+            || gh pr edit "$BR" --body "Conflicts re-detected at $(date -u)."
