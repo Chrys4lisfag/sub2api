@@ -40,7 +40,7 @@ type custom429State struct {
 }
 
 var (
-	custom429Counters sync.Map // key: account.ID (int64) → *custom429State
+	custom429Counters  sync.Map // key: account.ID (int64) → *custom429State
 	custom429IdleReset = 5 * time.Minute
 )
 
@@ -89,7 +89,7 @@ func ApplyCustom429Policy(account *Account) (cooldown time.Duration, used bool, 
 	}
 
 	v, _ := custom429Counters.LoadOrStore(account.ID, &custom429State{})
-	st := v.(*custom429State)
+	st, _ := v.(*custom429State)
 	st.mu.Lock()
 	defer st.mu.Unlock()
 
@@ -144,7 +144,7 @@ func readJSONInt(m map[string]any, key string) int {
 		return int(i)
 	case string:
 		// tolerate stringified numbers from settings UI
-		var j json.Number = json.Number(n)
+		j := json.Number(n)
 		i, err := j.Int64()
 		if err != nil {
 			return 0

@@ -98,7 +98,7 @@ func CombinedScore(accountID int64, loadRate float64) float64 {
 // from DB can replay historical events in chronological order).
 func (t *AccountHealthTracker) Record(accountID int64, at time.Time, isError bool) {
 	v, _ := t.m.LoadOrStore(accountID, &accountHealthState{})
-	h := v.(*accountHealthState)
+	h, _ := v.(*accountHealthState)
 	h.mu.Lock()
 	h.events[h.head] = accountHealthOutcome{at: at, isError: isError}
 	h.head = (h.head + 1) % healthRingSize
@@ -115,7 +115,7 @@ func (t *AccountHealthTracker) Score(accountID int64) float64 {
 	if !ok {
 		return healthNeutralScore
 	}
-	h := v.(*accountHealthState)
+	h, _ := v.(*accountHealthState)
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	cutoff := time.Now().Add(-healthWindow)

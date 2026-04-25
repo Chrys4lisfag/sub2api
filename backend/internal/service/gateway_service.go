@@ -643,7 +643,9 @@ func NewGatewayService(
 	}
 	// Rebuild per-account health ring from persistent logs so the first
 	// scheduling decision after restart already reflects recent history.
-	HydrateAccountHealth(context.Background(), accountRepo)
+	if hydrator, ok := accountRepo.(AccountHealthEventSource); ok {
+		HydrateAccountHealth(context.Background(), hydrator)
+	}
 	return svc
 }
 

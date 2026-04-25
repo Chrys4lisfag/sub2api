@@ -2023,7 +2023,6 @@ func (r *accountRepository) ResetQuotaUsed(ctx context.Context, id int64) error 
 	return nil
 }
 
-
 // ListRecentHealthEvents returns the last `perAccountLimit` outcomes per account
 // (merged from usage_logs successes and ops_error_logs upstream errors) within
 // the given window. Used by service.HydrateAccountHealth to rebuild in-memory
@@ -2064,7 +2063,7 @@ SELECT account_id, created_at, is_err
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	out := make([]service.HealthEventRow, 0, perAccountLimit*8)
 	for rows.Next() {
