@@ -868,8 +868,9 @@ func (s *AccountTestService) buildGeminiOAuthRequest(ctx context.Context, accoun
 	}
 
 	projectID := strings.TrimSpace(account.GetCredential("project_id"))
-	if projectID == "" {
-		// AI Studio OAuth mode (no project_id): call generativelanguage API directly with Bearer token.
+	forceAIStudio := account.GetCredential("force_ai_studio") == "true"
+	if projectID == "" || forceAIStudio {
+		// AI Studio OAuth mode (no project_id, or force_ai_studio toggle): call generativelanguage API directly with Bearer token.
 		baseURL := account.GetCredential("base_url")
 		if strings.TrimSpace(baseURL) == "" {
 			baseURL = geminicli.AIStudioBaseURL
