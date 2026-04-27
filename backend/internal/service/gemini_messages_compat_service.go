@@ -598,7 +598,11 @@ func (s *GeminiMessagesCompatService) Forward(ctx context.Context, c *gin.Contex
 	var requestIDHeader string
 	var buildReq func(ctx context.Context) (*http.Request, string, error)
 	useUpstreamStream := req.Stream
-	if account.Type == AccountTypeOAuth && !req.Stream && strings.TrimSpace(account.GetCredential("project_id")) != "" {
+	// Per-account toggle: when set, OAuth accounts skip the Code Assist endpoint
+	// (cloudcode-pa.googleapis.com) and dispatch directly to AI Studio
+	// (generativelanguage.googleapis.com) using the same OAuth Bearer token.
+	forceAIStudio := account.Type == AccountTypeOAuth && account.GetCredential("force_ai_studio") == "true"
+	if account.Type == AccountTypeOAuth && !req.Stream && !forceAIStudio && strings.TrimSpace(account.GetCredential("project_id")) != "" {
 		// Code Assist's non-streaming generateContent may return no content; use streaming upstream and aggregate.
 		useUpstreamStream = true
 	}
@@ -657,7 +661,7 @@ func (s *GeminiMessagesCompatService) Forward(ctx context.Context, c *gin.Contex
 			// Two modes for OAuth:
 			// 1. With project_id -> Code Assist API (wrapped request)
 			// 2. Without project_id -> AI Studio API (direct OAuth, like API key but with Bearer token)
-			if projectID != "" {
+			if projectID != "" && !forceAIStudio {
 				// Mode 1: Code Assist API
 				baseURL, err := s.validateUpstreamBaseURL(geminicli.GeminiCliBaseURL)
 				if err != nil {
@@ -1127,7 +1131,7 @@ func (s *GeminiMessagesCompatService) ForwardNative(ctx context.Context, c *gin.
 		useUpstreamStream = true
 		upstreamAction = "streamGenerateContent"
 	}
-	forceAIStudio := action == "countTokens"
+	forceAIStudio := action == "countTokens" || (account.Type == AccountTypeOAuth && account.GetCredential("force_ai_studio") == "true")
 
 	var requestIDHeader string
 	var buildReq func(ctx context.Context) (*http.Request, string, error)
