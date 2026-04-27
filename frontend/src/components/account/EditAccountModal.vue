@@ -1071,36 +1071,6 @@
         </div>
       </div>
 
-      <!-- Force AI Studio routing (Gemini OAuth only) -->
-      <div
-        v-if="props.account?.platform === 'gemini' && props.account?.type === 'oauth'"
-        class="border-t border-gray-200 pt-4 dark:border-dark-600"
-      >
-        <div class="flex items-center justify-between">
-          <div>
-            <label class="input-label mb-0">Force AI Studio endpoint</label>
-            <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">
-              Skip Code Assist (cloudcode-pa.googleapis.com) and route requests directly to AI Studio (generativelanguage.googleapis.com) using the same OAuth Bearer token. Useful when Code Assist returns malformed payload errors.
-            </p>
-          </div>
-          <button
-            type="button"
-            @click="forceAIStudio = !forceAIStudio"
-            :class="[
-              'relative inline-flex h-6 w-11 flex-shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none focus:ring-2 focus:ring-primary-500 focus:ring-offset-2',
-              forceAIStudio ? 'bg-primary-600' : 'bg-gray-200 dark:bg-dark-600'
-            ]"
-          >
-            <span
-              :class="[
-                'pointer-events-none inline-block h-5 w-5 transform rounded-full bg-white shadow ring-0 transition duration-200 ease-in-out',
-                forceAIStudio ? 'translate-x-5' : 'translate-x-0'
-              ]"
-            />
-          </button>
-        </div>
-      </div>
-
       <div>
         <label class="input-label">{{ t('admin.accounts.proxy') }}</label>
         <ProxySelector v-model="form.proxy_id" :proxies="proxies" />
@@ -2076,7 +2046,6 @@ const custom429Enabled = ref(false)
 const custom429BaseSec = ref<number | null>(5)
 const custom429BackoffSec = ref<number | null>(5)
 const custom429MaxAttempts = ref<number | null>(5)
-const forceAIStudio = ref(false)
 const interceptWarmupRequests = ref(false)
 const autoPauseOnExpired = ref(false)
 const mixedScheduling = ref(false) // For antigravity accounts: enable mixed scheduling
@@ -2328,9 +2297,6 @@ const syncFormFromAccount = (newAccount: Account | null) => {
   custom429BaseSec.value = typeof c429?.base_timeout_sec === 'number' ? (c429!.base_timeout_sec as number) : 5
   custom429BackoffSec.value = typeof c429?.backoff_increment_sec === 'number' ? (c429!.backoff_increment_sec as number) : 5
   custom429MaxAttempts.value = typeof c429?.max_attempts === 'number' ? (c429!.max_attempts as number) : 5
-
-  // Load force AI Studio routing toggle (Gemini OAuth only)
-  forceAIStudio.value = credentials?.force_ai_studio === 'true'
 
   // Load mixed scheduling setting (only for antigravity accounts)
   mixedScheduling.value = false
@@ -2961,13 +2927,6 @@ const applyCustom429Policy = (target: Record<string, unknown>) => {
     }
   } else {
     delete target.custom_429_policy
-  }
-  // Force AI Studio routing for Gemini OAuth accounts (skip cloudcode-pa Code Assist endpoint).
-  // Stored as string "true" because credentials JSONB is map[string]string on the backend.
-  if (forceAIStudio.value && props.account?.platform === 'gemini' && props.account?.type === 'oauth') {
-    target.force_ai_studio = 'true'
-  } else {
-    delete target.force_ai_studio
   }
   return target
 }
