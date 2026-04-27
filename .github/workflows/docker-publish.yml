@@ -5,6 +5,12 @@ on:
     branches: [main, "feat/**"]
     tags: ["v*.*.*"]
   workflow_dispatch: {}
+  # Pick up commits pushed by sync-upstream.yml — those pushes use
+  # GITHUB_TOKEN, which does NOT trigger `push` events. workflow_run
+  # events bypass that guard.
+  workflow_run:
+    workflows: ["sync-upstream"]
+    types: [completed]
 
 permissions:
   contents: read
@@ -17,8 +23,15 @@ env:
 jobs:
   build-push:
     runs-on: ubuntu-latest
+    # Skip when triggered by a failed sync-upstream run.
+    if: ${{ github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success' }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          # When triggered by workflow_run, default checkout is the workflow
+          # file's commit (stale). Pin to the head SHA of the upstream run
+          # so we build the actual code that just landed on main.
+          ref: ${{ github.event.workflow_run.head_sha || github.ref }}
 
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
