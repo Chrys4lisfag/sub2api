@@ -1,12 +1,16 @@
 name: sync-upstream
 
 # Keeps fork's `main` in sync with Wei-Shaw/sub2api main.
-# Merges upstream weekly (and on-demand) via `git merge`.
+# Merges upstream every 6h (and on-demand) via `git merge`.
 # On conflict, opens a PR instead of forcing.
+#
+# NOTE: GitHub silently disables scheduled workflows on forks after
+# 60 days of inactivity in the fork. To re-enable, push any commit
+# (even a no-op) or hit "Enable workflow" in the Actions tab.
 
 on:
   schedule:
-    - cron: "17 3 * * 1" # Mondays 03:17 UTC
+    - cron: "17 */6 * * *" # every 6 hours at :17 (00:17, 06:17, 12:17, 18:17 UTC)
   workflow_dispatch:
     inputs:
       upstream_ref:
@@ -42,8 +46,18 @@ jobs:
           git fetch upstream --tags --force
           echo "UPSTREAM_SHA=$(git rev-parse upstream/${UPSTREAM_REF})" >> "$GITHUB_ENV"
 
+      - name: Skip if already up to date
+        id: ahead
+        env:
+          UPSTREAM_REF: ${{ github.event.inputs.upstream_ref || 'main' }}
+        run: |
+          AHEAD=$(git rev-list --count "HEAD..upstream/${UPSTREAM_REF}")
+          echo "ahead=${AHEAD}" >> "$GITHUB_OUTPUT"
+          echo "Fork is behind upstream by ${AHEAD} commit(s)"
+
       - name: Attempt fast-forward / merge
         id: merge
+        if: steps.ahead.outputs.ahead != '0'
         env:
           UPSTREAM_REF: ${{ github.event.inputs.upstream_ref || 'main' }}
         run: |
