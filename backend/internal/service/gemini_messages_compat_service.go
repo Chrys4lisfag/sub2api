@@ -27,6 +27,7 @@ import (
 	"github.com/Wei-Shaw/sub2api/internal/util/urlvalidator"
 
 	"github.com/gin-gonic/gin"
+	"github.com/google/uuid"
 	"github.com/tidwall/gjson"
 )
 
@@ -673,12 +674,19 @@ func (s *GeminiMessagesCompatService) Forward(ctx context.Context, c *gin.Contex
 				}
 
 				wrapped := map[string]any{
-					"model":   mappedModel,
-					"project": projectID,
+					"model":          mappedModel,
+					"project":        projectID,
+					"user_prompt_id": uuid.New().String() + "########0",
 				}
 				var inner any
 				if err := json.Unmarshal(geminiReq, &inner); err != nil {
 					return nil, "", fmt.Errorf("failed to parse gemini request: %w", err)
+				}
+				if innerMap, ok := inner.(map[string]any); ok {
+					if _, exists := innerMap["session_id"]; !exists {
+						innerMap["session_id"] = uuid.New().String()
+					}
+					inner = innerMap
 				}
 				wrapped["request"] = inner
 				wrappedBytes, _ := json.Marshal(wrapped)
@@ -689,7 +697,9 @@ func (s *GeminiMessagesCompatService) Forward(ctx context.Context, c *gin.Contex
 				}
 				upstreamReq.Header.Set("Content-Type", "application/json")
 				upstreamReq.Header.Set("Authorization", "Bearer "+accessToken)
-				upstreamReq.Header.Set("User-Agent", geminicli.GeminiCLIUserAgent)
+				upstreamReq.Header.Set("User-Agent", geminicli.BuildGeminiCLIUserAgent(mappedModel))
+				upstreamReq.Header.Set("x-goog-api-client", geminicli.GoogleAPIClientHeader)
+				upstreamReq.Header.Set("Accept-Encoding", "gzip,deflate")
 				return upstreamReq, "x-request-id", nil
 			} else {
 				// Mode 2: AI Studio API with OAuth (like API key mode, but using Bearer token)
@@ -1222,12 +1232,19 @@ func (s *GeminiMessagesCompatService) ForwardNative(ctx context.Context, c *gin.
 				}
 
 				wrapped := map[string]any{
-					"model":   mappedModel,
-					"project": projectID,
+					"model":          mappedModel,
+					"project":        projectID,
+					"user_prompt_id": uuid.New().String() + "########0",
 				}
 				var inner any
 				if err := json.Unmarshal(body, &inner); err != nil {
 					return nil, "", fmt.Errorf("failed to parse gemini request: %w", err)
+				}
+				if innerMap, ok := inner.(map[string]any); ok {
+					if _, exists := innerMap["session_id"]; !exists {
+						innerMap["session_id"] = uuid.New().String()
+					}
+					inner = innerMap
 				}
 				wrapped["request"] = inner
 				wrappedBytes, _ := json.Marshal(wrapped)
@@ -1238,7 +1255,9 @@ func (s *GeminiMessagesCompatService) ForwardNative(ctx context.Context, c *gin.
 				}
 				upstreamReq.Header.Set("Content-Type", "application/json")
 				upstreamReq.Header.Set("Authorization", "Bearer "+accessToken)
-				upstreamReq.Header.Set("User-Agent", geminicli.GeminiCLIUserAgent)
+				upstreamReq.Header.Set("User-Agent", geminicli.BuildGeminiCLIUserAgent(mappedModel))
+				upstreamReq.Header.Set("x-goog-api-client", geminicli.GoogleAPIClientHeader)
+				upstreamReq.Header.Set("Accept-Encoding", "gzip,deflate")
 				return upstreamReq, "x-request-id", nil
 			} else {
 				// Mode 2: AI Studio API with OAuth (like API key mode, but using Bearer token)

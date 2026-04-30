@@ -34,7 +34,9 @@ func (c *geminiCliCodeAssistClient) LoadCodeAssist(ctx context.Context, accessTo
 		SetContext(ctx).
 		SetHeader("Authorization", "Bearer "+accessToken).
 		SetHeader("Content-Type", "application/json").
-		SetHeader("User-Agent", geminicli.GeminiCLIUserAgent).
+		SetHeader("User-Agent", geminicli.BuildGeminiCLIUserAgent("")).
+		SetHeader("x-goog-api-client", geminicli.GoogleAPIClientHeader).
+		SetHeader("Accept-Encoding", "gzip,deflate").
 		SetBody(reqBody).
 		SetSuccessResult(&out).
 		Post(c.baseURL + "/v1internal:loadCodeAssist")
@@ -78,7 +80,9 @@ func (c *geminiCliCodeAssistClient) OnboardUser(ctx context.Context, accessToken
 		SetContext(ctx).
 		SetHeader("Authorization", "Bearer "+accessToken).
 		SetHeader("Content-Type", "application/json").
-		SetHeader("User-Agent", geminicli.GeminiCLIUserAgent).
+		SetHeader("User-Agent", geminicli.BuildGeminiCLIUserAgent("")).
+		SetHeader("x-goog-api-client", geminicli.GoogleAPIClientHeader).
+		SetHeader("Accept-Encoding", "gzip,deflate").
 		SetBody(reqBody).
 		SetSuccessResult(&out).
 		Post(c.baseURL + "/v1internal:onboardUser")
@@ -116,7 +120,7 @@ func createGeminiCliReqClient(proxyURL string) (*req.Client, error) {
 func defaultLoadCodeAssistRequest() *geminicli.LoadCodeAssistRequest {
 	return &geminicli.LoadCodeAssistRequest{
 		Metadata: geminicli.LoadCodeAssistMetadata{
-			IDEType:    "ANTIGRAVITY",
+			IDEType:    "IDE_UNSPECIFIED",
 			Platform:   "PLATFORM_UNSPECIFIED",
 			PluginType: "GEMINI",
 		},
@@ -127,7 +131,7 @@ func defaultOnboardUserRequest() *geminicli.OnboardUserRequest {
 	return &geminicli.OnboardUserRequest{
 		TierID: "LEGACY",
 		Metadata: geminicli.LoadCodeAssistMetadata{
-			IDEType:    "ANTIGRAVITY",
+			IDEType:    "IDE_UNSPECIFIED",
 			Platform:   "PLATFORM_UNSPECIFIED",
 			PluginType: "GEMINI",
 		},

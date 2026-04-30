@@ -62,6 +62,8 @@ func (c *geminiOAuthClient) ExchangeCode(ctx context.Context, oauthType, code, c
 	var tokenResp geminicli.TokenResponse
 	resp, err := client.R().
 		SetContext(ctx).
+		SetHeader("User-Agent", "google-api-nodejs-client/"+geminicli.GoogleAPINodeClientVersion).
+		SetHeader("x-goog-api-client", geminicli.GoogleAPIClientHeader).
 		SetFormDataFromValues(formData).
 		SetSuccessResult(&tokenResp).
 		Post(c.tokenURL)
@@ -105,6 +107,8 @@ func (c *geminiOAuthClient) RefreshToken(ctx context.Context, oauthType, refresh
 	var tokenResp geminicli.TokenResponse
 	resp, err := client.R().
 		SetContext(ctx).
+		SetHeader("User-Agent", "google-api-nodejs-client/"+geminicli.GoogleAPINodeClientVersion).
+		SetHeader("x-goog-api-client", geminicli.GoogleAPIClientHeader).
 		SetFormDataFromValues(formData).
 		SetSuccessResult(&tokenResp).
 		Post(c.tokenURL)

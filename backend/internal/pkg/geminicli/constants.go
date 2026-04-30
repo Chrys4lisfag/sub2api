@@ -18,7 +18,7 @@ const (
 
 	// DefaultScopes for Code Assist (includes cloud-platform for API access plus userinfo scopes)
 	// Required by Google's Code Assist API.
-	DefaultCodeAssistScopes = "https://www.googleapis.com/auth/cloud-platform https://www.googleapis.com/auth/userinfo.email https://www.googleapis.com/auth/userinfo.profile"
+	DefaultCodeAssistScopes = "https://www.googleapis.com/auth/cloud-platform https://www.googleapis.com/auth/userinfo.email https://www.googleapis.com/auth/userinfo.profile email profile openid"
 
 	// DefaultScopes for AI Studio (uses generativelanguage API with OAuth)
 	// Reference: https://ai.google.dev/gemini-api/docs/oauth
@@ -46,6 +46,21 @@ const (
 
 	SessionTTL = 30 * time.Minute
 
-	// GeminiCLIUserAgent mimics Gemini CLI to maximize compatibility with internal endpoints.
-	GeminiCLIUserAgent = "GeminiCLI/0.1.5 (Windows; AMD64)"
+	// GeminiCLIVersion is the CLI version we mimic in the User-Agent.
+	// Bump alongside upstream pinning. Last verified against a real 0.40.1 wire capture.
+	GeminiCLIVersion = "0.40.1"
+
+	// GoogleAPINodeClientVersion is the trailing google-api-nodejs-client token in the
+	// compound User-Agent that real Gemini CLI emits on cloudcode-pa requests, and the
+	// stand-alone UA used on oauth2.googleapis.com/token requests.
+	GoogleAPINodeClientVersion = "9.15.1"
+
+	// GoogleAPIClientHeader is the value sent for the x-goog-api-client header on
+	// Code Assist + OAuth token endpoint requests.
+	GoogleAPIClientHeader = "gl-node/24.12.0"
 )
+
+// GeminiCLIUserAgent is the compound User-Agent without a model segment.
+// Prefer BuildGeminiCLIUserAgent(model) at call sites that have the request model
+// in scope; fall back to this var when no model is available (e.g. loadCodeAssist).
+var GeminiCLIUserAgent = BuildGeminiCLIUserAgent("")
