@@ -46,7 +46,10 @@ const (
 
 	// Antigravity API 端点
 	antigravityProdBaseURL  = "https://cloudcode-pa.googleapis.com"
-	antigravityDailyBaseURL = "https://daily-cloudcode-pa.sandbox.googleapis.com"
+	// daily-cloudcode-pa.googleapis.com (production daily). The previous
+	// .sandbox.googleapis.com host returned chronic 503/429; upstream
+	// gcli2api flipped to the prod daily host in commit 944b9e7 (2026-04-30).
+	antigravityDailyBaseURL = "https://daily-cloudcode-pa.googleapis.com"
 )
 
 // defaultUserAgentVersion 可通过环境变量 ANTIGRAVITY_USER_AGENT_VERSION 配置，默认 1.20.5
@@ -81,7 +84,7 @@ func getClientSecret() (string, error) {
 // BaseURLs 定义 Antigravity API 端点（与 Antigravity-Manager 保持一致）
 var BaseURLs = []string{
 	antigravityProdBaseURL,  // prod (优先)
-	antigravityDailyBaseURL, // daily sandbox (备用)
+	antigravityDailyBaseURL, // daily (备用)
 }
 
 // BaseURL 默认 URL（保持向后兼容）

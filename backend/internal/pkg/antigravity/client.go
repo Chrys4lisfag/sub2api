@@ -728,7 +728,9 @@ func (c *Client) FetchAvailableModels(ctx context.Context, accessToken, projectI
 
 // ── Privacy API ──────────────────────────────────────────────────────
 
-// privacyBaseURL 隐私设置 API 仅使用 daily 端点（与 Antigravity 客户端行为一致）
+// privacyBaseURL 隐私设置 API 端点。在 gcli2api 944b9e7 之前指向 sandbox
+// daily 主机，会持续返回 503/429；现已与 antigravityDailyBaseURL 一同切到
+// 生产 daily 主机 (daily-cloudcode-pa.googleapis.com)。
 const privacyBaseURL = antigravityDailyBaseURL
 
 // SetUserSettingsRequest setUserSettings 请求体
@@ -794,7 +796,9 @@ func (c *Client) SetUserSettings(ctx context.Context, accessToken string) (*SetU
 	req.Header.Set("Accept", "*/*")
 	req.Header.Set("User-Agent", GetUserAgent())
 	req.Header.Set("X-Goog-Api-Client", "gl-node/22.21.1")
-	req.Host = "daily-cloudcode-pa.googleapis.com"
+	// req.Host override removed: previously forced prod Host while URL
+	// pointed at sandbox, causing SNI/Host mismatch. Now the URL itself
+	// is the prod daily host so the override is unnecessary.
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
@@ -837,7 +841,9 @@ func (c *Client) FetchUserInfo(ctx context.Context, accessToken, projectID strin
 	req.Header.Set("Accept", "*/*")
 	req.Header.Set("User-Agent", GetUserAgent())
 	req.Header.Set("X-Goog-Api-Client", "gl-node/22.21.1")
-	req.Host = "daily-cloudcode-pa.googleapis.com"
+	// req.Host override removed: previously forced prod Host while URL
+	// pointed at sandbox, causing SNI/Host mismatch. Now the URL itself
+	// is the prod daily host so the override is unnecessary.
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
