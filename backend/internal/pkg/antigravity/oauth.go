@@ -45,7 +45,7 @@ const (
 	URLAvailabilityTTL = 5 * time.Minute
 
 	// Antigravity API 端点
-	antigravityProdBaseURL  = "https://cloudcode-pa.googleapis.com"
+	antigravityProdBaseURL = "https://cloudcode-pa.googleapis.com"
 	// daily-cloudcode-pa.googleapis.com (production daily). The previous
 	// .sandbox.googleapis.com host returned chronic 503/429; upstream
 	// gcli2api flipped to the prod daily host in commit 944b9e7 (2026-04-30).
