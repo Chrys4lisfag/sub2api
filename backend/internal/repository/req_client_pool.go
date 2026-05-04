@@ -111,14 +111,23 @@ func decompressionAwareRoundTrip(rt req.RoundTripper) req.RoundTripFunc {
 			return resp, err
 		}
 		enc := strings.ToLower(strings.TrimSpace(resp.Header.Get("Content-Encoding")))
-		if enc != "gzip" && enc != "deflate" {
-			return resp, nil
-		}
 		raw, readErr := io.ReadAll(resp.Body)
 		_ = resp.Body.Close()
 		if readErr != nil {
 			resp.Body = io.NopCloser(bytes.NewReader(raw))
 			return resp, nil
+		}
+		// Some Google cloudcode-pa endpoints (loadCodeAssist / onboardUser)
+		// return gzip-compressed bodies WITHOUT a Content-Encoding header.
+		// Sniff magic bytes when the header is missing/unrecognized so we
+		// still decode instead of leaking raw gzip into JSON parsers.
+		if enc != "gzip" && enc != "deflate" {
+			sniffed := sniffCompressedEncoding(raw)
+			if sniffed == "" {
+				resp.Body = io.NopCloser(bytes.NewReader(raw))
+				return resp, nil
+			}
+			enc = sniffed
 		}
 		decoded, decErr := decompressBody(enc, raw)
 		if decErr != nil {
@@ -162,6 +171,28 @@ func decompressBody(encoding string, raw []byte) ([]byte, error) {
 	default:
 		return raw, nil
 	}
+}
+
+// sniffCompressedEncoding detects gzip (RFC 1952) and zlib-wrapped deflate
+// (RFC 1950) by leading magic bytes. Returns "" when the body does not
+// look compressed. Raw RFC 1951 deflate has no magic header and is not
+// sniffed here -- callers that expect raw deflate should set
+// Content-Encoding explicitly.
+func sniffCompressedEncoding(raw []byte) string {
+	if len(raw) < 2 {
+		return ""
+	}
+	// gzip magic: 1f 8b
+	if raw[0] == 0x1f && raw[1] == 0x8b {
+		return "gzip"
+	}
+	// zlib header: first byte low nibble = 8 (deflate); valid second
+	// bytes are constrained so that (raw[0]<<8 | raw[1]) % 31 == 0.
+	// Practically: 0x78 0x01 / 0x5e / 0x9c / 0xda are the dominant combos.
+	if raw[0]&0x0f == 0x08 && (uint16(raw[0])<<8|uint16(raw[1]))%31 == 0 {
+		return "deflate"
+	}
+	return ""
 }
 
 // silence unused: net/http is referenced for type assertions when wrapping
