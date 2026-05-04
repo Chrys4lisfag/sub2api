@@ -30,24 +30,32 @@ func (c *geminiCliCodeAssistClient) LoadCodeAssist(ctx context.Context, accessTo
 	if err != nil {
 		return nil, fmt.Errorf("create HTTP client: %w", err)
 	}
+	apiURL := c.baseURL + "/v1internal:loadCodeAssist"
+	fmt.Printf("[CodeAssist] LoadCodeAssist POST %s body=%+v\n", apiURL, reqBody)
 	resp, err := client.R().
 		SetContext(ctx).
 		SetHeader("Authorization", "Bearer "+accessToken).
 		SetHeader("Content-Type", "application/json").
 		SetHeader("User-Agent", geminicli.BuildGeminiCLIUserAgent("")).
 		SetHeader("x-goog-api-client", geminicli.GoogleAPIClientHeader).
+		// Negotiate gzip,deflate to match the real Gemini CLI fingerprint.
+		// req/v3 auto-decompresses gzip; deflate is handled by the
+		// deflateDecompressMiddleware wired in via getSharedReqClient.
 		SetHeader("Accept-Encoding", "gzip,deflate").
 		SetBody(reqBody).
 		SetSuccessResult(&out).
-		Post(c.baseURL + "/v1internal:loadCodeAssist")
+		Post(apiURL)
 	if err != nil {
-		fmt.Printf("[CodeAssist] LoadCodeAssist request error: %v\n", err)
+		fmt.Printf("[CodeAssist] LoadCodeAssist request error url=%s err=%v\n", apiURL, err)
 		return nil, fmt.Errorf("request failed: %w", err)
 	}
 	if !resp.IsSuccessState() {
 		body := resp.String()
 		sanitizedBody := geminicli.SanitizeBodyForLogs(body)
-		fmt.Printf("[CodeAssist] LoadCodeAssist failed: status %d, body: %s\n", resp.StatusCode, sanitizedBody)
+		contentEnc := resp.Header.Get("Content-Encoding")
+		contentType := resp.Header.Get("Content-Type")
+		fmt.Printf("[CodeAssist] LoadCodeAssist failed url=%s status=%d content-encoding=%q content-type=%q body=%s\n",
+			apiURL, resp.StatusCode, contentEnc, contentType, sanitizedBody)
 
 		// Check if this is a SERVICE_DISABLED error and extract activation URL
 		if googleapi.IsServiceDisabledError(body) {
@@ -69,31 +77,35 @@ func (c *geminiCliCodeAssistClient) OnboardUser(ctx context.Context, accessToken
 		reqBody = defaultOnboardUserRequest()
 	}
 
-	fmt.Printf("[CodeAssist] OnboardUser request body: %+v\n", reqBody)
-
 	var out geminicli.OnboardUserResponse
 	client, err := createGeminiCliReqClient(proxyURL)
 	if err != nil {
 		return nil, fmt.Errorf("create HTTP client: %w", err)
 	}
+	apiURL := c.baseURL + "/v1internal:onboardUser"
+	fmt.Printf("[CodeAssist] OnboardUser POST %s body=%+v\n", apiURL, reqBody)
 	resp, err := client.R().
 		SetContext(ctx).
 		SetHeader("Authorization", "Bearer "+accessToken).
 		SetHeader("Content-Type", "application/json").
 		SetHeader("User-Agent", geminicli.BuildGeminiCLIUserAgent("")).
 		SetHeader("x-goog-api-client", geminicli.GoogleAPIClientHeader).
+		// gzip,deflate -- see LoadCodeAssist for the decompression chain.
 		SetHeader("Accept-Encoding", "gzip,deflate").
 		SetBody(reqBody).
 		SetSuccessResult(&out).
-		Post(c.baseURL + "/v1internal:onboardUser")
+		Post(apiURL)
 	if err != nil {
-		fmt.Printf("[CodeAssist] OnboardUser request error: %v\n", err)
+		fmt.Printf("[CodeAssist] OnboardUser request error url=%s err=%v\n", apiURL, err)
 		return nil, fmt.Errorf("request failed: %w", err)
 	}
 	if !resp.IsSuccessState() {
 		body := resp.String()
 		sanitizedBody := geminicli.SanitizeBodyForLogs(body)
-		fmt.Printf("[CodeAssist] OnboardUser failed: status %d, body: %s\n", resp.StatusCode, sanitizedBody)
+		contentEnc := resp.Header.Get("Content-Encoding")
+		contentType := resp.Header.Get("Content-Type")
+		fmt.Printf("[CodeAssist] OnboardUser failed url=%s status=%d content-encoding=%q content-type=%q body=%s\n",
+			apiURL, resp.StatusCode, contentEnc, contentType, sanitizedBody)
 
 		// Check if this is a SERVICE_DISABLED error and extract activation URL
 		if googleapi.IsServiceDisabledError(body) {

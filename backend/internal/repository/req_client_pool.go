@@ -1,7 +1,12 @@
 package repository
 
 import (
+	"bytes"
+	"compress/flate"
+	"compress/zlib"
 	"fmt"
+	"io"
+	"net/http"
 	"strings"
 	"sync"
 	"time"
@@ -50,6 +55,11 @@ func getSharedReqClient(opts reqClientOptions) (*req.Client, error) {
 	if opts.Impersonate {
 		client = client.ImpersonateChrome()
 	}
+	// req/v3 auto-decompresses gzip in its own transport; install a wrapper
+	// that additionally handles deflate so callers can negotiate
+	// `Accept-Encoding: gzip,deflate` (matches real Gemini CLI / Antigravity
+	// fingerprint) and still receive readable bodies.
+	client.WrapRoundTripFunc(deflateAwareRoundTrip)
 	trimmed, _, err := proxyurl.Parse(opts.ProxyURL)
 	if err != nil {
 		return nil, err
@@ -84,3 +94,57 @@ func CreatePrivacyReqClient(proxyURL string) (*req.Client, error) {
 		Impersonate: true, // Enable Chrome TLS fingerprint impersonation
 	})
 }
+
+// deflateAwareRoundTrip wraps a req RoundTripFunc so that responses with
+// `Content-Encoding: deflate` get streamed through a zlib/flate reader.
+// Falls back to the raw body on decode failure so the caller still sees
+// something useful in error logs.
+func deflateAwareRoundTrip(rt req.RoundTripper) req.RoundTripFunc {
+	return func(r *req.Request) (*req.Response, error) {
+		resp, err := rt.RoundTrip(r)
+		if err != nil || resp == nil || resp.Response == nil {
+			return resp, err
+		}
+		if !strings.EqualFold(strings.TrimSpace(resp.Header.Get("Content-Encoding")), "deflate") {
+			return resp, nil
+		}
+		raw, readErr := io.ReadAll(resp.Body)
+		_ = resp.Body.Close()
+		if readErr != nil {
+			resp.Body = io.NopCloser(bytes.NewReader(raw))
+			return resp, nil
+		}
+		decoded, decErr := decompressDeflate(raw)
+		if decErr != nil {
+			resp.Body = io.NopCloser(bytes.NewReader(raw))
+			return resp, nil
+		}
+		resp.Body = io.NopCloser(bytes.NewReader(decoded))
+		resp.Header.Del("Content-Encoding")
+		resp.Header.Del("Content-Length")
+		resp.ContentLength = int64(len(decoded))
+		if resp.Response != nil {
+			resp.Response.Header.Del("Content-Encoding")
+			resp.Response.Header.Del("Content-Length")
+			resp.Response.ContentLength = int64(len(decoded))
+			resp.Response.Uncompressed = true
+		}
+		return resp, nil
+	}
+}
+
+// decompressDeflate handles both RFC 1950 (zlib-wrapped) and RFC 1951
+// (raw deflate) framings, since Google's CDN occasionally serves either.
+func decompressDeflate(raw []byte) ([]byte, error) {
+	if r, err := zlib.NewReader(bytes.NewReader(raw)); err == nil {
+		defer func() { _ = r.Close() }()
+		return io.ReadAll(r)
+	}
+	r := flate.NewReader(bytes.NewReader(raw))
+	defer func() { _ = r.Close() }()
+	return io.ReadAll(r)
+}
+
+// silence unused: net/http is referenced for type assertions when wrapping
+// req's underlying transport in future helpers.
+var _ http.RoundTripper = (*http.Transport)(nil)

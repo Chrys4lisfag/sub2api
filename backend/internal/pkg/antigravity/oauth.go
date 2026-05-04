@@ -52,8 +52,12 @@ const (
 	antigravityDailyBaseURL = "https://daily-cloudcode-pa.googleapis.com"
 )
 
-// defaultUserAgentVersion 可通过环境变量 ANTIGRAVITY_USER_AGENT_VERSION 配置，默认 1.20.5
-var defaultUserAgentVersion = "1.21.9"
+// defaultUserAgentVersion is overridable via the ANTIGRAVITY_USER_AGENT_VERSION
+// env var. Default tracks the latest official Google Antigravity release
+// (1.23.2 from 2026-04-16). Google's antigravity backend rejects older versions
+// with "This version of Antigravity is no longer supported" once the cutoff
+// drifts past them; bump alongside upstream.
+var defaultUserAgentVersion = "1.23.2"
 
 // defaultClientSecret 可通过环境变量 ANTIGRAVITY_OAUTH_CLIENT_SECRET 配置
 var defaultClientSecret = "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"
@@ -73,6 +77,23 @@ func init() {
 func GetUserAgent() string {
 	return fmt.Sprintf("antigravity/%s windows/amd64", defaultUserAgentVersion)
 }
+
+// AntigravityXGoogApiClient is the value of the X-Goog-Api-Client header on
+// every cloudcode-pa.googleapis.com request the real Antigravity client
+// emits. Verified by direct API testing -- see ANTIGRAVITY_API_SPEC.md
+// (NoeFabris/opencode-antigravity-auth, 2025-12-13).
+const AntigravityXGoogApiClient = "google-cloud-sdk vscode_cloudshelleditor/0.1"
+
+// AntigravityClientMetadata is the literal Client-Metadata header value the
+// real Antigravity client sends on cloudcode-pa requests. Same source as
+// AntigravityXGoogApiClient. The string is the verbatim payload from the
+// spec doc (which captured a working Antigravity session).
+//
+// Note the platform tag is "MACOS" even though our User-Agent says
+// "windows/amd64". This is what the spec author observed working; if Google
+// starts cross-checking these against UA we may need to switch to
+// "WINDOWS_AMD64" or make it configurable via env.
+const AntigravityClientMetadata = `{"ideType":"ANTIGRAVITY","platform":"MACOS","pluginType":"GEMINI"}`
 
 func getClientSecret() (string, error) {
 	if v := strings.TrimSpace(defaultClientSecret); v != "" {

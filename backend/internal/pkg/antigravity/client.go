@@ -43,10 +43,14 @@ func NewAPIRequestWithURL(ctx context.Context, baseURL, action, accessToken stri
 		return nil, err
 	}
 
-	// 基础 Headers（与 Antigravity-Manager 保持一致，只设置这 3 个）
+	// Headers per Antigravity API spec (NoeFabris/opencode-antigravity-auth):
+	// Authorization, Content-Type, User-Agent, X-Goog-Api-Client, Client-Metadata.
+	// Real Antigravity client emits all five on every cloudcode-pa request.
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer "+accessToken)
 	req.Header.Set("User-Agent", GetUserAgent())
+	req.Header.Set("X-Goog-Api-Client", AntigravityXGoogApiClient)
+	req.Header.Set("Client-Metadata", AntigravityClientMetadata)
 
 	return req, nil
 }
@@ -795,7 +799,8 @@ func (c *Client) SetUserSettings(ctx context.Context, accessToken string) (*SetU
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "*/*")
 	req.Header.Set("User-Agent", GetUserAgent())
-	req.Header.Set("X-Goog-Api-Client", "gl-node/22.21.1")
+	req.Header.Set("X-Goog-Api-Client", AntigravityXGoogApiClient)
+	req.Header.Set("Client-Metadata", AntigravityClientMetadata)
 	// req.Host override removed: previously forced prod Host while URL
 	// pointed at sandbox, causing SNI/Host mismatch. Now the URL itself
 	// is the prod daily host so the override is unnecessary.
@@ -840,7 +845,8 @@ func (c *Client) FetchUserInfo(ctx context.Context, accessToken, projectID strin
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "*/*")
 	req.Header.Set("User-Agent", GetUserAgent())
-	req.Header.Set("X-Goog-Api-Client", "gl-node/22.21.1")
+	req.Header.Set("X-Goog-Api-Client", AntigravityXGoogApiClient)
+	req.Header.Set("Client-Metadata", AntigravityClientMetadata)
 	// req.Host override removed: previously forced prod Host while URL
 	// pointed at sandbox, causing SNI/Host mismatch. Now the URL itself
 	// is the prod daily host so the override is unnecessary.
