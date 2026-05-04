@@ -38,10 +38,12 @@ func (c *geminiCliCodeAssistClient) LoadCodeAssist(ctx context.Context, accessTo
 		SetHeader("Content-Type", "application/json").
 		SetHeader("User-Agent", geminicli.BuildGeminiCLIUserAgent("")).
 		SetHeader("x-goog-api-client", geminicli.GoogleAPIClientHeader).
-		// Negotiate gzip,deflate to match the real Gemini CLI fingerprint.
-		// req/v3 auto-decompresses gzip; deflate is handled by the
-		// deflateDecompressMiddleware wired in via getSharedReqClient.
-		SetHeader("Accept-Encoding", "gzip,deflate").
+		// NOTE: Accept-Encoding intentionally NOT set here. Once we pin it
+		// manually req/v3 disables its own gzip auto-decompression and we
+		// have to decode ourselves. Google's cloudcode-pa endpoints have
+		// been observed returning gzip without Content-Encoding, defeating
+		// header-based decode. Letting req/v3 own the negotiation is more
+		// reliable than fingerprint-matching here.
 		SetBody(reqBody).
 		SetSuccessResult(&out).
 		Post(apiURL)
@@ -90,8 +92,7 @@ func (c *geminiCliCodeAssistClient) OnboardUser(ctx context.Context, accessToken
 		SetHeader("Content-Type", "application/json").
 		SetHeader("User-Agent", geminicli.BuildGeminiCLIUserAgent("")).
 		SetHeader("x-goog-api-client", geminicli.GoogleAPIClientHeader).
-		// gzip,deflate -- see LoadCodeAssist for the decompression chain.
-		SetHeader("Accept-Encoding", "gzip,deflate").
+		// Accept-Encoding deliberately omitted -- see LoadCodeAssist above.
 		SetBody(reqBody).
 		SetSuccessResult(&out).
 		Post(apiURL)
