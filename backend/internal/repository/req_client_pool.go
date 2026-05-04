@@ -3,6 +3,7 @@ package repository
 import (
 	"bytes"
 	"compress/flate"
+	"compress/gzip"
 	"compress/zlib"
 	"fmt"
 	"io"
@@ -55,11 +56,12 @@ func getSharedReqClient(opts reqClientOptions) (*req.Client, error) {
 	if opts.Impersonate {
 		client = client.ImpersonateChrome()
 	}
-	// req/v3 auto-decompresses gzip in its own transport; install a wrapper
-	// that additionally handles deflate so callers can negotiate
-	// `Accept-Encoding: gzip,deflate` (matches real Gemini CLI / Antigravity
-	// fingerprint) and still receive readable bodies.
-	client.WrapRoundTripFunc(deflateAwareRoundTrip)
+	// req/v3 disables its own gzip auto-decompression when the caller sets
+	// `Accept-Encoding` manually. We send `gzip,deflate` to match real Gemini
+	// CLI / Antigravity fingerprint, so install a wrapper that decodes both
+	// encodings ourselves; otherwise response bodies arrive raw and JSON
+	// unmarshal blows up at the first `\x1f` magic byte.
+	client.WrapRoundTripFunc(decompressionAwareRoundTrip)
 	trimmed, _, err := proxyurl.Parse(opts.ProxyURL)
 	if err != nil {
 		return nil, err
@@ -95,17 +97,21 @@ func CreatePrivacyReqClient(proxyURL string) (*req.Client, error) {
 	})
 }
 
-// deflateAwareRoundTrip wraps a req RoundTripFunc so that responses with
-// `Content-Encoding: deflate` get streamed through a zlib/flate reader.
-// Falls back to the raw body on decode failure so the caller still sees
-// something useful in error logs.
-func deflateAwareRoundTrip(rt req.RoundTripper) req.RoundTripFunc {
+// decompressionAwareRoundTrip wraps a req RoundTripper so that responses
+// with `Content-Encoding: gzip` or `deflate` get streamed through the
+// matching decoder. req/v3's own auto-gzip is bypassed once the caller
+// pins Accept-Encoding manually -- which we do to match the real Gemini
+// CLI / Antigravity fingerprint -- so we have to handle both encodings
+// here. Falls back to the raw body on decode failure so error logs still
+// see something.
+func decompressionAwareRoundTrip(rt req.RoundTripper) req.RoundTripFunc {
 	return func(r *req.Request) (*req.Response, error) {
 		resp, err := rt.RoundTrip(r)
 		if err != nil || resp == nil || resp.Response == nil {
 			return resp, err
 		}
-		if !strings.EqualFold(strings.TrimSpace(resp.Header.Get("Content-Encoding")), "deflate") {
+		enc := strings.ToLower(strings.TrimSpace(resp.Header.Get("Content-Encoding")))
+		if enc != "gzip" && enc != "deflate" {
 			return resp, nil
 		}
 		raw, readErr := io.ReadAll(resp.Body)
@@ -114,7 +120,7 @@ func deflateAwareRoundTrip(rt req.RoundTripper) req.RoundTripFunc {
 			resp.Body = io.NopCloser(bytes.NewReader(raw))
 			return resp, nil
 		}
-		decoded, decErr := decompressDeflate(raw)
+		decoded, decErr := decompressBody(enc, raw)
 		if decErr != nil {
 			resp.Body = io.NopCloser(bytes.NewReader(raw))
 			return resp, nil
@@ -133,16 +139,29 @@ func deflateAwareRoundTrip(rt req.RoundTripper) req.RoundTripFunc {
 	}
 }
 
-// decompressDeflate handles both RFC 1950 (zlib-wrapped) and RFC 1951
-// (raw deflate) framings, since Google's CDN occasionally serves either.
-func decompressDeflate(raw []byte) ([]byte, error) {
-	if r, err := zlib.NewReader(bytes.NewReader(raw)); err == nil {
-		defer func() { _ = r.Close() }()
-		return io.ReadAll(r)
+// decompressBody handles `gzip` (RFC 1952), `deflate` zlib-wrapped (RFC
+// 1950), and `deflate` raw (RFC 1951) framings. Some Google services flip
+// between deflate framings, hence the dual-fallback for that branch.
+func decompressBody(encoding string, raw []byte) ([]byte, error) {
+	switch encoding {
+	case "gzip":
+		gr, err := gzip.NewReader(bytes.NewReader(raw))
+		if err != nil {
+			return nil, err
+		}
+		defer func() { _ = gr.Close() }()
+		return io.ReadAll(gr)
+	case "deflate":
+		if zr, err := zlib.NewReader(bytes.NewReader(raw)); err == nil {
+			defer func() { _ = zr.Close() }()
+			return io.ReadAll(zr)
+		}
+		fr := flate.NewReader(bytes.NewReader(raw))
+		defer func() { _ = fr.Close() }()
+		return io.ReadAll(fr)
+	default:
+		return raw, nil
 	}
-	r := flate.NewReader(bytes.NewReader(raw))
-	defer func() { _ = r.Close() }()
-	return io.ReadAll(r)
 }
 
 // silence unused: net/http is referenced for type assertions when wrapping

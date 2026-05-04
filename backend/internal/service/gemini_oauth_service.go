@@ -972,7 +972,7 @@ func (s *GeminiOAuthService) fetchProjectID(ctx context.Context, accessToken, pr
 	req := &geminicli.OnboardUserRequest{
 		TierID: tierID,
 		Metadata: geminicli.LoadCodeAssistMetadata{
-			IDEType:    "ANTIGRAVITY",
+			IDEType:    "IDE_UNSPECIFIED",
 			Platform:   "PLATFORM_UNSPECIFIED",
 			PluginType: "GEMINI",
 		},
