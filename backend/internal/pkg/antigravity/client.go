@@ -48,7 +48,7 @@ func NewAPIRequestWithURL(ctx context.Context, baseURL, action, accessToken stri
 	// Real Antigravity client emits all five on every cloudcode-pa request.
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer "+accessToken)
-	req.Header.Set("User-Agent", GetUserAgent())
+	req.Header.Set("User-Agent", GetUserAgentForContext(ctx))
 	req.Header.Set("X-Goog-Api-Client", AntigravityXGoogApiClient)
 	req.Header.Set("Client-Metadata", AntigravityClientMetadata)
 
@@ -444,7 +444,7 @@ func (c *Client) GetUserInfo(ctx context.Context, accessToken string) (*UserInfo
 func (c *Client) LoadCodeAssist(ctx context.Context, accessToken string) (*LoadCodeAssistResponse, map[string]any, error) {
 	reqBody := LoadCodeAssistRequest{}
 	reqBody.Metadata.IDEType = "ANTIGRAVITY"
-	reqBody.Metadata.IDEVersion = "1.20.6"
+	reqBody.Metadata.IDEVersion = GetUserAgentVersionForContext(ctx)
 	reqBody.Metadata.IDEName = "antigravity"
 
 	bodyBytes, err := json.Marshal(reqBody)
@@ -465,7 +465,7 @@ func (c *Client) LoadCodeAssist(ctx context.Context, accessToken string) (*LoadC
 		}
 		req.Header.Set("Authorization", "Bearer "+accessToken)
 		req.Header.Set("Content-Type", "application/json")
-		req.Header.Set("User-Agent", GetUserAgent())
+		req.Header.Set("User-Agent", GetUserAgentForContext(ctx))
 
 		resp, err := c.httpClient.Do(req)
 		if err != nil {
@@ -544,7 +544,7 @@ func (c *Client) OnboardUser(ctx context.Context, accessToken, tierID string) (s
 			}
 			req.Header.Set("Authorization", "Bearer "+accessToken)
 			req.Header.Set("Content-Type", "application/json")
-			req.Header.Set("User-Agent", GetUserAgent())
+			req.Header.Set("User-Agent", GetUserAgentForContext(ctx))
 
 			resp, err := c.httpClient.Do(req)
 			if err != nil {
@@ -678,7 +678,7 @@ func (c *Client) FetchAvailableModels(ctx context.Context, accessToken, projectI
 		}
 		req.Header.Set("Authorization", "Bearer "+accessToken)
 		req.Header.Set("Content-Type", "application/json")
-		req.Header.Set("User-Agent", GetUserAgent())
+		req.Header.Set("User-Agent", GetUserAgentForContext(ctx))
 
 		resp, err := c.httpClient.Do(req)
 		if err != nil {
