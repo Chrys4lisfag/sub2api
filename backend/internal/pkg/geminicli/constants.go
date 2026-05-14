@@ -47,8 +47,10 @@ const (
 	SessionTTL = 30 * time.Minute
 
 	// GeminiCLIVersion is the CLI version we mimic in the User-Agent.
-	// Bump alongside upstream pinning. Last verified against a real 0.40.1 wire capture.
-	GeminiCLIVersion = "0.40.1"
+	// Bump alongside upstream pinning. Latest stable per npm:
+	//   curl -s https://registry.npmjs.org/@google/gemini-cli/latest | jq -r .version
+	// As of 2026-05-14, 0.42.0 is current. Original wire capture was 0.40.1.
+	GeminiCLIVersion = "0.42.0"
 
 	// GoogleAPINodeClientVersion is the trailing google-api-nodejs-client token in the
 	// compound User-Agent that real Gemini CLI emits on cloudcode-pa requests, and the
@@ -56,8 +58,10 @@ const (
 	GoogleAPINodeClientVersion = "9.15.1"
 
 	// GoogleAPIClientHeader is the value sent for the x-goog-api-client header on
-	// Code Assist + OAuth token endpoint requests.
-	GoogleAPIClientHeader = "gl-node/24.12.0"
+	// Code Assist + OAuth token endpoint requests. Bumped to track the Node
+	// runtime gemini-cli ships with (observed gl-node/24.14.0 in 0.42.0-preview.1
+	// error reports, issue google-gemini/gemini-cli#26572).
+	GoogleAPIClientHeader = "gl-node/24.14.0"
 )
 
 // GeminiCLIUserAgent is the compound User-Agent without a model segment.
