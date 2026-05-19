@@ -27,11 +27,11 @@ func BuildGeminiCLIUserAgent(model string) string {
 	if model == "" {
 		return fmt.Sprintf(
 			"GeminiCLI/%s (%s; %s; %s) google-api-nodejs-client/%s",
-			GeminiCLIVersion, platform, arch, surface, GoogleAPINodeClientVersion,
+			GeminiCLIVersion(), platform, arch, surface, GoogleAPINodeClientVersion,
 		)
 	}
 	return fmt.Sprintf(
 		"GeminiCLI/%s/%s (%s; %s; %s) google-api-nodejs-client/%s",
-		GeminiCLIVersion, model, platform, arch, surface, GoogleAPINodeClientVersion,
+		GeminiCLIVersion(), model, platform, arch, surface, GoogleAPINodeClientVersion,
 	)
 }

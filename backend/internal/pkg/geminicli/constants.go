@@ -46,25 +46,14 @@ const (
 
 	SessionTTL = 30 * time.Minute
 
-	// GeminiCLIVersion is the CLI version we mimic in the User-Agent.
-	// Bump alongside upstream pinning. Latest stable per npm:
-	//   curl -s https://registry.npmjs.org/@google/gemini-cli/latest | jq -r .version
-	// As of 2026-05-14, 0.42.0 is current. Original wire capture was 0.40.1.
-	GeminiCLIVersion = "0.42.0"
-
 	// GoogleAPINodeClientVersion is the trailing google-api-nodejs-client token in the
 	// compound User-Agent that real Gemini CLI emits on cloudcode-pa requests, and the
 	// stand-alone UA used on oauth2.googleapis.com/token requests.
 	GoogleAPINodeClientVersion = "9.15.1"
-
-	// GoogleAPIClientHeader is the value sent for the x-goog-api-client header on
-	// Code Assist + OAuth token endpoint requests. Bumped to track the Node
-	// runtime gemini-cli ships with (observed gl-node/24.14.0 in 0.42.0-preview.1
-	// error reports, issue google-gemini/gemini-cli#26572).
-	GoogleAPIClientHeader = "gl-node/24.14.0"
 )
 
-// GeminiCLIUserAgent is the compound User-Agent without a model segment.
-// Prefer BuildGeminiCLIUserAgent(model) at call sites that have the request model
-// in scope; fall back to this var when no model is available (e.g. loadCodeAssist).
-var GeminiCLIUserAgent = BuildGeminiCLIUserAgent("")
+// Note: the Gemini CLI version and x-goog-api-client header value are
+// runtime-mutable -- see runtime.go for the auto-updater and getters
+// (GeminiCLIVersion / GoogleAPIClientHeader). The previous package-level
+// snapshot GeminiCLIUserAgent was removed for the same reason; call
+// BuildGeminiCLIUserAgent("") instead to always pick up the latest value.

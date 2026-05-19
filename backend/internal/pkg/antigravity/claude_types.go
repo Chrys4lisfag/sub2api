@@ -174,6 +174,7 @@ var geminiModels = []modelDef{
 	{ID: "gemini-3.1-flash-image-preview", DisplayName: "Gemini 3.1 Flash Image Preview", CreatedAt: "2026-02-19T00:00:00Z"},
 	{ID: "gemini-3-pro-preview", DisplayName: "Gemini 3 Pro Preview", CreatedAt: "2025-06-01T00:00:00Z"},
 	{ID: "gemini-3-pro-image", DisplayName: "Gemini 3 Pro Image", CreatedAt: "2025-06-01T00:00:00Z"},
+	{ID: "gemini-3.5-flash", DisplayName: "Gemini 3.5 Flash", CreatedAt: "2026-05-18T00:00:00Z"},
 }
 
 // ========== Claude API 格式 (/v1/models) ==========

@@ -37,7 +37,7 @@ func (c *geminiCliCodeAssistClient) LoadCodeAssist(ctx context.Context, accessTo
 		SetHeader("Authorization", "Bearer "+accessToken).
 		SetHeader("Content-Type", "application/json").
 		SetHeader("User-Agent", geminicli.BuildGeminiCLIUserAgent("")).
-		SetHeader("x-goog-api-client", geminicli.GoogleAPIClientHeader).
+		SetHeader("x-goog-api-client", geminicli.GoogleAPIClientHeader()).
 		// NOTE: Accept-Encoding intentionally NOT set here. Once we pin it
 		// manually req/v3 disables its own gzip auto-decompression and we
 		// have to decode ourselves. Google's cloudcode-pa endpoints have
@@ -91,7 +91,7 @@ func (c *geminiCliCodeAssistClient) OnboardUser(ctx context.Context, accessToken
 		SetHeader("Authorization", "Bearer "+accessToken).
 		SetHeader("Content-Type", "application/json").
 		SetHeader("User-Agent", geminicli.BuildGeminiCLIUserAgent("")).
-		SetHeader("x-goog-api-client", geminicli.GoogleAPIClientHeader).
+		SetHeader("x-goog-api-client", geminicli.GoogleAPIClientHeader()).
 		// Accept-Encoding deliberately omitted -- see LoadCodeAssist above.
 		SetBody(reqBody).
 		SetSuccessResult(&out).

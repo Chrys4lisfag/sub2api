@@ -108,6 +108,9 @@ var DefaultAntigravityModelMapping = map[string]string{
 	"gemini-3.1-flash-image": "gemini-3.1-flash-image",
 	// Gemini 3.1 image preview 映射
 	"gemini-3.1-flash-image-preview": "gemini-3.1-flash-image",
+	// Gemini 3.5 白名单 (GA 2026-05-12)
+	"gemini-3.5-flash": "gemini-3.5-flash",
+	// Gemini 3 Flash preview 映射 -> 3.5 Flash (3.5 supersedes the 3 preview alias per Google docs)
 	// Gemini 3 image 兼容映射（向 3.1 image 迁移）
 	"gemini-3-pro-image":         "gemini-3.1-flash-image",
 	"gemini-3-pro-image-preview": "gemini-3.1-flash-image",

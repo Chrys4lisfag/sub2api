@@ -18,6 +18,7 @@ import (
 	_ "github.com/Wei-Shaw/sub2api/ent/runtime"
 	"github.com/Wei-Shaw/sub2api/internal/config"
 	"github.com/Wei-Shaw/sub2api/internal/handler"
+	"github.com/Wei-Shaw/sub2api/internal/pkg/geminicli"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/logger"
 	"github.com/Wei-Shaw/sub2api/internal/server/middleware"
 	"github.com/Wei-Shaw/sub2api/internal/setup"
@@ -150,6 +151,16 @@ func runMainServer() {
 		log.Fatalf("Failed to initialize application: %v", err)
 	}
 	defer app.Cleanup()
+
+	// Long-lived background context for periodic workers (gemini-cli version
+	// poller, etc). Cancelled on shutdown so goroutines exit cleanly before
+	// the process closes its TCP listeners.
+	bgCtx, bgCancel := context.WithCancel(context.Background())
+	defer bgCancel()
+
+	// Track the upstream @google/gemini-cli release so impersonation UA stays
+	// current without redeploys.
+	geminicli.StartVersionAutoUpdater(bgCtx, geminicli.DefaultAutoUpdateInterval)
 
 	// 启动服务器
 	go func() {

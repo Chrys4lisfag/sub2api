@@ -1037,7 +1037,7 @@ func fetchProjectIDFromResourceManager(ctx context.Context, accessToken, proxyUR
 	}
 
 	req.Header.Set("Authorization", "Bearer "+accessToken)
-	req.Header.Set("User-Agent", geminicli.GeminiCLIUserAgent)
+	req.Header.Set("User-Agent", geminicli.BuildGeminiCLIUserAgent(""))
 
 	client, err := httpclient.GetClient(httpclient.Options{
 		ProxyURL:           strings.TrimSpace(proxyURL),

@@ -370,7 +370,7 @@ func (s *GeminiMessagesCompatService) buildGeminiChatCompletionsUpstreamRequestF
 				}
 				upstreamReq.Header.Set("Content-Type", "application/json")
 				upstreamReq.Header.Set("Authorization", "Bearer "+accessToken)
-				upstreamReq.Header.Set("User-Agent", geminicli.GeminiCLIUserAgent)
+				upstreamReq.Header.Set("User-Agent", geminicli.BuildGeminiCLIUserAgent(""))
 				return upstreamReq, "x-request-id", nil
 			}
 

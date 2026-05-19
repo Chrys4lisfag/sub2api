@@ -1029,7 +1029,7 @@ func (s *AccountTestService) buildCodeAssistRequest(ctx context.Context, accessT
 
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer "+accessToken)
-	req.Header.Set("User-Agent", geminicli.GeminiCLIUserAgent)
+	req.Header.Set("User-Agent", geminicli.BuildGeminiCLIUserAgent(""))
 
 	return req, nil
 }

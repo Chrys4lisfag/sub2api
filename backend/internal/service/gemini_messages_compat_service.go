@@ -698,7 +698,7 @@ func (s *GeminiMessagesCompatService) Forward(ctx context.Context, c *gin.Contex
 				upstreamReq.Header.Set("Content-Type", "application/json")
 				upstreamReq.Header.Set("Authorization", "Bearer "+accessToken)
 				upstreamReq.Header.Set("User-Agent", geminicli.BuildGeminiCLIUserAgent(mappedModel))
-				upstreamReq.Header.Set("x-goog-api-client", geminicli.GoogleAPIClientHeader)
+				upstreamReq.Header.Set("x-goog-api-client", geminicli.GoogleAPIClientHeader())
 				upstreamReq.Header.Set("Accept-Encoding", "gzip,deflate")
 				return upstreamReq, "x-request-id", nil
 			} else {
@@ -1258,7 +1258,7 @@ func (s *GeminiMessagesCompatService) ForwardNative(ctx context.Context, c *gin.
 				upstreamReq.Header.Set("Content-Type", "application/json")
 				upstreamReq.Header.Set("Authorization", "Bearer "+accessToken)
 				upstreamReq.Header.Set("User-Agent", geminicli.BuildGeminiCLIUserAgent(mappedModel))
-				upstreamReq.Header.Set("x-goog-api-client", geminicli.GoogleAPIClientHeader)
+				upstreamReq.Header.Set("x-goog-api-client", geminicli.GoogleAPIClientHeader())
 				upstreamReq.Header.Set("Accept-Encoding", "gzip,deflate")
 				return upstreamReq, "x-request-id", nil
 			} else {
