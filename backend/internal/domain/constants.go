@@ -108,9 +108,13 @@ var DefaultAntigravityModelMapping = map[string]string{
 	"gemini-3.1-flash-image": "gemini-3.1-flash-image",
 	// Gemini 3.1 image preview 映射
 	"gemini-3.1-flash-image-preview": "gemini-3.1-flash-image",
-	// Gemini 3.5 白名单 (GA 2026-05-12)
-	"gemini-3.5-flash": "gemini-3.5-flash",
-	// Gemini 3 Flash preview 映射 -> 3.5 Flash (3.5 supersedes the 3 preview alias per Google docs)
+	// Gemini 3.5 白名单 (GA 2026-05-12) + 显式 thinking-level 变体
+	// (mirrors router-for-me/CLIProxyAPI PR #3490 model registry).
+	// Wire-model 转换在 pkg/antigravity/wire_model.go::AntigravityWireModel
+	// 中完成（出站时把这些公开 ID 改成 gemini-3-flash-agent / gemini-3.5-flash-low）。
+	"gemini-3.5-flash":        "gemini-3.5-flash",
+	"gemini-3.5-flash-high":   "gemini-3.5-flash-high",
+	"gemini-3.5-flash-medium": "gemini-3.5-flash-medium",
 	// Gemini 3 image 兼容映射（向 3.1 image 迁移）
 	"gemini-3-pro-image":         "gemini-3.1-flash-image",
 	"gemini-3-pro-image-preview": "gemini-3.1-flash-image",

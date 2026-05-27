@@ -29,7 +29,13 @@ func (e *ForbiddenError) Error() string {
 	return fmt.Sprintf("fetchAvailableModels 失败 (HTTP %d): %s", e.StatusCode, e.Body)
 }
 
-// NewAPIRequestWithURL 使用指定的 base URL 创建 Antigravity API 请求（v1internal 端点）
+// NewAPIRequestWithURL 使用指定的 base URL 创建 Antigravity API 请求（v1internal 端点）。
+//
+// Antigravity wire-model 转换在这里集中执行：进入的 body 仍带有面向用户的
+// model ID（例如 gemini-3.5-flash-high），出去的 body 里 `model` 字段
+// 已经被改写成 Google cloudcode-pa 后端目前接受的 wire 名（例如
+// gemini-3-flash-agent）。镜像 router-for-me/CLIProxyAPI PR #3490
+// internal/runtime/executor/antigravity_executor.go::buildRequest。
 func NewAPIRequestWithURL(ctx context.Context, baseURL, action, accessToken string, body []byte) (*http.Request, error) {
 	// 构建 URL，流式请求添加 ?alt=sse 参数
 	apiURL := fmt.Sprintf("%s/v1internal:%s", baseURL, action)
@@ -37,6 +43,12 @@ func NewAPIRequestWithURL(ctx context.Context, baseURL, action, accessToken stri
 	if isStream {
 		apiURL += "?alt=sse"
 	}
+
+	// Resolve wire-model name and default thinking levels before serializing.
+	// Returns the input unchanged for bodies that don't carry a `model` field
+	// (e.g. loadCodeAssist / onboardUser).
+	body = ApplyWireModelToBody(body)
+	sessionID := ExtractSessionID(body)
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, apiURL, bytes.NewReader(body))
 	if err != nil {
@@ -46,11 +58,17 @@ func NewAPIRequestWithURL(ctx context.Context, baseURL, action, accessToken stri
 	// Headers per Antigravity API spec (NoeFabris/opencode-antigravity-auth):
 	// Authorization, Content-Type, User-Agent, X-Goog-Api-Client, Client-Metadata.
 	// Real Antigravity client emits all five on every cloudcode-pa request.
+	// Plus x-request-source / X-Machine-Session-Id added in Antigravity 2.0.x
+	// (mirrored from CLIProxyAPI PR #3490).
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer "+accessToken)
 	req.Header.Set("User-Agent", GetUserAgentForContext(ctx))
 	req.Header.Set("X-Goog-Api-Client", AntigravityXGoogApiClient)
 	req.Header.Set("Client-Metadata", AntigravityClientMetadata)
+	req.Header.Set("x-request-source", "local")
+	if sessionID != "" {
+		req.Header.Set("X-Machine-Session-Id", sessionID)
+	}
 
 	return req, nil
 }

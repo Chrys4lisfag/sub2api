@@ -34,7 +34,9 @@ const (
 	AntigravityUserAgentVersionEnv = "ANTIGRAVITY_USER_AGENT_VERSION"
 
 	// DefaultUserAgentVersion 是未通过环境变量或后台设置覆盖时使用的默认版本号。
-	DefaultUserAgentVersion = "1.23.2"
+	// Bumped to 2.0.1 to track the Antigravity 2.0.x line (the release endpoint
+	// currently reports 2.0.1 first). Mirrors router-for-me/CLIProxyAPI PR #3490.
+	DefaultUserAgentVersion = "2.0.1"
 
 	// 固定的 redirect_uri（用户需手动复制 code）
 	RedirectURI = "http://localhost:8085/callback"
@@ -58,6 +60,11 @@ const (
 	// .sandbox.googleapis.com host returned chronic 503/429; upstream
 	// gcli2api flipped to the prod daily host in commit 944b9e7 (2026-04-30).
 	antigravityDailyBaseURL = "https://daily-cloudcode-pa.googleapis.com"
+	// autopush-cloudcode-pa.sandbox.googleapis.com is the public "autopush"
+	// rollout target; used as a 404-fallback for newly-launched models
+	// (e.g. Gemini 3.5 Flash) whose entries haven't propagated to daily/prod
+	// yet. Mirrors router-for-me/CLIProxyAPI PR #3490 fallback chain.
+	antigravityAutopushBaseURL = "https://autopush-cloudcode-pa.sandbox.googleapis.com"
 )
 
 // defaultUserAgentVersion is overridable via the ANTIGRAVITY_USER_AGENT_VERSION
@@ -171,37 +178,48 @@ func getClientSecret() (string, error) {
 }
 
 // BaseURLs 定义 Antigravity API 端点（与 Antigravity-Manager 保持一致）
+//
+// 顺序：prod 优先，daily / autopush sandbox 作为新模型尚未在 prod 上线时的回退。
+// Antigravity 2.0.x 新增的 Gemini 3.5 Flash 变体目前先在 autopush 上线，
+// 所以 ForwardBaseURLs() 会把 daily -> autopush -> prod 串成 fallback chain。
 var BaseURLs = []string{
-	antigravityProdBaseURL,  // prod (优先)
-	antigravityDailyBaseURL, // daily (备用)
+	antigravityProdBaseURL,     // prod (canonical)
+	antigravityDailyBaseURL,    // daily (preview)
+	antigravityAutopushBaseURL, // autopush sandbox (early-rollout fallback)
 }
 
 // BaseURL 默认 URL（保持向后兼容）
 var BaseURL = BaseURLs[0]
 
-// ForwardBaseURLs 返回 API 转发用的 URL 顺序（daily 优先）
+// ForwardBaseURLs 返回 API 转发用的 URL 顺序：daily -> autopush sandbox -> prod。
+// daily 仍然优先（最大兼容性），404 / 503 时降级到 autopush（拿到刚上线的 wire
+// model 别名），最后落回 prod。镜像 router-for-me/CLIProxyAPI PR #3490。
 func ForwardBaseURLs() []string {
 	if len(BaseURLs) == 0 {
 		return nil
 	}
-	urls := append([]string(nil), BaseURLs...)
-	dailyIndex := -1
-	for i, url := range urls {
-		if url == antigravityDailyBaseURL {
-			dailyIndex = i
-			break
+	preferred := []string{antigravityDailyBaseURL, antigravityAutopushBaseURL, antigravityProdBaseURL}
+	seen := make(map[string]struct{}, len(preferred))
+	reordered := make([]string, 0, len(BaseURLs)+len(preferred))
+	for _, url := range preferred {
+		if _, dup := seen[url]; dup {
+			continue
+		}
+		for _, candidate := range BaseURLs {
+			if candidate == url {
+				reordered = append(reordered, url)
+				seen[url] = struct{}{}
+				break
+			}
 		}
 	}
-	if dailyIndex <= 0 {
-		return urls
-	}
-	reordered := make([]string, 0, len(urls))
-	reordered = append(reordered, urls[dailyIndex])
-	for i, url := range urls {
-		if i == dailyIndex {
+	// append any remaining BaseURLs the preferred list did not cover
+	for _, url := range BaseURLs {
+		if _, dup := seen[url]; dup {
 			continue
 		}
 		reordered = append(reordered, url)
+		seen[url] = struct{}{}
 	}
 	return reordered
 }
