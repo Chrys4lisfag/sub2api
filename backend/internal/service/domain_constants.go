@@ -37,11 +37,19 @@ const (
 
 // Platform constants
 const (
-	PlatformAnthropic   = domain.PlatformAnthropic
-	PlatformOpenAI      = domain.PlatformOpenAI
-	PlatformGemini      = domain.PlatformGemini
-	PlatformAntigravity = domain.PlatformAntigravity
+	PlatformAnthropic         = domain.PlatformAnthropic
+	PlatformOpenAI            = domain.PlatformOpenAI
+	PlatformGemini            = domain.PlatformGemini
+	PlatformAntigravity       = domain.PlatformAntigravity
+	PlatformAntigravityNative = domain.PlatformAntigravityNative
 )
+
+// IsAntigravityFamily re-exports domain.IsAntigravityFamily for service-layer
+// callers that branch on antigravity-class accounts (covers both the legacy
+// in-tree backend and the agymimic-backed native backend).
+func IsAntigravityFamily(platform string) bool {
+	return domain.IsAntigravityFamily(platform)
+}
 
 // AllowedQuotaPlatforms 是允许设置 user × platform quota 的平台列表（单一权威来源）。
 // ent/schema/user_platform_quota.go 的 Validate 函数独立维护（构建期约束），
@@ -51,6 +59,7 @@ var AllowedQuotaPlatforms = []string{
 	PlatformOpenAI,
 	PlatformGemini,
 	PlatformAntigravity,
+	PlatformAntigravityNative,
 }
 
 // IsAllowedQuotaPlatform 报告 s 是否为合法的 quota platform 标识。

@@ -1548,7 +1548,7 @@ const canPreCheck = () =>
   enableGroups.value &&
   groupIds.value.length > 0 &&
   targetSelectedPlatforms.value.length === 1 &&
-  (targetSelectedPlatforms.value[0] === 'antigravity' || targetSelectedPlatforms.value[0] === 'anthropic')
+  (targetSelectedPlatforms.value[0] === 'antigravity' || targetSelectedPlatforms.value[0] === 'antigravity_native' || targetSelectedPlatforms.value[0] === 'anthropic')
 
 const handleClose = () => {
   showMixedChannelWarning.value = false

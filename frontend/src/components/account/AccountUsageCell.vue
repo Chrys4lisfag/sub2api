@@ -167,7 +167,7 @@
     </template>
 
     <!-- Antigravity OAuth accounts: fetch usage from API -->
-    <template v-else-if="account.platform === 'antigravity' && account.type === 'oauth'">
+    <template v-else-if="(account.platform === 'antigravity' || account.platform === 'antigravity_native') && account.type === 'oauth'">
       <!-- 账户类型徽章 -->
       <div v-if="antigravityTierLabel" class="mb-1 flex items-center gap-1">
         <span
@@ -558,7 +558,7 @@ const shouldFetchUsage = computed(() => {
   if (props.account.platform === 'gemini') {
     return true
   }
-  if (props.account.platform === 'antigravity') {
+  if (props.account.platform === 'antigravity' || props.account.platform === 'antigravity_native') {
     return props.account.type === 'oauth'
   }
   if (props.account.platform === 'openai') {

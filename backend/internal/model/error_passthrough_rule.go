@@ -32,15 +32,16 @@ const MatchModeAll = "all"
 
 // 支持的平台常量
 const (
-	PlatformAnthropic   = "anthropic"
-	PlatformOpenAI      = "openai"
-	PlatformGemini      = "gemini"
-	PlatformAntigravity = "antigravity"
+	PlatformAnthropic         = "anthropic"
+	PlatformOpenAI            = "openai"
+	PlatformGemini            = "gemini"
+	PlatformAntigravity       = "antigravity"
+	PlatformAntigravityNative = "antigravity_native"
 )
 
 // AllPlatforms 返回所有支持的平台列表
 func AllPlatforms() []string {
-	return []string{PlatformAnthropic, PlatformOpenAI, PlatformGemini, PlatformAntigravity}
+	return []string{PlatformAnthropic, PlatformOpenAI, PlatformGemini, PlatformAntigravity, PlatformAntigravityNative}
 }
 
 // Validate 验证规则配置的有效性

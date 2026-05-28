@@ -47,7 +47,7 @@ func (h *GatewayHandler) GeminiV1BetaListModels(c *gin.Context) {
 	}
 
 	// 强制 antigravity 模式：返回 antigravity 支持的模型列表
-	if forcePlatform == service.PlatformAntigravity {
+	if service.IsAntigravityFamily(forcePlatform) {
 		c.JSON(http.StatusOK, antigravity.FallbackGeminiModelsList())
 		return
 	}
@@ -100,7 +100,7 @@ func (h *GatewayHandler) GeminiV1BetaGetModel(c *gin.Context) {
 	}
 
 	// 强制 antigravity 模式：返回 antigravity 模型信息
-	if forcePlatform == service.PlatformAntigravity {
+	if service.IsAntigravityFamily(forcePlatform) {
 		c.JSON(http.StatusOK, antigravity.FallbackGeminiModel(modelName))
 		return
 	}
@@ -477,9 +477,12 @@ func (h *GatewayHandler) GeminiV1BetaModels(c *gin.Context) {
 		if fs.SwitchCount > 0 {
 			requestCtx = service.WithAccountSwitchCount(requestCtx, fs.SwitchCount, h.metadataBridgeEnabled())
 		}
-		if account.Platform == service.PlatformAntigravity && account.Type != service.AccountTypeAPIKey {
+		switch {
+		case account.Platform == service.PlatformAntigravity && account.Type != service.AccountTypeAPIKey:
 			result, err = h.antigravityGatewayService.ForwardGemini(requestCtx, c, account, modelName, action, stream, body, hasBoundSession)
-		} else {
+		case account.Platform == service.PlatformAntigravityNative && account.Type != service.AccountTypeAPIKey:
+			result, err = h.antigravityNativeGatewayService.ForwardGemini(requestCtx, c, account, modelName, action, stream, body, hasBoundSession)
+		default:
 			result, err = h.geminiCompatService.ForwardNative(requestCtx, c, account, modelName, action, stream, body)
 		}
 		if accountReleaseFunc != nil {

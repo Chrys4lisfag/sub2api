@@ -39,7 +39,7 @@
                 ? 'https://api.openai.com'
                 : account.platform === 'gemini'
                   ? 'https://generativelanguage.googleapis.com'
-                  : account.platform === 'antigravity'
+                  : account.platform === 'antigravity' || account.platform === 'antigravity_native'
                     ? 'https://cloudcode-pa.googleapis.com'
                     : 'https://api.anthropic.com'
             "
@@ -61,7 +61,7 @@
                 ? 'sk-proj-...'
                 : account.platform === 'gemini'
                   ? 'AIza...'
-                  : account.platform === 'antigravity'
+                  : account.platform === 'antigravity' || account.platform === 'antigravity_native'
                     ? 'sk-...'
                     : 'sk-ant-...'
             "
@@ -70,7 +70,7 @@
         </div>
 
         <!-- Model Restriction Section (不适用于 Antigravity) -->
-        <div v-if="account.platform !== 'antigravity'" class="border-t border-gray-200 pt-4 dark:border-dark-600">
+        <div v-if="account.platform !== 'antigravity' && account.platform !== 'antigravity_native'" class="border-t border-gray-200 pt-4 dark:border-dark-600">
           <label class="input-label">{{ t('admin.accounts.modelRestriction') }}</label>
 
           <div
@@ -1001,7 +1001,7 @@
 
       <!-- Antigravity model restriction (applies to all antigravity types) -->
       <!-- Antigravity 只支持模型映射模式，不支持白名单模式 -->
-      <div v-if="account.platform === 'antigravity'" class="border-t border-gray-200 pt-4 dark:border-dark-600">
+      <div v-if="account.platform === 'antigravity' || account.platform === 'antigravity_native'" class="border-t border-gray-200 pt-4 dark:border-dark-600">
         <label class="input-label">{{ t('admin.accounts.modelRestriction') }}</label>
 
         <!-- Mapping Mode Only (no toggle for Antigravity) -->
@@ -1250,7 +1250,7 @@
 
       <!-- Intercept Warmup Requests (Anthropic/Antigravity) -->
       <div
-        v-if="account?.platform === 'anthropic' || account?.platform === 'antigravity'"
+        v-if="account?.platform === 'anthropic' || account?.platform === 'antigravity' || account?.platform === 'antigravity_native'"
         class="border-t border-gray-200 pt-4 dark:border-dark-600"
       >
         <div class="flex items-center justify-between">
@@ -2157,7 +2157,7 @@
         </div>
 
         <!-- Mixed Scheduling (only for antigravity accounts, read-only in edit mode) -->
-        <div v-if="account?.platform === 'antigravity'" class="flex items-center gap-2">
+        <div v-if="account?.platform === 'antigravity' || account?.platform === 'antigravity_native'" class="flex items-center gap-2">
           <label class="flex cursor-not-allowed items-center gap-2 opacity-60">
             <input
               type="checkbox"
@@ -2186,7 +2186,7 @@
             </div>
           </div>
         </div>
-        <div v-if="account?.platform === 'antigravity'" class="mt-3 flex items-center gap-2">
+        <div v-if="account?.platform === 'antigravity' || account?.platform === 'antigravity_native'" class="mt-3 flex items-center gap-2">
           <label class="flex cursor-pointer items-center gap-2">
             <input
               type="checkbox"
@@ -2342,6 +2342,7 @@ const baseUrlHint = computed(() => {
 })
 
 const antigravityPresetMappings = computed(() => getPresetMappingsByPlatform('antigravity'))
+const antigravityNativePresetMappings = computed(() => getPresetMappingsByPlatform('antigravity_native'))
 const bedrockPresets = computed(() => getPresetMappingsByPlatform('bedrock'))
 
 // Model mapping type
@@ -2861,7 +2862,7 @@ const syncFormFromAccount = (newAccount: Account | null) => {
   }
 
   // Load antigravity model mapping (Antigravity 只支持映射模式)
-  if (newAccount.platform === 'antigravity') {
+  if (newAccount.platform === 'antigravity' || newAccount.platform === 'antigravity_native') {
     const credentials = newAccount.credentials as Record<string, unknown> | undefined
 
     // Antigravity 始终使用映射模式
@@ -3351,7 +3352,7 @@ function toPositiveNumber(value: unknown) {
   return Math.trunc(num)
 }
 
-const needsMixedChannelCheck = () => props.account?.platform === 'antigravity' || props.account?.platform === 'anthropic'
+const needsMixedChannelCheck = () => props.account?.platform === 'antigravity' || props.account?.platform === 'antigravity_native' || props.account?.platform === 'anthropic'
 
 const buildMixedChannelDetails = (resp?: CheckMixedChannelResponse) => {
   const details = resp?.details
@@ -3747,7 +3748,7 @@ const handleSubmit = async () => {
 
     // Antigravity: persist model mapping to credentials (applies to all antigravity types)
     // Antigravity 只支持映射模式
-    if (props.account.platform === 'antigravity') {
+    if (props.account.platform === 'antigravity' || props.account.platform === 'antigravity_native') {
       const currentCredentials = (updatePayload.credentials as Record<string, unknown>) ||
         ((props.account.credentials as Record<string, unknown>) || {})
       const newCredentials: Record<string, unknown> = { ...currentCredentials }
@@ -3770,7 +3771,7 @@ const handleSubmit = async () => {
     }
 
     // For antigravity accounts, handle mixed_scheduling and allow_overages in extra
-    if (props.account.platform === 'antigravity') {
+    if (props.account.platform === 'antigravity' || props.account.platform === 'antigravity_native') {
       const currentExtra = (props.account.extra as Record<string, unknown>) || {}
       const newExtra: Record<string, unknown> = { ...currentExtra }
       if (mixedScheduling.value) {

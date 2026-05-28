@@ -280,7 +280,7 @@ const supportsGeminiImageTest = computed(() => {
   const modelID = selectedModelId.value.toLowerCase()
   if (!modelID.startsWith('gemini-') || !modelID.includes('-image')) return false
 
-  return props.account?.platform === 'gemini' || (props.account?.platform === 'antigravity' && props.account?.type === 'apikey')
+  return props.account?.platform === 'gemini' || ((props.account?.platform === 'antigravity' || props.account?.platform === 'antigravity_native') && props.account?.type === 'apikey')
 })
 
 const supportsOpenAIImageTest = computed(() => {
@@ -329,7 +329,7 @@ const loadAvailableModels = async () => {
   selectedModelId.value = '' // Reset selection before loading
   try {
     const models = await adminAPI.accounts.getAvailableModels(props.account.id)
-    availableModels.value = props.account.platform === 'gemini' || props.account.platform === 'antigravity'
+    availableModels.value = props.account.platform === 'gemini' || props.account.platform === 'antigravity' || props.account.platform === 'antigravity_native'
       ? sortTestModels(models)
       : models
     // Default selection by platform

@@ -218,6 +218,39 @@ func RegisterGatewayRoutes(
 		antigravityV1Beta.POST("/models/*modelAction", h.Gateway.GeminiV1BetaModels)
 	}
 
+	// Antigravity Native (agymimic-backed) parallel routes — same handlers,
+	// but ForcePlatform pins to PlatformAntigravityNative so only native
+	// accounts get scheduled. Clients that want native explicitly hit
+	// /antigravity-native/v1* instead of /antigravity/v1*.
+	antigravityNativeV1 := r.Group("/antigravity-native/v1")
+	antigravityNativeV1.Use(bodyLimit)
+	antigravityNativeV1.Use(clientRequestID)
+	antigravityNativeV1.Use(opsErrorLogger)
+	antigravityNativeV1.Use(endpointNorm)
+	antigravityNativeV1.Use(middleware.ForcePlatform(service.PlatformAntigravityNative))
+	antigravityNativeV1.Use(gin.HandlerFunc(apiKeyAuth))
+	antigravityNativeV1.Use(requireGroupAnthropic)
+	{
+		antigravityNativeV1.POST("/messages", h.Gateway.Messages)
+		antigravityNativeV1.POST("/messages/count_tokens", h.Gateway.CountTokens)
+		antigravityNativeV1.GET("/models", h.Gateway.AntigravityModels)
+		antigravityNativeV1.GET("/usage", h.Gateway.Usage)
+	}
+
+	antigravityNativeV1Beta := r.Group("/antigravity-native/v1beta")
+	antigravityNativeV1Beta.Use(bodyLimit)
+	antigravityNativeV1Beta.Use(clientRequestID)
+	antigravityNativeV1Beta.Use(opsErrorLogger)
+	antigravityNativeV1Beta.Use(endpointNorm)
+	antigravityNativeV1Beta.Use(middleware.ForcePlatform(service.PlatformAntigravityNative))
+	antigravityNativeV1Beta.Use(middleware.APIKeyAuthWithSubscriptionGoogle(apiKeyService, subscriptionService, cfg))
+	antigravityNativeV1Beta.Use(requireGroupGoogle)
+	{
+		antigravityNativeV1Beta.GET("/models", h.Gateway.GeminiV1BetaListModels)
+		antigravityNativeV1Beta.GET("/models/:model", h.Gateway.GeminiV1BetaGetModel)
+		antigravityNativeV1Beta.POST("/models/*modelAction", h.Gateway.GeminiV1BetaModels)
+	}
+
 }
 
 // getGroupPlatform extracts the group platform from the API Key stored in context.

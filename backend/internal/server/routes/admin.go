@@ -38,8 +38,11 @@ func RegisterAdminRoutes(
 		// Gemini OAuth
 		registerGeminiOAuthRoutes(admin, h)
 
-		// Antigravity OAuth
+		// Antigravity OAuth (legacy in-tree backend)
 		registerAntigravityOAuthRoutes(admin, h)
+
+		// Antigravity Native OAuth (github.com/koval/agymimic-backed)
+		registerAntigravityNativeOAuthRoutes(admin, h)
 
 		// 代理管理
 		registerProxyRoutes(admin, h)
@@ -364,6 +367,15 @@ func registerAntigravityOAuthRoutes(admin *gin.RouterGroup, h *handler.Handlers)
 		antigravity.POST("/oauth/auth-url", h.Admin.AntigravityOAuth.GenerateAuthURL)
 		antigravity.POST("/oauth/exchange-code", h.Admin.AntigravityOAuth.ExchangeCode)
 		antigravity.POST("/oauth/refresh-token", h.Admin.AntigravityOAuth.RefreshToken)
+	}
+}
+
+func registerAntigravityNativeOAuthRoutes(admin *gin.RouterGroup, h *handler.Handlers) {
+	g := admin.Group("/antigravity-native")
+	{
+		g.POST("/oauth/auth-url", h.Admin.AntigravityNativeOAuth.GenerateAuthURL)
+		g.POST("/oauth/exchange-code", h.Admin.AntigravityNativeOAuth.ExchangeCode)
+		g.POST("/oauth/refresh-token", h.Admin.AntigravityNativeOAuth.RefreshToken)
 	}
 }
 

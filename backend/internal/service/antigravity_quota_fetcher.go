@@ -37,7 +37,7 @@ func NewAntigravityQuotaFetcher(proxyRepo ProxyRepository) *AntigravityQuotaFetc
 
 // CanFetch 检查是否可以获取此账户的额度
 func (f *AntigravityQuotaFetcher) CanFetch(account *Account) bool {
-	if account.Platform != PlatformAntigravity {
+	if !IsAntigravityFamily(account.Platform) {
 		return false
 	}
 	accessToken := account.GetCredential("access_token")

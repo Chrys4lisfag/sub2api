@@ -40,7 +40,8 @@ var gatewayCompatibilityMetricsLogCounter atomic.Uint64
 type GatewayHandler struct {
 	gatewayService            *service.GatewayService
 	geminiCompatService       *service.GeminiMessagesCompatService
-	antigravityGatewayService *service.AntigravityGatewayService
+	antigravityGatewayService       *service.AntigravityGatewayService
+	antigravityNativeGatewayService *service.AntigravityNativeGatewayService
 	userService               *service.UserService
 	billingCacheService       *service.BillingCacheService
 	usageService              *service.UsageService
@@ -61,6 +62,7 @@ func NewGatewayHandler(
 	gatewayService *service.GatewayService,
 	geminiCompatService *service.GeminiMessagesCompatService,
 	antigravityGatewayService *service.AntigravityGatewayService,
+	antigravityNativeGatewayService *service.AntigravityNativeGatewayService,
 	userService *service.UserService,
 	concurrencyService *service.ConcurrencyService,
 	billingCacheService *service.BillingCacheService,
@@ -95,7 +97,8 @@ func NewGatewayHandler(
 	return &GatewayHandler{
 		gatewayService:            gatewayService,
 		geminiCompatService:       geminiCompatService,
-		antigravityGatewayService: antigravityGatewayService,
+		antigravityGatewayService:       antigravityGatewayService,
+		antigravityNativeGatewayService: antigravityNativeGatewayService,
 		userService:               userService,
 		billingCacheService:       billingCacheService,
 		usageService:              usageService,
@@ -439,9 +442,12 @@ func (h *GatewayHandler) Messages(c *gin.Context) {
 			}
 			// 记录 Forward 前已写入字节数，Forward 后若增加则说明 SSE 内容已发，禁止 failover
 			writerSizeBeforeForward := c.Writer.Size()
-			if account.Platform == service.PlatformAntigravity {
+			switch account.Platform {
+			case service.PlatformAntigravity:
 				result, err = h.antigravityGatewayService.ForwardGemini(requestCtx, c, account, reqModel, "generateContent", reqStream, body, hasBoundSession)
-			} else {
+			case service.PlatformAntigravityNative:
+				result, err = h.antigravityNativeGatewayService.ForwardGemini(requestCtx, c, account, reqModel, "generateContent", reqStream, body, hasBoundSession)
+			default:
 				result, err = h.geminiCompatService.Forward(requestCtx, c, account, body)
 			}
 			if accountReleaseFunc != nil {
@@ -761,9 +767,12 @@ func (h *GatewayHandler) Messages(c *gin.Context) {
 			}
 			// 记录 Forward 前已写入字节数，Forward 后若增加则说明 SSE 内容已发，禁止 failover
 			writerSizeBeforeForward := c.Writer.Size()
-			if account.Platform == service.PlatformAntigravity && account.Type != service.AccountTypeAPIKey {
+			switch {
+			case account.Platform == service.PlatformAntigravity && account.Type != service.AccountTypeAPIKey:
 				result, err = h.antigravityGatewayService.Forward(requestCtx, c, account, body, hasBoundSession)
-			} else {
+			case account.Platform == service.PlatformAntigravityNative && account.Type != service.AccountTypeAPIKey:
+				result, err = h.antigravityNativeGatewayService.Forward(requestCtx, c, account, body, hasBoundSession)
+			default:
 				result, err = h.gatewayService.Forward(requestCtx, c, account, parsedReq)
 			}
 
@@ -1107,7 +1116,7 @@ func defaultModelIDsForPlatform(platform string) []string {
 			ids = append(ids, model.ID)
 		}
 		return ids
-	case service.PlatformAntigravity:
+	case service.PlatformAntigravity, service.PlatformAntigravityNative:
 		models := antigravity.DefaultModels()
 		ids := make([]string, 0, len(models))
 		for _, model := range models {

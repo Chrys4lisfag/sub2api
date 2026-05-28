@@ -147,6 +147,19 @@
             <Icon name="cloud" size="sm" />
             Antigravity
           </button>
+          <button
+            type="button"
+            @click="form.platform = 'antigravity_native'"
+            :class="[
+              'flex flex-1 items-center justify-center gap-2 rounded-md px-4 py-2.5 text-sm font-medium transition-all',
+              form.platform === 'antigravity_native'
+                ? 'bg-white text-purple-600 shadow-sm dark:bg-dark-600 dark:text-purple-400'
+                : 'text-gray-600 hover:text-gray-900 dark:text-gray-400 dark:hover:text-gray-200'
+            ]"
+          >
+            <Icon name="cloud" size="sm" />
+            Antigravity Native
+          </button>
         </div>
       </div>
 
@@ -717,7 +730,7 @@
       </div>
 
       <!-- Account Type Selection (Antigravity - OAuth or Upstream) -->
-      <div v-if="form.platform === 'antigravity'">
+      <div v-if="form.platform === 'antigravity' || form.platform === 'antigravity_native'">
         <label class="input-label">{{ t('admin.accounts.accountType') }}</label>
         <div class="mt-2 grid grid-cols-2 gap-3">
           <button
@@ -775,7 +788,7 @@
       </div>
 
       <!-- Upstream config (only for Antigravity upstream type) -->
-      <div v-if="form.platform === 'antigravity' && antigravityAccountType === 'upstream'" class="space-y-4">
+      <div v-if="(form.platform === 'antigravity' || form.platform === 'antigravity_native') && antigravityAccountType === 'upstream'" class="space-y-4">
         <div>
           <label class="input-label">{{ t('admin.accounts.upstream.baseUrl') }}</label>
           <input
@@ -892,7 +905,7 @@
 
       <!-- Antigravity model restriction (applies to OAuth + Upstream) -->
       <!-- Antigravity 只支持模型映射模式，不支持白名单模式 -->
-      <div v-if="form.platform === 'antigravity'" class="border-t border-gray-200 pt-4 dark:border-dark-600">
+      <div v-if="form.platform === 'antigravity' || form.platform === 'antigravity_native'" class="border-t border-gray-200 pt-4 dark:border-dark-600">
         <label class="input-label">{{ t('admin.accounts.modelRestriction') }}</label>
 
         <!-- Mapping Mode Only (no toggle for Antigravity) -->
@@ -1009,7 +1022,7 @@
       </div>
 
       <!-- API Key input (only for apikey type, excluding Antigravity which has its own fields) -->
-      <div v-if="form.type === 'apikey' && form.platform !== 'antigravity'" class="space-y-4">
+      <div v-if="form.type === 'apikey' && form.platform !== 'antigravity' && form.platform !== 'antigravity_native'" class="space-y-4">
         <div>
           <label class="input-label">{{ t('admin.accounts.baseUrl') }}</label>
           <input
@@ -2052,7 +2065,7 @@
 
       <!-- Intercept Warmup Requests (Anthropic/Antigravity) -->
       <div
-        v-if="form.platform === 'anthropic' || form.platform === 'antigravity'"
+        v-if="form.platform === 'anthropic' || form.platform === 'antigravity' || form.platform === 'antigravity_native'"
         class="border-t border-gray-200 pt-4 dark:border-dark-600"
       >
         <div class="flex items-center justify-between">
@@ -2728,7 +2741,7 @@
 
       <div class="border-t border-gray-200 pt-4 dark:border-dark-600">
         <!-- Mixed Scheduling (only for antigravity accounts) -->
-        <div v-if="form.platform === 'antigravity'" class="flex items-center gap-2">
+        <div v-if="form.platform === 'antigravity' || form.platform === 'antigravity_native'" class="flex items-center gap-2">
           <label class="flex cursor-pointer items-center gap-2">
             <input
               type="checkbox"
@@ -2756,7 +2769,7 @@
             </div>
           </div>
         </div>
-        <div v-if="form.platform === 'antigravity'" class="mt-3 flex items-center gap-2">
+        <div v-if="form.platform === 'antigravity' || form.platform === 'antigravity_native'" class="mt-3 flex items-center gap-2">
           <label class="flex cursor-pointer items-center gap-2">
             <input
               type="checkbox"
@@ -2810,7 +2823,7 @@
         :show-proxy-warning="form.platform !== 'openai' && !!form.proxy_id"
         :allow-multiple="form.platform === 'anthropic'"
         :show-cookie-option="form.platform === 'anthropic'"
-        :show-refresh-token-option="form.platform === 'openai' || form.platform === 'antigravity'"
+        :show-refresh-token-option="form.platform === 'openai' || form.platform === 'antigravity' || form.platform === 'antigravity_native'"
         :show-mobile-refresh-token-option="form.platform === 'openai'"
         :show-session-token-option="false"
         :show-access-token-option="false"
@@ -3163,6 +3176,7 @@ import {
 import { useOpenAIOAuth } from '@/composables/useOpenAIOAuth'
 import { useGeminiOAuth } from '@/composables/useGeminiOAuth'
 import { useAntigravityOAuth } from '@/composables/useAntigravityOAuth'
+import { useAntigravityNativeOAuth } from '@/composables/useAntigravityNativeOAuth'
 import type {
   Proxy,
   AdminGroup,
@@ -3218,6 +3232,7 @@ const oauthStepTitle = computed(() => {
   if (form.platform === 'openai') return t('admin.accounts.oauth.openai.title')
   if (form.platform === 'gemini') return t('admin.accounts.oauth.gemini.title')
   if (form.platform === 'antigravity') return t('admin.accounts.oauth.antigravity.title')
+  if (form.platform === 'antigravity_native') return t('admin.accounts.oauth.antigravity.title')
   return t('admin.accounts.oauth.title')
 })
 
@@ -3253,12 +3268,14 @@ const oauth = useAccountOAuth() // For Anthropic OAuth
 const openaiOAuth = useOpenAIOAuth() // For OpenAI OAuth
 const geminiOAuth = useGeminiOAuth() // For Gemini OAuth
 const antigravityOAuth = useAntigravityOAuth() // For Antigravity OAuth
+const antigravityNativeOAuth = useAntigravityNativeOAuth() // For Antigravity Native OAuth
 
 // Computed: current OAuth state for template binding
 const currentAuthUrl = computed(() => {
   if (form.platform === 'openai') return openaiOAuth.authUrl.value
   if (form.platform === 'gemini') return geminiOAuth.authUrl.value
   if (form.platform === 'antigravity') return antigravityOAuth.authUrl.value
+  if (form.platform === 'antigravity_native') return antigravityNativeOAuth.authUrl.value
   return oauth.authUrl.value
 })
 
@@ -3266,6 +3283,7 @@ const currentSessionId = computed(() => {
   if (form.platform === 'openai') return openaiOAuth.sessionId.value
   if (form.platform === 'gemini') return geminiOAuth.sessionId.value
   if (form.platform === 'antigravity') return antigravityOAuth.sessionId.value
+  if (form.platform === 'antigravity_native') return antigravityNativeOAuth.sessionId.value
   return oauth.sessionId.value
 })
 
@@ -3273,6 +3291,7 @@ const currentOAuthLoading = computed(() => {
   if (form.platform === 'openai') return openaiOAuth.loading.value
   if (form.platform === 'gemini') return geminiOAuth.loading.value
   if (form.platform === 'antigravity') return antigravityOAuth.loading.value
+  if (form.platform === 'antigravity_native') return antigravityNativeOAuth.loading.value
   return oauth.loading.value
 })
 
@@ -3280,6 +3299,7 @@ const currentOAuthError = computed(() => {
   if (form.platform === 'openai') return openaiOAuth.error.value
   if (form.platform === 'gemini') return geminiOAuth.error.value
   if (form.platform === 'antigravity') return antigravityOAuth.error.value
+  if (form.platform === 'antigravity_native') return antigravityNativeOAuth.error.value
   return oauth.error.value
 })
 
@@ -3378,6 +3398,7 @@ const antigravityModelRestrictionMode = ref<'whitelist' | 'mapping'>('whitelist'
 const antigravityWhitelistModels = ref<string[]>([])
 const antigravityModelMappings = ref<ModelMapping[]>([])
 const antigravityPresetMappings = computed(() => getPresetMappingsByPlatform('antigravity'))
+const antigravityNativePresetMappings = computed(() => getPresetMappingsByPlatform('antigravity_native'))
 const bedrockPresets = computed(() => getPresetMappingsByPlatform('bedrock'))
 
 // Bedrock credentials
@@ -3579,7 +3600,7 @@ const form = reactive({
 // Helper to check if current type needs OAuth flow
 const isOAuthFlow = computed(() => {
   // Antigravity upstream 类型不需要 OAuth 流程
-  if (form.platform === 'antigravity' && antigravityAccountType.value === 'upstream') {
+  if ((form.platform === 'antigravity' || form.platform === 'antigravity_native') && antigravityAccountType.value === 'upstream') {
     return false
   }
   // Bedrock 类型不需要 OAuth 流程
@@ -3611,6 +3632,9 @@ const canExchangeCode = computed(() => {
   if (form.platform === 'antigravity') {
     return authCode.trim() && antigravityOAuth.sessionId.value && !antigravityOAuth.loading.value
   }
+  if (form.platform === 'antigravity_native') {
+    return authCode.trim() && antigravityNativeOAuth.sessionId.value && !antigravityNativeOAuth.loading.value
+  }
   return authCode.trim() && oauth.sessionId.value && !oauth.loading.value
 })
 
@@ -3626,7 +3650,7 @@ watch(
       // Modal opened - fill related models
       allowedModels.value = [...getModelsByPlatform(form.platform)]
       // Antigravity: 默认使用映射模式并填充默认映射
-      if (form.platform === 'antigravity') {
+      if (form.platform === 'antigravity' || form.platform === 'antigravity_native') {
         antigravityModelRestrictionMode.value = 'mapping'
         fetchAntigravityDefaultMappings().then(mappings => {
           antigravityModelMappings.value = [...mappings]
@@ -3648,7 +3672,7 @@ watch(
   [accountCategory, addMethod, antigravityAccountType, () => form.platform],
   ([category, method, agType]) => {
     // Antigravity upstream 类型（实际创建为 apikey）
-    if (form.platform === 'antigravity' && agType === 'upstream') {
+    if ((form.platform === 'antigravity' || form.platform === 'antigravity_native') && agType === 'upstream') {
       form.type = 'apikey'
       return
     }
@@ -3683,7 +3707,7 @@ watch(
     allowedModels.value = []
     modelMappings.value = []
     // Antigravity: 默认使用映射模式并填充默认映射
-    if (newPlatform === 'antigravity') {
+    if (newPlatform === 'antigravity' || newPlatform === 'antigravity_native') {
       antigravityModelRestrictionMode.value = 'mapping'
       fetchAntigravityDefaultMappings().then(mappings => {
         antigravityModelMappings.value = [...mappings]
@@ -3716,7 +3740,7 @@ watch(
     vertexClientEmail.value = ''
     vertexLocation.value = 'global'
     // Reset Anthropic/Antigravity-specific settings when switching to other platforms
-    if (newPlatform !== 'anthropic' && newPlatform !== 'antigravity') {
+    if (newPlatform !== 'anthropic' && newPlatform !== 'antigravity' && newPlatform !== 'antigravity_native') {
       interceptWarmupRequests.value = false
     }
     if (newPlatform !== 'openai') {
@@ -3735,6 +3759,7 @@ watch(
 
     geminiOAuth.resetState()
     antigravityOAuth.resetState()
+    antigravityNativeOAuth.resetState()
   }
 )
 
@@ -3789,7 +3814,7 @@ watch(
 watch(
   [antigravityModelRestrictionMode, () => form.platform],
   ([, platform]) => {
-    if (platform !== 'antigravity') return
+    if (platform !== 'antigravity' && platform !== 'antigravity_native') return
     // Antigravity 默认不做限制：白名单留空表示允许所有（包含未来新增模型）。
     // 如果需要快速填充常用模型，可在组件内点“填充相关模型”。
   }
@@ -3972,7 +3997,7 @@ const splitTempUnschedKeywords = (value: string) => {
     .filter((item) => item.length > 0)
 }
 
-const needsMixedChannelCheck = (platform: AccountPlatform) => platform === 'antigravity' || platform === 'anthropic'
+const needsMixedChannelCheck = (platform: AccountPlatform) => platform === 'antigravity' || platform === 'antigravity_native' || platform === 'anthropic'
 
 const buildMixedChannelDetails = (resp?: CheckMixedChannelResponse) => {
   const details = resp?.details
@@ -4162,6 +4187,7 @@ const resetForm = () => {
   openaiOAuth.resetState()
   geminiOAuth.resetState()
   antigravityOAuth.resetState()
+  antigravityNativeOAuth.resetState()
   oauthFlowRef.value?.reset()
   antigravityMixedChannelConfirmed.value = false
   clearMixedChannelDialog()
@@ -4407,7 +4433,7 @@ const handleSubmit = async () => {
   }
 
   // For Antigravity upstream type, create directly
-  if (form.platform === 'antigravity' && antigravityAccountType.value === 'upstream') {
+  if ((form.platform === 'antigravity' || form.platform === 'antigravity_native') && antigravityAccountType.value === 'upstream') {
     if (!form.name.trim()) {
       appStore.showError(t('admin.accounts.pleaseEnterAccountName'))
       return
@@ -4542,6 +4568,7 @@ const goBackToBasicInfo = () => {
   openaiOAuth.resetState()
   geminiOAuth.resetState()
   antigravityOAuth.resetState()
+  antigravityNativeOAuth.resetState()
   oauthFlowRef.value?.reset()
 }
 
@@ -4557,6 +4584,8 @@ const handleGenerateUrl = async () => {
     )
   } else if (form.platform === 'antigravity') {
     await antigravityOAuth.generateAuthUrl(form.proxy_id)
+  } else if (form.platform === 'antigravity_native') {
+    await antigravityNativeOAuth.generateAuthUrl(form.proxy_id)
   } else {
     await oauth.generateAuthUrl(addMethod.value, form.proxy_id)
   }
@@ -4567,6 +4596,8 @@ const handleValidateRefreshToken = (rt: string) => {
     handleOpenAIValidateRT(rt)
   } else if (form.platform === 'antigravity') {
     handleAntigravityValidateRT(rt)
+  } else if (form.platform === 'antigravity_native') {
+    handleAntigravityNativeValidateRT(rt)
   }
 }
 
@@ -5045,6 +5076,97 @@ const handleAntigravityValidateRT = async (refreshTokenInput: string) => {
   }
 }
 
+// Antigravity Native 手动 RT 批量验证和创建
+const handleAntigravityNativeValidateRT = async (refreshTokenInput: string) => {
+  if (!refreshTokenInput.trim()) return
+
+  // Parse multiple refresh tokens (one per line)
+  const refreshTokens = refreshTokenInput
+    .split('\n')
+    .map((rt) => rt.trim())
+    .filter((rt) => rt)
+
+  if (refreshTokens.length === 0) {
+    antigravityNativeOAuth.error.value = t('admin.accounts.oauth.antigravity.pleaseEnterRefreshToken')
+    return
+  }
+
+  antigravityNativeOAuth.loading.value = true
+  antigravityNativeOAuth.error.value = ''
+
+  let successCount = 0
+  let failedCount = 0
+  const errors: string[] = []
+
+  try {
+    for (let i = 0; i < refreshTokens.length; i++) {
+      try {
+        const tokenInfo = await antigravityNativeOAuth.validateRefreshToken(
+          refreshTokens[i],
+          form.proxy_id
+        )
+        if (!tokenInfo) {
+          failedCount++
+          errors.push(`#${i + 1}: ${antigravityNativeOAuth.error.value || 'Validation failed'}`)
+          antigravityNativeOAuth.error.value = ''
+          continue
+        }
+
+        const credentials = antigravityNativeOAuth.buildCredentials(tokenInfo)
+        
+        // Generate account name with index for batch
+        const accountName = refreshTokens.length > 1 ? `${form.name} #${i + 1}` : form.name
+
+        // Note: Antigravity doesn't have buildExtraInfo, so we pass empty extra or rely on credentials
+        const createPayload = withAntigravityConfirmFlag({
+          name: accountName,
+          notes: form.notes,
+          platform: 'antigravity_native',
+          type: 'oauth',
+          credentials,
+          extra: {},
+          proxy_id: form.proxy_id,
+          concurrency: form.concurrency,
+          load_factor: form.load_factor ?? undefined,
+          priority: form.priority,
+          rate_multiplier: form.rate_multiplier,
+          group_ids: form.group_ids,
+          expires_at: form.expires_at,
+          auto_pause_on_expired: autoPauseOnExpired.value
+        })
+        await adminAPI.accounts.create(createPayload)
+        successCount++
+      } catch (error: any) {
+        failedCount++
+        const errMsg = error.response?.data?.detail || error.message || 'Unknown error'
+        errors.push(`#${i + 1}: ${errMsg}`)
+      }
+    }
+
+    // Show results
+    if (successCount > 0 && failedCount === 0) {
+      appStore.showSuccess(
+        refreshTokens.length > 1
+          ? t('admin.accounts.oauth.batchSuccess', { count: successCount })
+          : t('admin.accounts.accountCreated')
+      )
+      emit('created')
+      handleClose()
+    } else if (successCount > 0 && failedCount > 0) {
+      appStore.showWarning(
+        t('admin.accounts.oauth.batchPartialSuccess', { success: successCount, failed: failedCount })
+      )
+      antigravityNativeOAuth.error.value = errors.join('\n')
+      emit('created')
+    } else {
+      antigravityNativeOAuth.error.value = errors.join('\n')
+      appStore.showError(t('admin.accounts.oauth.batchFailed'))
+    }
+  } finally {
+    antigravityNativeOAuth.loading.value = false
+  }
+}
+
 // Gemini OAuth 授权码兑换
 const handleGeminiExchange = async (authCode: string) => {
   if (!authCode.trim() || !geminiOAuth.sessionId.value) return
@@ -5124,6 +5246,51 @@ const handleAntigravityExchange = async (authCode: string) => {
     appStore.showError(antigravityOAuth.error.value)
   } finally {
     antigravityOAuth.loading.value = false
+  }
+}
+
+// Antigravity Native OAuth 授权码兑换
+const handleAntigravityNativeExchange = async (authCode: string) => {
+  if (!authCode.trim() || !antigravityNativeOAuth.sessionId.value) return
+
+  antigravityNativeOAuth.loading.value = true
+  antigravityNativeOAuth.error.value = ''
+
+  try {
+    const stateFromInput = oauthFlowRef.value?.oauthState || ''
+    const stateToUse = stateFromInput || antigravityNativeOAuth.state.value
+    if (!stateToUse) {
+      antigravityNativeOAuth.error.value = t('admin.accounts.oauth.authFailed')
+      appStore.showError(antigravityNativeOAuth.error.value)
+      return
+    }
+
+    const tokenInfo = await antigravityNativeOAuth.exchangeAuthCode({
+      code: authCode.trim(),
+      sessionId: antigravityNativeOAuth.sessionId.value,
+      state: stateToUse,
+      proxyId: form.proxy_id
+    })
+		if (!tokenInfo) return
+
+		const credentials = antigravityNativeOAuth.buildCredentials(tokenInfo)
+		applyInterceptWarmup(credentials, interceptWarmupRequests.value, 'create')
+		// Antigravity 只使用映射模式
+		const antigravityModelMapping = buildModelMappingObject(
+			'mapping',
+			[],
+			antigravityModelMappings.value
+		)
+		if (antigravityModelMapping) {
+			credentials.model_mapping = antigravityModelMapping
+		}
+		const extra = buildAntigravityExtra()
+		await createAccountAndFinish('antigravity_native', 'oauth', credentials, extra)
+  } catch (error: any) {
+    antigravityNativeOAuth.error.value = error.response?.data?.detail || t('admin.accounts.oauth.authFailed')
+    appStore.showError(antigravityNativeOAuth.error.value)
+  } finally {
+    antigravityNativeOAuth.loading.value = false
   }
 }
 
@@ -5227,6 +5394,8 @@ const handleExchangeCode = async () => {
       return handleGeminiExchange(authCode)
     case 'antigravity':
       return handleAntigravityExchange(authCode)
+    case 'antigravity_native':
+      return handleAntigravityNativeExchange(authCode)
     default:
       return handleAnthropicExchange(authCode)
   }

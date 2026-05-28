@@ -2362,6 +2362,11 @@ func (s *GatewayService) IsSingleAntigravityAccountGroup(ctx context.Context, gr
 	if err != nil {
 		return false
 	}
+	nativeAccounts, _, err := s.listSchedulableAccounts(ctx, groupID, PlatformAntigravityNative, true)
+	if err != nil {
+		return false
+	}
+	accounts = append(accounts, nativeAccounts...)
 	return len(accounts) == 1
 }
 
@@ -2375,7 +2380,7 @@ func (s *GatewayService) isAccountAllowedForPlatform(account *Account, platform 
 		}
 		return account.Platform == PlatformAntigravity && account.IsMixedSchedulingEnabled()
 	}
-	return account.Platform == platform
+	return account.Platform == platform || (IsAntigravityFamily(platform) && IsAntigravityFamily(account.Platform))
 }
 
 func (s *GatewayService) isAccountSchedulableForSelection(account *Account) bool {
@@ -3730,7 +3735,7 @@ func summarizeSelectionFailureStats(stats selectionFailureStats) string {
 // isModelSupportedByAccountWithContext 根据账户平台检查模型支持（带 context）
 // 对于 Antigravity 平台，会先获取映射后的最终模型名（包括 thinking 后缀）再检查支持
 func (s *GatewayService) isModelSupportedByAccountWithContext(ctx context.Context, account *Account, requestedModel string) bool {
-	if account.Platform == PlatformAntigravity {
+	if IsAntigravityFamily(account.Platform) {
 		if strings.TrimSpace(requestedModel) == "" {
 			return true
 		}
@@ -3754,7 +3759,7 @@ func (s *GatewayService) isModelSupportedByAccountWithContext(ctx context.Contex
 
 // isModelSupportedByAccount 根据账户平台检查模型支持（无 context，用于非 Antigravity 平台）
 func (s *GatewayService) isModelSupportedByAccount(account *Account, requestedModel string) bool {
-	if account.Platform == PlatformAntigravity {
+	if IsAntigravityFamily(account.Platform) {
 		if strings.TrimSpace(requestedModel) == "" {
 			return true
 		}
@@ -8972,7 +8977,7 @@ func (s *GatewayService) isUpstreamModelRestrictedByChannel(ctx context.Context,
 
 // resolveAccountUpstreamModel 确定账号将请求模型映射为什么上游模型。
 func resolveAccountUpstreamModel(account *Account, requestedModel string) string {
-	if account.Platform == PlatformAntigravity {
+	if IsAntigravityFamily(account.Platform) {
 		return mapAntigravityModel(account, requestedModel)
 	}
 	return account.GetMappedModel(requestedModel)
@@ -9055,7 +9060,7 @@ func (s *GatewayService) ForwardCountTokens(ctx context.Context, c *gin.Context,
 
 	// Antigravity 账户不支持 count_tokens，返回 404 让客户端 fallback 到本地估算。
 	// 返回 nil 避免 handler 层记录为错误，也不设置 ops 上游错误上下文。
-	if account.Platform == PlatformAntigravity {
+	if IsAntigravityFamily(account.Platform) {
 		s.countTokensError(c, http.StatusNotFound, "not_found_error", "count_tokens endpoint is not supported for this platform")
 		return nil
 	}

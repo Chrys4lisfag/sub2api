@@ -396,7 +396,7 @@ func (s *GeminiMessagesCompatService) isBetterGeminiAccount(candidate, current *
 
 // isModelSupportedByAccount 根据账户平台检查模型支持
 func (s *GeminiMessagesCompatService) isModelSupportedByAccount(account *Account, requestedModel string) bool {
-	if account.Platform == PlatformAntigravity {
+	if IsAntigravityFamily(account.Platform) {
 		if strings.TrimSpace(requestedModel) == "" {
 			return true
 		}

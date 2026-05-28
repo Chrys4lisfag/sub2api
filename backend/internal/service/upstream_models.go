@@ -81,7 +81,7 @@ func (s *AccountTestService) FetchUpstreamSupportedModels(ctx context.Context, a
 		return nil, newUpstreamModelSyncConfigError("Account is required", nil)
 	}
 
-	if account.Platform == PlatformAntigravity && account.Type != AccountTypeAPIKey {
+	if IsAntigravityFamily(account.Platform) && account.Type != AccountTypeAPIKey {
 		return s.fetchAntigravityOAuthUpstreamModels(ctx, account)
 	}
 
@@ -129,7 +129,7 @@ func (s *AccountTestService) FetchUpstreamSupportedModels(ctx context.Context, a
 
 func (s *AccountTestService) buildUpstreamModelsRequest(ctx context.Context, account *Account) (*http.Request, error) {
 	switch {
-	case account.Platform == PlatformAntigravity:
+	case IsAntigravityFamily(account.Platform):
 		return s.buildAntigravityAPIKeyModelsRequest(ctx, account)
 	case account.IsOpenAI():
 		return s.buildOpenAIUpstreamModelsRequest(ctx, account)

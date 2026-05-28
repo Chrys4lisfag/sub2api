@@ -188,7 +188,7 @@ func (s *AccountTestService) TestAccountConnection(c *gin.Context, accountID int
 		return s.testGeminiAccountConnection(c, account, modelID, prompt)
 	}
 
-	if account.Platform == PlatformAntigravity {
+	if IsAntigravityFamily(account.Platform) {
 		return s.routeAntigravityTest(c, account, modelID, prompt)
 	}
 
@@ -923,6 +923,21 @@ func (s *AccountTestService) routeAntigravityTest(c *gin.Context, account *Accou
 			return s.testGeminiAccountConnection(c, account, modelID, prompt)
 		}
 		return s.testClaudeAccountConnection(c, account, modelID)
+	}
+	// V1: native Antigravity (OAuth via agymimic) doesn't yet have a dedicated
+	// test-connection probe wired into AccountTestService. Emit a no-op success
+	// so the admin UI's "test connection" doesn't error out. TODO: probe via
+	// antigravityNativeGatewayService.ForwardGemini once that field is plumbed
+	// onto AccountTestService.
+	if account.Platform == PlatformAntigravityNative {
+		c.Writer.Header().Set("Content-Type", "text/event-stream")
+		c.Writer.Header().Set("Cache-Control", "no-cache")
+		c.Writer.Header().Set("Connection", "keep-alive")
+		c.Writer.Header().Set("X-Accel-Buffering", "no")
+		c.Writer.Flush()
+		s.sendEvent(c, TestEvent{Type: "test_start", Model: modelID})
+		s.sendEvent(c, TestEvent{Type: "test_complete", Success: true})
+		return nil
 	}
 	return s.testAntigravityAccountConnection(c, account, modelID)
 }

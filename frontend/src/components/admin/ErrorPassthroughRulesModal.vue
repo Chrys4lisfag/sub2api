@@ -489,7 +489,8 @@ const platformOptions = [
   { value: 'anthropic', label: 'Anthropic' },
   { value: 'openai', label: 'OpenAI' },
   { value: 'gemini', label: 'Gemini' },
-  { value: 'antigravity', label: 'Antigravity' }
+  { value: 'antigravity', label: 'Antigravity' },
+  { value: 'antigravity_native', label: 'Antigravity Native' }
 ]
 
 // Load rules when dialog opens

@@ -10,6 +10,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"path/filepath"
 	"os/signal"
 	"strings"
 	"syscall"
@@ -19,6 +20,7 @@ import (
 	"github.com/Wei-Shaw/sub2api/internal/config"
 	"github.com/Wei-Shaw/sub2api/internal/handler"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/geminicli"
+	"github.com/koval/agymimic/fingerprint"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/logger"
 	"github.com/Wei-Shaw/sub2api/internal/server/middleware"
 	"github.com/Wei-Shaw/sub2api/internal/setup"
@@ -164,6 +166,24 @@ func runMainServer() {
 	// Track the upstream @google/gemini-cli release so impersonation UA stays
 	// current without redeploys.
 	geminicli.StartVersionAutoUpdater(bgCtx, geminicli.DefaultAutoUpdateInterval)
+
+	// Track the live agy.exe identity (CLI version + Go build string) so
+	// the antigravity_native backend's User-Agent and Unleash metrics
+	// platformVersion always match what real agy.exe currently advertises.
+	// Polls Google's auto-updater every 6h; one-shot eager refresh at
+	// startup populates the cache before the first chat request.
+	// Note: we pin platform="windows_amd64" because that manifest serves a
+	// raw .exe (debug/buildinfo can read it directly). darwin/arm64 ships
+	// as .tar.gz — same Go build string inside, but extra extraction step
+	// we don't need for fingerprinting. The advertised UA tail stays
+	// darwin/arm64 (set by internal/headers.go) regardless of what platform
+	// we probe; this only controls which binary we open for buildinfo.
+	fpRefresher := fingerprint.Install(bgCtx, fingerprint.Options{
+		Platform: "windows_amd64",
+		CacheDir: filepath.Join(os.TempDir(), "sub2api-agy-fingerprint"),
+		Logger:   func(f string, a ...any) { log.Printf("[fingerprint] "+f, a...) },
+	})
+	defer fpRefresher.Stop()
 
 	// 启动服务器
 	go func() {

@@ -18,11 +18,25 @@ const (
 
 // Platform constants
 const (
-	PlatformAnthropic   = "anthropic"
-	PlatformOpenAI      = "openai"
-	PlatformGemini      = "gemini"
-	PlatformAntigravity = "antigravity"
+	PlatformAnthropic         = "anthropic"
+	PlatformOpenAI            = "openai"
+	PlatformGemini            = "gemini"
+	PlatformAntigravity       = "antigravity"
+	// PlatformAntigravityNative routes through our self-contained Go client
+	// (github.com/koval/agymimic) instead of the legacy in-tree backend.
+	// Same upstream API (daily-cloudcode-pa.sandbox.googleapis.com), but
+	// the OAuth + per-account identity + Unleash mimic loop is owned by us.
+	PlatformAntigravityNative = "antigravity_native"
 )
+
+// IsAntigravityFamily returns true for both the legacy in-tree antigravity
+// platform and the native agymimic-backed platform. Used at sites where
+// both backends share account-level behavior (model list, mappings, URL
+// suffixes, failover timing, privacy modes) and only the gateway dispatch
+// itself differs.
+func IsAntigravityFamily(platform string) bool {
+	return platform == PlatformAntigravity || platform == PlatformAntigravityNative
+}
 
 // Account type constants
 const (
