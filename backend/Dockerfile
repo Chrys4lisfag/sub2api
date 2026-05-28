@@ -5,8 +5,10 @@ WORKDIR /app
 # 安装必要的工具
 RUN apk add --no-cache git
 
-# 复制go.mod和go.sum
+# 复制 go.mod / go.sum 以及 replace 指令指向的本地模块（third_party/agymimic 等）。
+# 没有这一步 `go mod download` 会因 replace 目标缺失而失败。
 COPY go.mod go.sum ./
+COPY third_party ./third_party
 
 # 下载依赖
 RUN go mod download
