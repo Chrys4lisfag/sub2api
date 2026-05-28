@@ -87,17 +87,28 @@ const isSearchable = computed(() => {
   return props.searchable
 })
 
-// Filter groups by platform if specified
+// Filter groups by platform if specified.
+//
+// Compatibility matrix (antigravity_native + antigravity are the same backend
+// family — same upstream API, same OAuth client, interchangeable accounts):
+//   account.platform        | default groups                    | mixed-scheduling groups
+//   ------------------------|-----------------------------------|-------------------------------
+//   antigravity             | antigravity, antigravity_native   | + anthropic, gemini
+//   antigravity_native      | antigravity, antigravity_native   | + anthropic, gemini
+//   anthropic/openai/gemini | strict same-platform              | (n/a)
 const filteredGroups = computed(() => {
   let result: AdminGroup[] = props.groups
   if (props.platform) {
-    // antigravity 账户启用混合调度后，可选择 anthropic/gemini 分组
-    if (props.platform === 'antigravity' && props.mixedScheduling) {
-      result = result.filter(
-        (g) => g.platform === 'antigravity' || g.platform === 'anthropic' || g.platform === 'gemini'
-      )
+    const isAntigravityFamily = props.platform === 'antigravity' || props.platform === 'antigravity_native'
+    if (isAntigravityFamily) {
+      const allowedPlatforms = new Set<string>(['antigravity', 'antigravity_native'])
+      if (props.mixedScheduling) {
+        allowedPlatforms.add('anthropic')
+        allowedPlatforms.add('gemini')
+      }
+      result = result.filter((g) => allowedPlatforms.has(g.platform))
     } else {
-      // 默认：只能选择同 platform 的分组
+      // Non-antigravity platforms: strict same-platform match.
       result = result.filter((g) => g.platform === props.platform)
     }
   }
