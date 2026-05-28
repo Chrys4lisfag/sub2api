@@ -2149,6 +2149,7 @@ export default {
         openai: 'OpenAI',
         gemini: 'Gemini',
         antigravity: 'Antigravity',
+        antigravity_native: 'Antigravity (Native)',
       },
       deleteConfirm:
         "Are you sure you want to delete '{name}'? All associated API keys will no longer belong to any group.",
@@ -3051,6 +3052,7 @@ export default {
         openai: 'OpenAI',
         gemini: 'Gemini',
         antigravity: 'Antigravity',
+        antigravity_native: 'Antigravity (Native)',
       },
       types: {
         oauth: 'OAuth',
