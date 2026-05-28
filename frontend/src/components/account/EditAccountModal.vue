@@ -2341,8 +2341,9 @@ const baseUrlHint = computed(() => {
   return t('admin.accounts.baseUrlHint')
 })
 
-const antigravityPresetMappings = computed(() => getPresetMappingsByPlatform('antigravity'))
-const antigravityNativePresetMappings = computed(() => getPresetMappingsByPlatform('antigravity_native'))
+const antigravityPresetMappings = computed(() =>
+  getPresetMappingsByPlatform(props.account?.platform === 'antigravity_native' ? 'antigravity_native' : 'antigravity'),
+)
 const bedrockPresets = computed(() => getPresetMappingsByPlatform('bedrock'))
 
 // Model mapping type

@@ -3397,8 +3397,9 @@ const upstreamApiKey = ref('') // For upstream type: API key
 const antigravityModelRestrictionMode = ref<'whitelist' | 'mapping'>('whitelist')
 const antigravityWhitelistModels = ref<string[]>([])
 const antigravityModelMappings = ref<ModelMapping[]>([])
-const antigravityPresetMappings = computed(() => getPresetMappingsByPlatform('antigravity'))
-const antigravityNativePresetMappings = computed(() => getPresetMappingsByPlatform('antigravity_native'))
+const antigravityPresetMappings = computed(() =>
+  getPresetMappingsByPlatform(form.platform === 'antigravity_native' ? 'antigravity_native' : 'antigravity'),
+)
 const bedrockPresets = computed(() => getPresetMappingsByPlatform('bedrock'))
 
 // Bedrock credentials
