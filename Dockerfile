@@ -51,8 +51,12 @@ RUN apk add --no-cache git ca-certificates tzdata
 
 WORKDIR /app/backend
 
-# Copy go mod files first (better caching)
+# Copy go mod files first (better caching).
+# `backend/third_party/` holds locally-vendored modules referenced by
+# go.mod `replace` directives (e.g. agymimic). Without it `go mod download`
+# fails because the replace targets don't exist in the build context.
 COPY backend/go.mod backend/go.sum ./
+COPY backend/third_party ./third_party
 RUN go mod download
 
 # Copy backend source first
