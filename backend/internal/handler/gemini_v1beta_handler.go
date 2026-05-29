@@ -596,6 +596,19 @@ func (h *GatewayHandler) handleGeminiFailoverExhausted(c *gin.Context, failoverE
 	statusCode := failoverErr.StatusCode
 	responseBody := failoverErr.ResponseBody
 
+	// Verbatim pass-through: backend that already speaks Gemini's error
+	// shape (e.g. antigravity-native via agymimic, which proxies the
+	// canonical cloudcode-pa wire format) marks the failover error with
+	// PassthroughVerbatim so admin rules don't strip rich error context.
+	// We still record the upstream status for ops monitoring before
+	// shipping the original payload back to the client.
+	if failoverErr.PassthroughVerbatim && len(responseBody) > 0 {
+		upstreamMsg := service.ExtractUpstreamErrorMessage(responseBody)
+		service.SetOpsUpstreamError(c, statusCode, upstreamMsg, "")
+		writeUpstreamErrorVerbatim(c, statusCode, responseBody, failoverErr.ResponseHeaders)
+		return
+	}
+
 	// 先检查透传规则
 	if h.errorPassthroughService != nil && len(responseBody) > 0 {
 		if rule := h.errorPassthroughService.MatchRule(service.PlatformGemini, statusCode, responseBody); rule != nil {
@@ -627,6 +640,30 @@ func (h *GatewayHandler) handleGeminiFailoverExhausted(c *gin.Context, failoverE
 	// 使用默认的错误映射
 	status, message := mapGeminiUpstreamError(statusCode)
 	googleError(c, status, message)
+}
+
+// writeUpstreamErrorVerbatim forwards an upstream Gemini-format error body
+// to the client without alteration. Preserves StatusCode, Content-Type,
+// Retry-After (for 429), and WWW-Authenticate (for 401) — the three header
+// classes clients actually act on. Other headers (Set-Cookie, server-internal
+// diagnostics) are dropped to avoid leaking upstream identity.
+func writeUpstreamErrorVerbatim(c *gin.Context, statusCode int, body []byte, upstreamHeaders http.Header) {
+	contentType := ""
+	if upstreamHeaders != nil {
+		contentType = upstreamHeaders.Get("Content-Type")
+	}
+	if contentType == "" {
+		contentType = "application/json"
+	}
+	if upstreamHeaders != nil {
+		if ra := upstreamHeaders.Get("Retry-After"); ra != "" {
+			c.Header("Retry-After", ra)
+		}
+		if auth := upstreamHeaders.Get("WWW-Authenticate"); auth != "" {
+			c.Header("WWW-Authenticate", auth)
+		}
+	}
+	c.Data(statusCode, contentType, body)
 }
 
 func mapGeminiUpstreamError(statusCode int) (int, string) {

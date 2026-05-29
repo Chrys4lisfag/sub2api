@@ -536,6 +536,14 @@ type UpstreamFailoverError struct {
 	ResponseHeaders        http.Header // 上游响应头，用于透传 cf-ray/cf-mitigated/content-type 等诊断信息
 	ForceCacheBilling      bool        // Antigravity 粘性会话切换时设为 true
 	RetryableOnSameAccount bool        // 临时性错误（如 Google 间歇性 400、空响应），应在同一账号上重试 N 次再切换
+	// PassthroughVerbatim, when set, tells the gateway handler to forward
+	// StatusCode, ResponseBody, and select headers (Content-Type, Retry-After,
+	// WWW-Authenticate) directly to the client after failover is exhausted —
+	// bypassing the per-platform generic error mapper. Set by backends whose
+	// upstream already speaks the client's native error format (the native
+	// antigravity gateway is the first user; agymimic talks the canonical
+	// Gemini protocol so its 4xx/5xx bodies are already Gemini-shaped).
+	PassthroughVerbatim bool
 }
 
 func (e *UpstreamFailoverError) Error() string {

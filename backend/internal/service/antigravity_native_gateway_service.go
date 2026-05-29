@@ -21,6 +21,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"strings"
 	"sync"
@@ -278,17 +279,19 @@ func (s *AntigravityNativeGatewayService) ForwardGemini(
 
 	if resp.StatusCode != http.StatusOK {
 		raw, _ := io.ReadAll(resp.Body)
+		logNativeUpstreamError(ctx, account.ID, originalModel, wireModel, action, stream, resp.StatusCode, resp.Header, raw)
 		return nil, &UpstreamFailoverError{
-			StatusCode:      resp.StatusCode,
-			ResponseBody:    raw,
-			ResponseHeaders: resp.Header,
+			StatusCode:          resp.StatusCode,
+			ResponseBody:        raw,
+			ResponseHeaders:     resp.Header,
+			PassthroughVerbatim: true,
 		}
 	}
 
 	if stream {
-		return s.streamGeminiToClient(c, resp, startTime, originalModel, wireModel)
+		return s.streamGeminiToClient(ctx, c, account.ID, resp, startTime, originalModel, wireModel)
 	}
-	return s.passNonStreamingGemini(c, resp, startTime, originalModel, wireModel)
+	return s.passNonStreamingGemini(ctx, c, account.ID, resp, startTime, originalModel, wireModel)
 }
 
 // Forward handles Claude-format requests. Native does not implement the
@@ -363,7 +366,9 @@ func chooseGeminiAction(action string, stream bool) string {
 // streamGeminiToClient pipes the upstream SSE body to the gin client and
 // extracts usage metadata from the final chunk.
 func (s *AntigravityNativeGatewayService) streamGeminiToClient(
+	ctx context.Context,
 	c *gin.Context,
+	accountID int64,
 	resp *http.Response,
 	startTime time.Time,
 	originalModel, wireModel string,
@@ -384,6 +389,7 @@ func (s *AntigravityNativeGatewayService) streamGeminiToClient(
 	chunkBuf := make([]byte, 8192)
 	first := true
 	var firstTokenMs int
+	var lastChunkPayload []byte // last unwrapped JSON payload, used for end-of-stream anomaly inspection
 	for {
 		n, readErr := resp.Body.Read(chunkBuf)
 		if n > 0 {
@@ -415,6 +421,9 @@ func (s *AntigravityNativeGatewayService) streamGeminiToClient(
 				if flusher != nil {
 					flusher.Flush()
 				}
+				if payload := extractDataPayload(out); len(payload) > 0 {
+					lastChunkPayload = append(lastChunkPayload[:0], payload...)
+				}
 				if u := extractGeminiUsageFromSSELine(line); u != nil {
 					result.Usage.InputTokens = u.PromptTokens
 					result.Usage.OutputTokens = u.CandidateTokens
@@ -432,17 +441,43 @@ func (s *AntigravityNativeGatewayService) streamGeminiToClient(
 					if flusher != nil {
 						flusher.Flush()
 					}
+					if payload := extractDataPayload(tail); len(payload) > 0 {
+						lastChunkPayload = append(lastChunkPayload[:0], payload...)
+					}
 				}
 				break
 			}
 			return nil, readErr
 		}
 	}
+	if len(lastChunkPayload) > 0 {
+		if anomaly, details := inspectGeminiResponseForAnomalies(lastChunkPayload); anomaly != "" {
+			logNativeRequestAnomaly(ctx, accountID, originalModel, wireModel, true, lastChunkPayload, anomaly, details)
+		}
+	}
 	return s.finalizeResult(result, startTime), nil
 }
 
+// extractDataPayload returns the JSON object embedded in an SSE `data:` line,
+// or nil if the line is not a data event. The returned slice aliases the
+// input — callers MUST copy it before holding past the next loop iteration.
+func extractDataPayload(line []byte) []byte {
+	trimmed := bytes.TrimSpace(line)
+	const prefix = "data:"
+	if !bytes.HasPrefix(trimmed, []byte(prefix)) {
+		return nil
+	}
+	payload := bytes.TrimSpace(trimmed[len(prefix):])
+	if len(payload) == 0 || bytes.Equal(payload, []byte("[DONE]")) {
+		return nil
+	}
+	return payload
+}
+
 func (s *AntigravityNativeGatewayService) passNonStreamingGemini(
+	ctx context.Context,
 	c *gin.Context,
+	accountID int64,
 	resp *http.Response,
 	startTime time.Time,
 	originalModel, wireModel string,
@@ -459,6 +494,15 @@ func (s *AntigravityNativeGatewayService) passNonStreamingGemini(
 	c.Header("Content-Type", "application/json")
 	c.Writer.WriteHeader(http.StatusOK)
 	_, _ = c.Writer.Write(out)
+
+	// Non-stream is the natural place to inspect for semantic anomalies —
+	// the full body is in hand. Streamed requests are checked at the SSE
+	// loop's end (best-effort, on the final chunk only). 200 with empty
+	// function-call args is the case that prompted this logging; see the
+	// inspectGeminiResponseForAnomalies docstring for the full set.
+	if anomaly, details := inspectGeminiResponseForAnomalies(out); anomaly != "" {
+		logNativeRequestAnomaly(ctx, accountID, originalModel, wireModel, false, out, anomaly, details)
+	}
 
 	result := &ForwardResult{
 		Model:         originalModel,
@@ -606,4 +650,151 @@ func unwrapAgyResponseEnvelopeLine(line []byte) []byte {
 		out = append(out, line[len(line)-cr+i])
 	}
 	return out
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// Observability
+// ────────────────────────────────────────────────────────────────────────────
+
+// logNativeUpstreamError records a structured warn log for any non-2xx
+// response from the daily cloudcode-pa endpoint. The full body and a
+// curated header set are captured so admins can correlate per-account
+// 429s, schema-related 400s, etc. The body is truncated to 4 KiB to keep
+// the docker JSON log driver from blowing up on huge upstream payloads.
+func logNativeUpstreamError(
+	ctx context.Context,
+	accountID int64,
+	originalModel, wireModel, action string,
+	stream bool,
+	status int,
+	headers http.Header,
+	body []byte,
+) {
+	const maxBody = 4 * 1024
+	preview := body
+	truncated := false
+	if len(preview) > maxBody {
+		preview = preview[:maxBody]
+		truncated = true
+	}
+	retryAfter := ""
+	wwwAuth := ""
+	if headers != nil {
+		retryAfter = headers.Get("Retry-After")
+		wwwAuth = headers.Get("WWW-Authenticate")
+	}
+	slog.WarnContext(ctx, "antigravity-native upstream error",
+		slog.Int64("account_id", accountID),
+		slog.String("model", originalModel),
+		slog.String("wire_model", wireModel),
+		slog.String("action", action),
+		slog.Bool("stream", stream),
+		slog.Int("status", status),
+		slog.String("retry_after", retryAfter),
+		slog.String("www_authenticate", wwwAuth),
+		slog.Bool("body_truncated", truncated),
+		slog.String("body", string(preview)),
+	)
+}
+
+// logNativeRequestAnomaly records a warn log when an HTTP 200 response
+// from cloudcode-pa carries semantically broken content — e.g. the model
+// emitted a `functionCall` with empty `args`, a STOP without any text or
+// function call, or a response with no candidates at all. These don't
+// surface as errors (status is 200, body is valid JSON) but client SDKs
+// throw schema-validation failures downstream. Logging them inline lets
+// us correlate user reports with the exact model + prompt that caused
+// the issue.
+//
+// Pass the inner Gemini response (post-unwrap from the agymimic envelope).
+func logNativeRequestAnomaly(
+	ctx context.Context,
+	accountID int64,
+	originalModel, wireModel string,
+	stream bool,
+	candidatesJSON []byte,
+	anomaly string,
+	details map[string]string,
+) {
+	attrs := []any{
+		slog.Int64("account_id", accountID),
+		slog.String("model", originalModel),
+		slog.String("wire_model", wireModel),
+		slog.Bool("stream", stream),
+		slog.String("anomaly", anomaly),
+	}
+	for k, v := range details {
+		attrs = append(attrs, slog.String(k, v))
+	}
+	if len(candidatesJSON) > 0 {
+		const maxBody = 2 * 1024
+		preview := candidatesJSON
+		if len(preview) > maxBody {
+			preview = preview[:maxBody]
+		}
+		attrs = append(attrs, slog.String("candidates_preview", string(preview)))
+	}
+	slog.WarnContext(ctx, "antigravity-native response anomaly", attrs...)
+}
+
+// inspectGeminiResponseForAnomalies parses an upstream response body
+// (already unwrapped from the agymimic envelope) and returns the first
+// anomaly it finds, or "" when the response looks clean. Anomalies:
+//
+//   - "no_candidates"         — top-level `candidates` is missing/empty
+//   - "empty_function_args"   — a `functionCall` part has `args: {}` /
+//     missing args; matches the bug pattern that triggered this logging
+//   - "stop_without_content"  — finishReason=STOP but no text and no
+//     function call (the symptom omp was hitting before the response
+//     envelope fix; kept as a guard against regressions)
+//
+// Returns "" + empty detail map when the response is well-formed.
+func inspectGeminiResponseForAnomalies(body []byte) (string, map[string]string) {
+	if len(body) == 0 {
+		return "", nil
+	}
+	type part struct {
+		Text         *string                `json:"text,omitempty"`
+		FunctionCall map[string]interface{} `json:"functionCall,omitempty"`
+	}
+	type candidate struct {
+		Content struct {
+			Parts []part `json:"parts"`
+		} `json:"content"`
+		FinishReason string `json:"finishReason"`
+	}
+	var env struct {
+		Candidates []candidate `json:"candidates"`
+	}
+	if err := json.Unmarshal(body, &env); err != nil {
+		return "", nil
+	}
+	if len(env.Candidates) == 0 {
+		return "no_candidates", nil
+	}
+	c := env.Candidates[0]
+	if len(c.Content.Parts) == 0 {
+		return "no_candidates", nil
+	}
+	sawText := false
+	for _, p := range c.Content.Parts {
+		if p.Text != nil && *p.Text != "" {
+			sawText = true
+		}
+		if p.FunctionCall != nil {
+			name, _ := p.FunctionCall["name"].(string)
+			args, hasArgs := p.FunctionCall["args"]
+			if !hasArgs || args == nil {
+				return "empty_function_args", map[string]string{"function": name, "reason": "args missing"}
+			}
+			if m, ok := args.(map[string]interface{}); ok && len(m) == 0 {
+				return "empty_function_args", map[string]string{"function": name, "reason": "args is empty object"}
+			}
+			return "", nil // function call with args is fine
+		}
+	}
+	if !sawText && (c.FinishReason == "STOP" || c.FinishReason == "stop") {
+		return "stop_without_content", map[string]string{"finish_reason": c.FinishReason}
+	}
+	return "", nil
 }

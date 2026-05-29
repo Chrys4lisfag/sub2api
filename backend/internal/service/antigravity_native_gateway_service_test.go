@@ -227,3 +227,82 @@ func TestUnwrapLine_PassthroughForNonDataLines(t *testing.T) {
 		}
 	}
 }
+
+// ---------------------------------------------------------------------------
+// inspectGeminiResponseForAnomalies
+// ---------------------------------------------------------------------------
+
+func TestInspectAnomalies_CleanText(t *testing.T) {
+	in := []byte(`{"candidates":[{"content":{"role":"model","parts":[{"text":"hi"}]},"finishReason":"STOP"}]}`)
+	a, _ := inspectGeminiResponseForAnomalies(in)
+	if a != "" {
+		t.Fatalf("clean text response flagged: %s", a)
+	}
+}
+
+func TestInspectAnomalies_CleanFunctionCall(t *testing.T) {
+	in := []byte(`{"candidates":[{"content":{"role":"model","parts":[{"functionCall":{"name":"find","args":{"paths":["."]}}}]},"finishReason":"STOP"}]}`)
+	a, _ := inspectGeminiResponseForAnomalies(in)
+	if a != "" {
+		t.Fatalf("clean function call flagged: %s", a)
+	}
+}
+
+func TestInspectAnomalies_EmptyFunctionArgs(t *testing.T) {
+	// This is the omp/Zod failure case — model returned find() with no args
+	in := []byte(`{"candidates":[{"content":{"role":"model","parts":[{"functionCall":{"name":"find","args":{}}}]}}]}`)
+	a, d := inspectGeminiResponseForAnomalies(in)
+	if a != "empty_function_args" {
+		t.Fatalf("expected empty_function_args, got %q", a)
+	}
+	if d["function"] != "find" {
+		t.Fatalf("expected function=find in details, got %v", d)
+	}
+}
+
+func TestInspectAnomalies_StopWithoutContent(t *testing.T) {
+	in := []byte(`{"candidates":[{"content":{"role":"model","parts":[{"text":""}]},"finishReason":"STOP"}]}`)
+	a, _ := inspectGeminiResponseForAnomalies(in)
+	if a != "stop_without_content" {
+		t.Fatalf("expected stop_without_content, got %q", a)
+	}
+}
+
+func TestInspectAnomalies_NoCandidates(t *testing.T) {
+	in := []byte(`{"candidates":[]}`)
+	a, _ := inspectGeminiResponseForAnomalies(in)
+	if a != "no_candidates" {
+		t.Fatalf("expected no_candidates, got %q", a)
+	}
+}
+
+func TestInspectAnomalies_PassthroughForInvalidJSON(t *testing.T) {
+	a, _ := inspectGeminiResponseForAnomalies([]byte("garbage"))
+	if a != "" {
+		t.Fatalf("invalid JSON should not flag, got %q", a)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// extractDataPayload
+// ---------------------------------------------------------------------------
+
+func TestExtractDataPayload(t *testing.T) {
+	tests := []struct {
+		name, in, want string
+	}{
+		{"plain data", `data: {"candidates":[]}` + "\n", `{"candidates":[]}`},
+		{"data done", "data: [DONE]\n", ""},
+		{"non data event", "event: ping\n", ""},
+		{"empty line", "\n", ""},
+		{"data with crlf", "data: {\"x\":1}\r\n", `{"x":1}`},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := extractDataPayload([]byte(tc.in))
+			if string(got) != tc.want {
+				t.Fatalf("extractDataPayload(%q) = %q, want %q", tc.in, got, tc.want)
+			}
+		})
+	}
+}
