@@ -8,11 +8,14 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// TestIsImageGenerationModel_GeminiProImage 测试 gemini-3-pro-image 识别
-func TestIsImageGenerationModel_GeminiProImage(t *testing.T) {
-	require.True(t, isImageGenerationModel("gemini-3-pro-image"))
-	require.True(t, isImageGenerationModel("gemini-3-pro-image-preview"))
-	require.True(t, isImageGenerationModel("models/gemini-3-pro-image"))
+// TestIsImageGenerationModel_Gemini31FlashImage covers the current
+// image-generation model. (Old gemini-3-pro-image tests removed —
+// Google deprecated that family on daily-cloudcode-pa, so we no
+// longer recognize it as a billing-class image model.)
+func TestIsImageGenerationModel_Gemini31FlashImage(t *testing.T) {
+	require.True(t, isImageGenerationModel("gemini-3.1-flash-image"))
+	require.True(t, isImageGenerationModel("gemini-3.1-flash-image-preview"))
+	require.True(t, isImageGenerationModel("models/gemini-3.1-flash-image"))
 }
 
 // TestIsImageGenerationModel_GeminiFlashImage 测试 gemini-2.5-flash-image 识别
@@ -29,14 +32,14 @@ func TestIsImageGenerationModel_RegularModel(t *testing.T) {
 	require.False(t, isImageGenerationModel("gemini-2.5-pro")) // 非图片模型
 	require.False(t, isImageGenerationModel("gemini-2.5-flash"))
 	// 验证不会误匹配包含关键词的自定义模型名
-	require.False(t, isImageGenerationModel("my-gemini-3-pro-image-test"))
+	require.False(t, isImageGenerationModel("my-gemini-3.1-flash-image-test"))
 	require.False(t, isImageGenerationModel("custom-gemini-2.5-flash-image-wrapper"))
+	// gemini-3-pro-image (deprecated) should NOT be treated as image model anymore.
+	require.False(t, isImageGenerationModel("gemini-3-pro-image"))
 }
 
 // TestIsImageGenerationModel_CaseInsensitive 测试大小写不敏感
 func TestIsImageGenerationModel_CaseInsensitive(t *testing.T) {
-	require.True(t, isImageGenerationModel("GEMINI-3-PRO-IMAGE"))
-	require.True(t, isImageGenerationModel("Gemini-3-Pro-Image"))
 	require.True(t, isImageGenerationModel("GEMINI-2.5-FLASH-IMAGE"))
 }
 

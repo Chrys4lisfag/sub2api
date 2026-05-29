@@ -690,8 +690,12 @@ func TestConstants_值正确(t *testing.T) {
 	if RedirectURI != "http://localhost:8085/callback" {
 		t.Errorf("RedirectURI 不匹配: got %s", RedirectURI)
 	}
-	if GetUserAgent() != "antigravity/1.23.2 windows/amd64" {
-		t.Errorf("UserAgent 不匹配: got %s", GetUserAgent())
+	// UA carries the dynamically refreshed antigravity version (see
+	// internal/misc/antigravity_version.go RefreshAntigravityVersion) so a
+	// literal-string match here is brittle — assert the format prefix
+	// instead.
+	if ua := GetUserAgent(); !strings.HasPrefix(ua, "antigravity/") || !strings.HasSuffix(ua, "/amd64") && !strings.HasSuffix(ua, "/arm64") {
+		t.Errorf("UserAgent 格式不匹配: got %s, want antigravity/<ver> <os>/<arch>", ua)
 	}
 	if SessionTTL != 30*time.Minute {
 		t.Errorf("SessionTTL 不匹配: got %v", SessionTTL)

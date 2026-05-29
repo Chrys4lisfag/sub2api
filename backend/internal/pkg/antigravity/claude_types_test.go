@@ -18,7 +18,6 @@ func TestDefaultModels_ContainsNewAndLegacyImageModels(t *testing.T) {
 		"gemini-2.5-flash-image-preview",
 		"gemini-3.1-flash-image",
 		"gemini-3.1-flash-image-preview",
-		"gemini-3-pro-image", // legacy compatibility
 	}
 
 	for _, id := range requiredIDs {

@@ -25,12 +25,33 @@ import (
 func AntigravityWireModel(modelName string) string {
 	normalized := strings.ToLower(strings.TrimSpace(strings.TrimPrefix(modelName, "models/")))
 	switch normalized {
+	// Gemini 3.5 Flash variants
 	case "gemini-3.5-flash-high":
 		return "gemini-3-flash-agent"
 	case "gemini-3.5-flash", "gemini-3.5-flash-medium":
 		return "gemini-3.5-flash-low"
+	case "gemini-3.5-flash-low":
+		// Public "Low" must map to wire "extra-low" — passthrough would
+		// silently serve the MEDIUM tier per the daily-cloudcode-pa
+		// fetchAvailableModels probe. Real agy.exe sends extra-low.
+		return "gemini-3.5-flash-extra-low"
+	// Gemini 3 Flash legacy variants (kept for back-compat)
 	case "gemini-3-flash-high", "gemini-3-flash-medium", "gemini-3-flash-low":
 		return "gemini-3-flash"
+	// Gemini 3.1 Pro variants
+	case "gemini-3.1-pro-high":
+		// Public "3.1 Pro High" → wire alias "gemini-pro-agent" which the
+		// daily endpoint accepts without a thinking-budget mandate.
+		// Sending the literal public name returns 400 INVALID_ARGUMENT.
+		// Real agy's model picker uses gemini-pro-agent for "Gemini 3.1
+		// Pro (High)" — verified via probe of /v1internal:fetchAvailableModels.
+		return "gemini-pro-agent"
+	// Gemini 3 Pro variants are NOT remapped — Google deprecated them on
+	// daily-cloudcode-pa (the backend returns "Gemini 3 Pro is no longer
+	// available. Please switch to Gemini 3.1 Pro"). They were removed from
+	// DefaultModels so admins can't pick them; if a legacy config still
+	// sends one, we let it pass through to surface the upstream error
+	// rather than silently rewriting to a different tier.
 	default:
 		return modelName
 	}

@@ -107,33 +107,35 @@ func TestIsModelRateLimited(t *testing.T) {
 			expected:       true,
 		},
 		{
-			name: "antigravity platform - gemini-3-pro-preview mapped to gemini-3-pro-high",
+			// Migrated from gemini-3-pro-* (deprecated by Google in May 2026)
+			// to gemini-3.1-pro-* which is currently in DefaultAntigravityModelMapping.
+			name: "antigravity platform - gemini-3.1-pro-preview mapped to gemini-3.1-pro-high",
 			account: &Account{
 				Platform: PlatformAntigravity,
 				Extra: map[string]any{
 					modelRateLimitsKey: map[string]any{
-						"gemini-3-pro-high": map[string]any{
+						"gemini-3.1-pro-high": map[string]any{
 							"rate_limit_reset_at": future,
 						},
 					},
 				},
 			},
-			requestedModel: "gemini-3-pro-preview",
+			requestedModel: "gemini-3.1-pro-preview",
 			expected:       true,
 		},
 		{
-			name: "non-antigravity platform - gemini-3-pro-preview NOT mapped",
+			name: "non-antigravity platform - gemini-3.1-pro-preview NOT mapped",
 			account: &Account{
 				Platform: PlatformGemini,
 				Extra: map[string]any{
 					modelRateLimitsKey: map[string]any{
-						"gemini-3-pro-high": map[string]any{
+						"gemini-3.1-pro-high": map[string]any{
 							"rate_limit_reset_at": future,
 						},
 					},
 				},
 			},
-			requestedModel: "gemini-3-pro-preview",
+			requestedModel: "gemini-3.1-pro-preview",
 			expected:       false, // gemini 平台不走 antigravity 映射
 		},
 		{

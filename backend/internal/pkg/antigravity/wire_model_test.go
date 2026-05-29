@@ -10,21 +10,41 @@ func TestAntigravityWireModel(t *testing.T) {
 	cases := []struct {
 		in, want string
 	}{
-		// Public → wire mappings from CLIProxyAPI PR #3490.
+		// Public → wire mappings, verified empirically against
+		// daily-cloudcode-pa.sandbox.googleapis.com via probe of
+		// /v1internal:fetchAvailableModels (May 2026 snapshot).
 		{"gemini-3.5-flash-high", "gemini-3-flash-agent"},
 		{"gemini-3.5-flash", "gemini-3.5-flash-low"},
 		{"gemini-3.5-flash-medium", "gemini-3.5-flash-low"},
+		// Public "Low" → wire "extra-low" (else backend serves Medium tier).
+		{"gemini-3.5-flash-low", "gemini-3.5-flash-extra-low"},
+		// 3 Flash legacy variants → base 3-flash.
 		{"gemini-3-flash-high", "gemini-3-flash"},
 		{"gemini-3-flash-medium", "gemini-3-flash"},
 		{"gemini-3-flash-low", "gemini-3-flash"},
+		// 3.1 Pro: high needs wire alias "gemini-pro-agent" (literal name → 400).
+		{"gemini-3.1-pro-high", "gemini-pro-agent"},
+		{"gemini-3.1-pro-low", "gemini-3.1-pro-low"}, // direct, passthrough
+		// Gemini 3 Pro is deprecated server-side. We REMOVED it from the
+		// public model list rather than auto-rewriting, so any caller still
+		// sending a 3-pro-* name gets the literal name passed through; the
+		// upstream "no longer available — switch to 3.1 Pro" error then
+		// surfaces verbatim. Better than silently serving a different tier.
+		{"gemini-3-pro-high", "gemini-3-pro-high"},
+		{"gemini-3-pro", "gemini-3-pro"},
+		{"gemini-3-pro-low", "gemini-3-pro-low"},
+		{"gemini-3-pro-preview", "gemini-3-pro-preview"},
 		// `models/` prefix normalization.
 		{"models/gemini-3.5-flash-high", "gemini-3-flash-agent"},
+		{"models/gemini-3.1-pro-high", "gemini-pro-agent"},
 		// Case insensitive on input, returns canonical wire name.
 		{"Gemini-3.5-Flash-High", "gemini-3-flash-agent"},
-		// Pass-through for non-3.x or already-wire names.
-		{"gemini-3-pro-high", "gemini-3-pro-high"},
-		{"gemini-3.1-pro-preview", "gemini-3.1-pro-preview"},
+		{"GEMINI-3.1-PRO-HIGH", "gemini-pro-agent"},
+		// Pass-through for non-mapped names.
 		{"claude-opus-4-7", "claude-opus-4-7"},
+		{"claude-sonnet-4-6", "claude-sonnet-4-6"},
+		{"gemini-pro-agent", "gemini-pro-agent"}, // already wire — idempotent
+		{"gemini-3-flash", "gemini-3-flash"},     // already wire — idempotent
 		{"", ""},
 	}
 	for _, tc := range cases {

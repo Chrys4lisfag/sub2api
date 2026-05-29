@@ -108,12 +108,12 @@ var DefaultAntigravityModelMapping = map[string]string{
 	"gemini-2.5-flash-thinking":      "gemini-2.5-flash-thinking",
 	"gemini-2.5-pro":                 "gemini-2.5-pro",
 	// Gemini 3 白名单
-	"gemini-3-flash":    "gemini-3-flash",
-	"gemini-3-pro-high": "gemini-3-pro-high",
-	"gemini-3-pro-low":  "gemini-3-pro-low",
-	// Gemini 3 preview 映射
+	"gemini-3-flash": "gemini-3-flash",
+	// 注: gemini-3-pro-* 已被 Google 在 daily-cloudcode-pa 弃用 (返回
+	// "Gemini 3 Pro is no longer available. Please switch to Gemini 3.1 Pro")
+	// 不再在白名单中暴露；管理员配置中保留的旧名称会原样转发并触发上游错误。
+	// Gemini 3 preview 映射 → 已合并入 3.1 Pro
 	"gemini-3-flash-preview": "gemini-3-flash",
-	"gemini-3-pro-preview":   "gemini-3-pro-high",
 	// Gemini 3.1 白名单
 	"gemini-3.1-pro-high": "gemini-3.1-pro-high",
 	"gemini-3.1-pro-low":  "gemini-3.1-pro-low",
@@ -130,9 +130,8 @@ var DefaultAntigravityModelMapping = map[string]string{
 	"gemini-3.5-flash":        "gemini-3.5-flash",
 	"gemini-3.5-flash-high":   "gemini-3.5-flash-high",
 	"gemini-3.5-flash-medium": "gemini-3.5-flash-medium",
-	// Gemini 3 image 兼容映射（向 3.1 image 迁移）
-	"gemini-3-pro-image":         "gemini-3.1-flash-image",
-	"gemini-3-pro-image-preview": "gemini-3.1-flash-image",
+	"gemini-3.5-flash-low":    "gemini-3.5-flash-low",
+	// 注: gemini-3-pro-image 同样已弃用，不在白名单。
 	// 其他官方模型
 	"gpt-oss-120b-medium":    "gpt-oss-120b-medium",
 	"tab_flash_lite_preview": "tab_flash_lite_preview",
