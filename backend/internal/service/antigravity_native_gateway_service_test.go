@@ -135,3 +135,95 @@ func TestChooseGeminiAction(t *testing.T) {
 		}
 	}
 }
+
+// ---------------------------------------------------------------------------
+// unwrapAgyResponseEnvelope*
+// ---------------------------------------------------------------------------
+
+// TestUnwrapBody_StripsResponseWrapper covers the agymimic non-streaming
+// shape: {"response":{...},"traceId":"…","metadata":{}}. Standard Gemini SDKs
+// expect the inner object at the top level.
+func TestUnwrapBody_StripsResponseWrapper(t *testing.T) {
+	in := []byte(`{"response":{"candidates":[{"content":{"role":"model","parts":[{"text":"ok"}]}}],"usageMetadata":{"promptTokenCount":3}},"traceId":"abc","metadata":{}}`)
+	out := unwrapAgyResponseEnvelopeBody(in)
+	var got map[string]any
+	if err := json.Unmarshal(out, &got); err != nil {
+		t.Fatalf("unwrapped body is not valid JSON: %v\nraw: %s", err, out)
+	}
+	if _, ok := got["candidates"]; !ok {
+		t.Fatalf("candidates missing at top level: %s", out)
+	}
+	if _, ok := got["usageMetadata"]; !ok {
+		t.Fatalf("usageMetadata missing at top level: %s", out)
+	}
+	if _, ok := got["response"]; ok {
+		t.Fatalf("response key should be gone: %s", out)
+	}
+}
+
+// TestUnwrapBody_PassthroughForAlreadyCanonical confirms a payload that
+// already has candidates at the top is returned untouched (so the unwrapper
+// is safe to chain through any forwarder, including the legacy antigravity
+// gateway if we ever fold paths together).
+func TestUnwrapBody_PassthroughForAlreadyCanonical(t *testing.T) {
+	in := []byte(`{"candidates":[{"content":{"role":"model","parts":[{"text":"ok"}]}}]}`)
+	out := unwrapAgyResponseEnvelopeBody(in)
+	if string(out) != string(in) {
+		t.Fatalf("canonical body mutated: got %s", out)
+	}
+}
+
+func TestUnwrapBody_PassthroughForInvalidJSON(t *testing.T) {
+	in := []byte(`not-json`)
+	out := unwrapAgyResponseEnvelopeBody(in)
+	if string(out) != string(in) {
+		t.Fatalf("invalid JSON mutated: got %s", out)
+	}
+}
+
+// TestUnwrapLine_StreamingChunk covers the streaming case — each `data:` line
+// carries the same envelope and needs the same unwrap, but the `data:` prefix
+// and trailing newline must survive.
+func TestUnwrapLine_StreamingChunk(t *testing.T) {
+	in := []byte(`data: {"response":{"candidates":[{"content":{"role":"model","parts":[{"text":"Hi"}]}}],"usageMetadata":{"promptTokenCount":3,"candidatesTokenCount":1,"totalTokenCount":4}},"traceId":"x","metadata":{}}` + "\n")
+	out := unwrapAgyResponseEnvelopeLine(in)
+	s := string(out)
+	if !strings.HasPrefix(s, "data: {") {
+		t.Fatalf("data prefix lost: %q", s)
+	}
+	if !strings.HasSuffix(s, "\n") {
+		t.Fatalf("trailing newline lost: %q", s)
+	}
+	if strings.Contains(s, `"response":`) {
+		t.Fatalf("response wrapper still present: %q", s)
+	}
+	if !strings.Contains(s, `"candidates":`) || !strings.Contains(s, `"usageMetadata":`) {
+		t.Fatalf("candidates/usage not surfaced: %q", s)
+	}
+}
+
+// TestUnwrapLine_PreservesCRLF — Windows / proxied clients sometimes emit
+// CRLF SSE framing; the unwrapper must keep CR + LF as-is so downstream
+// parsers don't choke.
+func TestUnwrapLine_PreservesCRLF(t *testing.T) {
+	in := []byte(`data: {"response":{"candidates":[]}}` + "\r\n")
+	out := unwrapAgyResponseEnvelopeLine(in)
+	if !strings.HasSuffix(string(out), "\r\n") {
+		t.Fatalf("CRLF lost: %q", string(out))
+	}
+}
+
+// TestUnwrapLine_PassthroughForNonDataLines — keep-alive comments and blank
+// keep-alive lines must not be rewritten.
+func TestUnwrapLine_PassthroughForNonDataLines(t *testing.T) {
+	for _, in := range [][]byte{
+		[]byte("\n"),
+		[]byte(": keep-alive\n"),
+		[]byte("event: ping\n"),
+	} {
+		out := unwrapAgyResponseEnvelopeLine(in)
+		if string(out) != string(in) {
+			t.Fatalf("non-data line mutated: in=%q out=%q", in, out)
+		}
+	}
+}

@@ -393,7 +393,12 @@ func (s *AntigravityNativeGatewayService) streamGeminiToClient(
 				result.FirstTokenMs = &firstTokenMs
 			}
 			buf = append(buf, chunkBuf[:n]...)
-			// flush by-line so SSE framing stays intact
+			// flush by-line so SSE framing stays intact.
+			// Each SSE line carries the agymimic envelope `{response: {candidates,
+			// usageMetadata, ...}}`. Standard Gemini SDKs (@google/genai etc.)
+			// expect the candidates payload at the top level — strip the
+			// `response` wrapper before forwarding so client parsers don't see
+			// an empty `candidates` array and report 0 tokens / no content.
 			for {
 				idx := bytes.IndexByte(buf, '\n')
 				if idx < 0 {
@@ -401,7 +406,8 @@ func (s *AntigravityNativeGatewayService) streamGeminiToClient(
 				}
 				line := buf[:idx+1]
 				buf = buf[idx+1:]
-				if _, wErr := c.Writer.Write(line); wErr != nil {
+				out := unwrapAgyResponseEnvelopeLine(line)
+				if _, wErr := c.Writer.Write(out); wErr != nil {
 					result.ClientDisconnect = true
 					_, _ = io.Copy(io.Discard, resp.Body)
 					return s.finalizeResult(result, startTime), nil
@@ -421,7 +427,8 @@ func (s *AntigravityNativeGatewayService) streamGeminiToClient(
 		if readErr != nil {
 			if readErr == io.EOF {
 				if len(buf) > 0 {
-					_, _ = c.Writer.Write(buf)
+					tail := unwrapAgyResponseEnvelopeLine(buf)
+					_, _ = c.Writer.Write(tail)
 					if flusher != nil {
 						flusher.Flush()
 					}
@@ -444,9 +451,14 @@ func (s *AntigravityNativeGatewayService) passNonStreamingGemini(
 	if err != nil {
 		return nil, err
 	}
+	// Standard Gemini SDKs read `candidates` / `usageMetadata` at the top
+	// level. The agymimic upstream wraps them inside a `response` field;
+	// unwrap before forwarding so non-streaming clients also see the
+	// canonical shape.
+	out := unwrapAgyResponseEnvelopeBody(raw)
 	c.Header("Content-Type", "application/json")
 	c.Writer.WriteHeader(http.StatusOK)
-	_, _ = c.Writer.Write(raw)
+	_, _ = c.Writer.Write(out)
 
 	result := &ForwardResult{
 		Model:         originalModel,
@@ -521,4 +533,77 @@ func extractGeminiUsageFromResponse(body []byte) *geminiUsageView {
 		ThinkingTokens:  env.Response.UsageMetadata.ThoughtsTokenCount,
 		ModelVersion:    env.Response.ModelVersion,
 	}
+}
+
+// unwrapAgyResponseEnvelopeBody strips the outer `{"response": {...}}`
+// wrapper agymimic / cloudcode-pa returns and emits the inner object as
+// canonical Gemini API JSON. Returns the input verbatim when:
+//   - it is not valid JSON
+//   - the parsed object has no `response` field
+//   - the `response` field is not an object
+//
+// The non-streaming wrapper preserves any extra top-level fields by
+// returning the inner object directly (the spec only allows the standard
+// candidate / usageMetadata / modelVersion / promptFeedback keys at the
+// top of a generateContent response).
+func unwrapAgyResponseEnvelopeBody(body []byte) []byte {
+	trimmed := bytes.TrimSpace(body)
+	if len(trimmed) == 0 || trimmed[0] != '{' {
+		return body
+	}
+	var env struct {
+		Response json.RawMessage `json:"response"`
+	}
+	if err := json.Unmarshal(trimmed, &env); err != nil || len(env.Response) == 0 {
+		return body
+	}
+	// Sanity check: the unwrapped value should also be a JSON object.
+	inner := bytes.TrimSpace(env.Response)
+	if len(inner) == 0 || inner[0] != '{' {
+		return body
+	}
+	return inner
+}
+
+// unwrapAgyResponseEnvelopeLine unwraps a single SSE line of the form
+//
+//	data: {"response": {...}}
+//
+// into
+//
+//	data: {...}
+//
+// preserving the `data: ` prefix and trailing newline(s). Non-data lines
+// (comments, empty keep-alives) are returned verbatim. Lines whose JSON
+// payload is not enveloped fall through to the body unwrapper, which
+// returns them unchanged.
+func unwrapAgyResponseEnvelopeLine(line []byte) []byte {
+	const prefix = "data:"
+	// Detach trailing CR/LF so we can reattach after rewriting.
+	tail := line
+	cr := 0
+	for len(tail) > 0 && (tail[len(tail)-1] == '\n' || tail[len(tail)-1] == '\r') {
+		cr++
+		tail = tail[:len(tail)-1]
+	}
+	if !bytes.HasPrefix(bytes.TrimSpace(tail), []byte(prefix)) {
+		return line
+	}
+	// Find the colon and unwrap the JSON payload.
+	idx := bytes.IndexByte(tail, ':')
+	if idx < 0 {
+		return line
+	}
+	head := tail[:idx+1]
+	payload := tail[idx+1:]
+	unwrapped := unwrapAgyResponseEnvelopeBody(bytes.TrimSpace(payload))
+	// Preserve the single space after `data:` that real Gemini APIs emit.
+	out := make([]byte, 0, len(head)+1+len(unwrapped)+cr)
+	out = append(out, head...)
+	out = append(out, ' ')
+	out = append(out, unwrapped...)
+	for i := 0; i < cr; i++ {
+		out = append(out, line[len(line)-cr+i])
+	}
+	return out
 }
