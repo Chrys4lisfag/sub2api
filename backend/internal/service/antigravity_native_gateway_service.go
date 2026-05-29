@@ -390,6 +390,13 @@ func (s *AntigravityNativeGatewayService) streamGeminiToClient(
 	first := true
 	var firstTokenMs int
 	var lastChunkPayload []byte // last unwrapped JSON payload, used for end-of-stream anomaly inspection
+	// Stream-wide signals — must be accumulated across all chunks because the
+	// final chunk almost always has empty `text` + a thoughtSignature + STOP.
+	// Inspecting that chunk alone would (and did) raise a false-positive
+	// `stop_without_content` even on perfectly-fine completions.
+	streamSawText := false
+	streamSawFunctionCall := false
+	streamEmptyArgsFn := ""
 	for {
 		n, readErr := resp.Body.Read(chunkBuf)
 		if n > 0 {
@@ -423,6 +430,16 @@ func (s *AntigravityNativeGatewayService) streamGeminiToClient(
 				}
 				if payload := extractDataPayload(out); len(payload) > 0 {
 					lastChunkPayload = append(lastChunkPayload[:0], payload...)
+					sawText, sawFn, emptyArgsFn := inspectStreamChunk(payload)
+					if sawText {
+						streamSawText = true
+					}
+					if sawFn {
+						streamSawFunctionCall = true
+					}
+					if emptyArgsFn != "" && streamEmptyArgsFn == "" {
+						streamEmptyArgsFn = emptyArgsFn
+					}
 				}
 				if u := extractGeminiUsageFromSSELine(line); u != nil {
 					result.Usage.InputTokens = u.PromptTokens
@@ -443,6 +460,16 @@ func (s *AntigravityNativeGatewayService) streamGeminiToClient(
 					}
 					if payload := extractDataPayload(tail); len(payload) > 0 {
 						lastChunkPayload = append(lastChunkPayload[:0], payload...)
+						sawText, sawFn, emptyArgsFn := inspectStreamChunk(payload)
+						if sawText {
+							streamSawText = true
+						}
+						if sawFn {
+							streamSawFunctionCall = true
+						}
+						if emptyArgsFn != "" && streamEmptyArgsFn == "" {
+							streamEmptyArgsFn = emptyArgsFn
+						}
 					}
 				}
 				break
@@ -450,12 +477,60 @@ func (s *AntigravityNativeGatewayService) streamGeminiToClient(
 			return nil, readErr
 		}
 	}
-	if len(lastChunkPayload) > 0 {
-		if anomaly, details := inspectGeminiResponseForAnomalies(lastChunkPayload); anomaly != "" {
-			logNativeRequestAnomaly(ctx, accountID, originalModel, wireModel, true, lastChunkPayload, anomaly, details)
-		}
+	// Anomaly classification — stream-wide so we don't fire on benign final
+	// chunks that only carry a thoughtSignature + finishReason=STOP.
+	if streamEmptyArgsFn != "" {
+		logNativeRequestAnomaly(ctx, accountID, originalModel, wireModel, true, lastChunkPayload,
+			"empty_function_args", map[string]string{"function": streamEmptyArgsFn, "reason": "args missing/empty across stream"})
+	} else if !streamSawText && !streamSawFunctionCall && len(lastChunkPayload) > 0 {
+		logNativeRequestAnomaly(ctx, accountID, originalModel, wireModel, true, lastChunkPayload,
+			"stop_without_content", map[string]string{"reason": "no text and no function call seen across stream"})
 	}
 	return s.finalizeResult(result, startTime), nil
+}
+
+// inspectStreamChunk parses a single SSE data payload and reports whether
+// it carries text, a function call, and (if it carries a function call)
+// whether the args are missing/empty. Returns ("",) when the payload is
+// not valid JSON. The empty-args check fires on a per-chunk basis because
+// once a function call is emitted streaming concludes immediately — there's
+// no "later chunk" to redeem an args={} call.
+func inspectStreamChunk(payload []byte) (sawText bool, sawFunctionCall bool, emptyArgsFn string) {
+	type part struct {
+		Text         *string                `json:"text,omitempty"`
+		FunctionCall map[string]interface{} `json:"functionCall,omitempty"`
+	}
+	type candidate struct {
+		Content struct {
+			Parts []part `json:"parts"`
+		} `json:"content"`
+	}
+	var env struct {
+		Candidates []candidate `json:"candidates"`
+	}
+	if err := json.Unmarshal(payload, &env); err != nil {
+		return false, false, ""
+	}
+	for _, c := range env.Candidates {
+		for _, p := range c.Content.Parts {
+			if p.Text != nil && *p.Text != "" {
+				sawText = true
+			}
+			if p.FunctionCall != nil {
+				sawFunctionCall = true
+				name, _ := p.FunctionCall["name"].(string)
+				args, hasArgs := p.FunctionCall["args"]
+				if !hasArgs || args == nil {
+					emptyArgsFn = name
+					continue
+				}
+				if m, ok := args.(map[string]interface{}); ok && len(m) == 0 {
+					emptyArgsFn = name
+				}
+			}
+		}
+	}
+	return sawText, sawFunctionCall, emptyArgsFn
 }
 
 // extractDataPayload returns the JSON object embedded in an SSE `data:` line,

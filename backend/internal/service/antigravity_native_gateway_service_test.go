@@ -306,3 +306,58 @@ func TestExtractDataPayload(t *testing.T) {
 		})
 	}
 }
+
+// ---------------------------------------------------------------------------
+// inspectStreamChunk
+// ---------------------------------------------------------------------------
+
+// Streaming chunks come in three flavors during a normal completion:
+//
+//	chunk 1: text fragment
+//	chunk 2: text fragment
+//	chunk N: thoughtSignature + text="" + finishReason=STOP  ← benign tail
+//
+// The original anomaly inspector only looked at the LAST chunk and
+// raised stop_without_content even though chunks 1..N-1 carried text.
+// inspectStreamChunk is per-chunk and the streamGeminiToClient loop
+// accumulates the booleans across the entire stream.
+func TestInspectStreamChunk_TextChunk(t *testing.T) {
+	in := []byte(`{"candidates":[{"content":{"role":"model","parts":[{"text":"hi"}]}}]}`)
+	saw, fn, empty := inspectStreamChunk(in)
+	if !saw || fn || empty != "" {
+		t.Fatalf("text chunk: sawText=%v sawFn=%v emptyArgs=%q want sawText=true rest empty", saw, fn, empty)
+	}
+}
+
+func TestInspectStreamChunk_FinalThoughtSignatureOnly(t *testing.T) {
+	// This is the chunk that previously triggered the false-positive.
+	in := []byte(`{"candidates":[{"content":{"role":"model","parts":[{"thoughtSignature":"abc","text":""}]},"finishReason":"STOP"}]}`)
+	saw, fn, empty := inspectStreamChunk(in)
+	if saw || fn || empty != "" {
+		t.Fatalf("final-tail chunk should report nothing: sawText=%v sawFn=%v emptyArgs=%q", saw, fn, empty)
+	}
+}
+
+func TestInspectStreamChunk_FunctionCallWithArgs(t *testing.T) {
+	in := []byte(`{"candidates":[{"content":{"role":"model","parts":[{"functionCall":{"name":"find","args":{"paths":["."]}}}]}}]}`)
+	saw, fn, empty := inspectStreamChunk(in)
+	if saw || !fn || empty != "" {
+		t.Fatalf("good function call: sawText=%v sawFn=%v emptyArgs=%q want sawFn=true rest false", saw, fn, empty)
+	}
+}
+
+func TestInspectStreamChunk_FunctionCallEmptyArgs(t *testing.T) {
+	// The actual omp/Zod failure pattern.
+	in := []byte(`{"candidates":[{"content":{"role":"model","parts":[{"functionCall":{"name":"find","args":{}}}]}}]}`)
+	saw, fn, empty := inspectStreamChunk(in)
+	if saw || !fn || empty != "find" {
+		t.Fatalf("empty-args fn call: sawText=%v sawFn=%v emptyArgs=%q want sawFn=true emptyArgs=find", saw, fn, empty)
+	}
+}
+
+func TestInspectStreamChunk_InvalidJSON(t *testing.T) {
+	saw, fn, empty := inspectStreamChunk([]byte("garbage"))
+	if saw || fn || empty != "" {
+		t.Fatalf("invalid JSON should be silent: %v %v %q", saw, fn, empty)
+	}
+}
