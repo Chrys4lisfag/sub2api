@@ -88,6 +88,18 @@ RUN VERSION_VALUE="${VERSION}" && \
     -o /app/sub2api \
     ./cmd/server
 
+# Verify the embed actually picked up the dist/. If asset hashes from
+# vite's chunk names don't appear in the binary, the build is broken
+# and we fail fast rather than ship an image that 404s every route.
+RUN echo "=== binary embed check ===" && \
+    ls -la /app/sub2api && \
+    bin_size=$(stat -c '%s' /app/sub2api) && \
+    echo "binary size: $bin_size" && \
+    test "$bin_size" -gt 80000000 || (echo "FATAL: binary < 80MB — likely missing embed" && exit 1) && \
+    grep -c vendor-vue /app/sub2api > /tmp/vc.txt && vc=$(cat /tmp/vc.txt) && \
+    echo "vendor-vue refs in binary: $vc" && \
+    test "$vc" -gt 0 || (echo "FATAL: binary does not contain vendor-vue — embed empty" && exit 1)
+
 # -----------------------------------------------------------------------------
 # Stage 3: PostgreSQL Client (version-matched with docker-compose)
 # -----------------------------------------------------------------------------
