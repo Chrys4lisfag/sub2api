@@ -1,11 +1,7 @@
-# Runtime image only. The frontend + backend binary is built on the GHA
-# runner (see .github/workflows/docker-publish.yml) and copied in pre-built.
-# This bypasses the buildkit weirdness in CI where `go embed` silently
-# produced binaries with no frontend bytes inside.
+# Runtime image. Binary built on GHA runner; this only packages it.
 ARG ALPINE_IMAGE=alpine:3.21
 ARG POSTGRES_IMAGE=postgres:18-alpine
 
-# pg_dump / psql are version-pinned to match the docker-compose postgres.
 FROM ${POSTGRES_IMAGE} AS pg-client
 
 FROM ${ALPINE_IMAGE}
@@ -14,8 +10,6 @@ LABEL maintainer="Wei-Shaw <github.com/Wei-Shaw>"
 LABEL description="Sub2API - AI API Gateway Platform"
 LABEL org.opencontainers.image.source="https://github.com/Wei-Shaw/sub2api"
 
-# Runtime deps. su-exec for the entrypoint's drop-privileges step;
-# libpq/libldap/etc for the postgres client tools we ship.
 RUN apk add --no-cache \
     ca-certificates \
     tzdata \
@@ -37,13 +31,23 @@ RUN addgroup -g 1000 sub2api && \
 
 WORKDIR /app
 
-# Binary built on the runner; context root is the repo root.
-COPY --chown=sub2api:sub2api ./sub2api /app/sub2api
-COPY --chown=sub2api:sub2api backend/resources /app/resources
+# Binary comes pre-built from the runner; .gitignore excludes
+# `backend/sub2api` BUT the runner outputs to ./sub2api (repo root),
+# which IS in the docker context.
+COPY ./sub2api /app/sub2api
+RUN echo "=== binary-after-copy diag ===" && \
+    ls -la /app/sub2api && \
+    bin_size=$(stat -c '%s' /app/sub2api) && \
+    echo "in-image binary size: $bin_size (expect > 88M)" && \
+    if [ "$bin_size" -lt 88000000 ]; then \
+      echo "FATAL: copied binary < 88MB — context dropped frontend bytes"; \
+      exit 1; \
+    fi && \
+    chmod +x /app/sub2api && \
+    chown sub2api:sub2api /app/sub2api
 
-RUN chmod +x /app/sub2api && \
-    mkdir -p /app/data && \
-    chown sub2api:sub2api /app/data
+COPY --chown=sub2api:sub2api backend/resources /app/resources
+RUN mkdir -p /app/data && chown sub2api:sub2api /app/data
 
 COPY deploy/docker-entrypoint.sh /app/docker-entrypoint.sh
 RUN chmod +x /app/docker-entrypoint.sh
