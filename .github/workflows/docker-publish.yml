@@ -67,7 +67,11 @@ jobs:
         run: |
           VERSION_VALUE="$(tr -d '\r\n' < ./cmd/server/VERSION)"
           DATE_VALUE="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          # Force full rebuild — go-embed cache invalidation has been
+          # observed to silently reuse an old empty-dist embed.
+          go clean -cache
           go build \
+            -a \
             -tags embed \
             -ldflags="-s -w -X main.Version=${VERSION_VALUE} -X main.Commit=${{ github.sha }} -X main.Date=${DATE_VALUE} -X main.BuildType=release" \
             -trimpath \
@@ -75,9 +79,16 @@ jobs:
             ./cmd/server
           echo "=== binary embed check ==="
           ls -la ../sub2api
-          test "$(stat -c '%s' ../sub2api)" -gt 88000000 || (echo "FATAL: binary missing embed" && exit 1)
-          test "$(grep -c vendor-vue ../sub2api)" -gt 50 || (echo "FATAL: vendor-vue refs < 50" && exit 1)
-          echo "binary size: $(stat -c '%s' ../sub2api) bytes"
+          bin_size=$(stat -c '%s' ../sub2api)
+          echo "binary size: $bin_size"
+          vc=$(grep -c vendor-vue ../sub2api || echo 0)
+          echo "vendor-vue refs: $vc"
+          av=$(grep -c AccountsView ../sub2api || echo 0)
+          echo "AccountsView refs: $av"
+          if [ "$bin_size" -lt 88000000 ]; then echo "FATAL: binary too small ($bin_size < 88M)"; exit 1; fi
+          if [ "$vc" -lt 50 ]; then echo "FATAL: vendor-vue refs too few ($vc < 50)"; exit 1; fi
+          if [ "$av" -lt 5 ]; then echo "FATAL: AccountsView refs too few ($av < 5)"; exit 1; fi
+          echo "✓ embed verified"
 
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
