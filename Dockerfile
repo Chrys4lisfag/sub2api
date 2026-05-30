@@ -65,6 +65,17 @@ COPY backend/ ./
 # Copy frontend dist from previous stage (must be after backend copy to avoid being overwritten)
 COPY --from=frontend-builder /app/backend/internal/web/dist ./internal/web/dist
 
+# Probe the embed source so a broken multi-stage COPY surfaces in build logs
+# rather than silently producing a frontend-less binary that 404s on every
+# route. Fail loudly if vite output didn't land where go-embed expects.
+RUN echo "=== embed-source content ===" && \
+    ls -la ./internal/web/dist/ && \
+    test -f ./internal/web/dist/index.html || (echo "FATAL: dist/index.html missing in backend-builder" && exit 1) && \
+    test -d ./internal/web/dist/assets || (echo "FATAL: dist/assets missing in backend-builder" && exit 1) && \
+    asset_count=$(ls ./internal/web/dist/assets/ | wc -l) && \
+    echo "dist/assets entry count: $asset_count" && \
+    test "$asset_count" -gt 10 || (echo "FATAL: dist/assets has fewer than 10 entries — vite likely failed silently" && exit 1)
+
 # Build the binary (BuildType=release for CI builds, embed frontend)
 # Version precedence: build arg VERSION > cmd/server/VERSION
 RUN VERSION_VALUE="${VERSION}" && \
