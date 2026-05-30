@@ -90,6 +90,19 @@ jobs:
           if [ "$av" -lt 5 ]; then echo "FATAL: AccountsView refs too few ($av < 5)"; exit 1; fi
           echo "✓ embed verified"
 
+      - name: Inspect workspace before docker build
+        run: |
+          echo "--- workspace root ---"
+          ls -la
+          echo "--- sub2api binary ---"
+          ls -la sub2api
+          stat sub2api
+          file sub2api
+          sha256sum sub2api
+          echo "size again: $(stat -c '%s' sub2api)"
+          # If the binary doesn't exist OR is too small, we'd fail loudly.
+          test -f sub2api || (echo "FATAL: sub2api binary missing at workspace root" && exit 1)
+          test "$(stat -c '%s' sub2api)" -gt 88000000 || { echo "FATAL: binary < 88MB at docker-input boundary"; exit 1; }
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
 
