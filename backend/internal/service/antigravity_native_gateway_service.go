@@ -17,6 +17,7 @@ package service
 
 import (
 	"bytes"
+	"compress/gzip"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -1120,8 +1121,26 @@ func (s *AntigravityNativeGatewayService) nativeRawJSON(
 	if err != nil {
 		return nil, fmt.Errorf("native quota: %s: %w", path, err)
 	}
-	raw, readErr := io.ReadAll(resp.Body)
-	_ = resp.Body.Close()
+	defer resp.Body.Close()
+
+	// agymimic pins `Accept-Encoding: gzip` on every cloudcode-pa request to
+	// match real agy.exe's wire fingerprint. When the client sets that
+	// header explicitly, net/http intentionally does NOT auto-decode — the
+	// caller is expected to handle Content-Encoding itself.
+	//
+	// Without this, the response body still has the gzip magic bytes
+	// (\x1f\x8b…) and json.Unmarshal blows up with
+	// "invalid character '\x1f' looking for beginning of value".
+	var bodyReader io.Reader = resp.Body
+	if strings.EqualFold(resp.Header.Get("Content-Encoding"), "gzip") {
+		gr, gzErr := gzip.NewReader(resp.Body)
+		if gzErr != nil {
+			return nil, fmt.Errorf("native quota: gzip reader %s: %w", path, gzErr)
+		}
+		defer func() { _ = gr.Close() }()
+		bodyReader = gr
+	}
+	raw, readErr := io.ReadAll(bodyReader)
 	if readErr != nil {
 		return nil, fmt.Errorf("native quota: read %s: %w", path, readErr)
 	}
