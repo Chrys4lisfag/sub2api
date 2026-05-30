@@ -1024,3 +1024,164 @@ func inspectGeminiResponseForAnomalies(body []byte) (string, map[string]string) 
 	}
 	return "", nil
 }
+
+// ────────────────────────────────────────────────────────────────────────────
+// Quota fetch — every request goes through agymimic's api.Client so the
+// wire fingerprint, identity, and token refresh match real agy.exe. Mirrors
+// the legacy *antigravity.Client.FetchAvailableModels + LoadCodeAssist pair
+// but uses agynative.NewAPIClient under the hood.
+// ────────────────────────────────────────────────────────────────────────────
+
+// FetchQuota performs the two cloudcode-pa roundtrips a dashboard usage
+// refresh needs:
+//   - /v1internal:fetchAvailableModels  → model list + per-model quota
+//   - /v1internal:loadCodeAssist        → tier + AI Credits balance
+//
+// Both calls are issued via the cached agymimic api.Client (so the bearer
+// token is auto-refreshed by agymimic before each request). On a successful
+// refresh inside ensureFresh() the new tokens are persisted back to the DB
+// so subsequent dashboard polls don't trigger another redundant refresh.
+//
+// Returns parsed legacy types so the downstream UsageInfo builder in
+// AntigravityQuotaFetcher can stay identical between legacy and native.
+func (s *AntigravityNativeGatewayService) FetchQuota(
+	ctx context.Context,
+	account *Account,
+) (*antigravity.FetchAvailableModelsResponse, *antigravity.LoadCodeAssistResponse, error) {
+	if account == nil {
+		return nil, nil, fmt.Errorf("native quota: nil account")
+	}
+	if account.Platform != domain.PlatformAntigravityNative {
+		return nil, nil, fmt.Errorf("native quota: wrong platform %q", account.Platform)
+	}
+
+	cli, err := s.getClient(ctx, account)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	// 1) fetchAvailableModels — body is literally {} per agy.exe wire capture.
+	//    cli.RawRequest calls ensureFresh() internally, refreshing the
+	//    access_token via agyauth.RefreshWithClient if it's within 30 s of
+	//    expiry, then attaches the agy-style headers.
+	modelsResp, err := s.nativeRawJSON(ctx, cli, "/v1internal:fetchAvailableModels", []byte("{}"))
+	if err != nil {
+		return nil, nil, err
+	}
+	var models antigravity.FetchAvailableModelsResponse
+	if err := json.Unmarshal(modelsResp, &models); err != nil {
+		return nil, nil, fmt.Errorf("native quota: parse fetchAvailableModels: %w", err)
+	}
+
+	// 2) loadCodeAssist — body matches agy.exe's wire (just ideType plus an
+	//    optional duetProject hint). Failure here is non-fatal: tier display
+	//    and AI Credits balance go missing but the model list still renders.
+	loadBody := map[string]any{
+		"metadata": map[string]any{"ideType": "ANTIGRAVITY"},
+	}
+	if pid := strings.TrimSpace(cli.ProjectID()); pid != "" {
+		loadBody["metadata"].(map[string]any)["duetProject"] = pid
+	}
+	loadBodyBytes, _ := json.Marshal(loadBody)
+	loadRaw, err := s.nativeRawJSON(ctx, cli, "/v1internal:loadCodeAssist", loadBodyBytes)
+	if err != nil {
+		slog.WarnContext(ctx, "native quota: loadCodeAssist failed (non-fatal)",
+			"account_id", account.ID, "error", err)
+		s.maybePersistRefreshedTokens(ctx, account, cli)
+		return &models, nil, nil
+	}
+	var load antigravity.LoadCodeAssistResponse
+	if err := json.Unmarshal(loadRaw, &load); err != nil {
+		slog.WarnContext(ctx, "native quota: parse loadCodeAssist (non-fatal)",
+			"account_id", account.ID, "error", err)
+		s.maybePersistRefreshedTokens(ctx, account, cli)
+		return &models, nil, nil
+	}
+
+	s.maybePersistRefreshedTokens(ctx, account, cli)
+	return &models, &load, nil
+}
+
+// nativeRawJSON wraps cli.RawRequest with the bookkeeping every native
+// cloudcode-pa call needs:
+//   - drain and close the response body once
+//   - decode HTTP 403 into *antigravity.ForbiddenError so the upstream
+//     forbidden-classification path in AntigravityQuotaFetcher fires
+//   - turn non-200 into the same error shape the legacy client uses
+//     ("fetchAvailableModels 失败 (HTTP <n>): <body>") so existing
+//     buildAntigravityDegradedUsage heuristics still classify it
+func (s *AntigravityNativeGatewayService) nativeRawJSON(
+	ctx context.Context,
+	cli *api.Client,
+	path string,
+	body []byte,
+) ([]byte, error) {
+	resp, err := cli.RawRequest(ctx, path, body)
+	if err != nil {
+		return nil, fmt.Errorf("native quota: %s: %w", path, err)
+	}
+	raw, readErr := io.ReadAll(resp.Body)
+	_ = resp.Body.Close()
+	if readErr != nil {
+		return nil, fmt.Errorf("native quota: read %s: %w", path, readErr)
+	}
+	switch resp.StatusCode {
+	case http.StatusOK:
+		return raw, nil
+	case http.StatusForbidden:
+		return nil, &antigravity.ForbiddenError{StatusCode: resp.StatusCode, Body: string(raw)}
+	default:
+		// Keep error string compatible with buildAntigravityDegradedUsage
+		// (which checks for "HTTP 401" / "HTTP 429" substrings).
+		return nil, fmt.Errorf("fetchAvailableModels 失败 (HTTP %d): %s", resp.StatusCode, string(raw))
+	}
+}
+
+// maybePersistRefreshedTokens compares the agymimic client's current in-memory
+// tokens against the account's stored credentials. If agymimic's
+// ensureFresh() refreshed the access_token during this FetchQuota call, the
+// new pair is written back to the DB so the next dashboard poll (or the
+// background TokenRefreshService) sees the fresh values and doesn't trigger
+// a redundant refresh.
+//
+// Best-effort: a persistence failure is logged but does not affect the
+// quota result we return to the caller.
+func (s *AntigravityNativeGatewayService) maybePersistRefreshedTokens(
+	ctx context.Context,
+	account *Account,
+	cli *api.Client,
+) {
+	if cli == nil || account == nil || s.accountRepo == nil {
+		return
+	}
+	fresh := cli.Tokens()
+	if fresh.AccessToken == "" {
+		return
+	}
+	stored, _ := account.Credentials["access_token"].(string)
+	if fresh.AccessToken == stored {
+		return // no refresh happened
+	}
+	updated := map[string]any{
+		"access_token":    fresh.AccessToken,
+		"refresh_token":   fresh.RefreshToken,
+		"token_type":      "Bearer",
+		"email":           fresh.Email,
+		"project_id":      fresh.ProjectID,
+		"tier_id":         fresh.TierID,
+		"installation_id": fresh.InstallationID,
+		"instance_label":  fresh.InstanceLabel,
+		"connection_id":   fresh.ConnectionID,
+	}
+	if !fresh.ExpiresAt.IsZero() {
+		updated["expires_at"] = fresh.ExpiresAt.Unix()
+	}
+	merged := MergeCredentials(account.Credentials, updated)
+	if err := persistAccountCredentials(ctx, s.accountRepo, account, merged); err != nil {
+		slog.WarnContext(ctx, "native quota: persist refreshed tokens failed",
+			"account_id", account.ID, "error", err)
+		return
+	}
+	// (cached client still has fresh tokens in memory; persistence above is
+	// purely for the next process start / dashboard poll.)
+}

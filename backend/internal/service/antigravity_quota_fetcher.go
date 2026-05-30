@@ -25,14 +25,37 @@ const (
 	errorCodeNetworkError    = "network_error"
 )
 
+// NativeQuotaFetcher is the per-account quota fetch contract satisfied by
+// AntigravityNativeGatewayService. Defined here as an interface so the
+// quota fetcher can depend on it without taking a hard reference to the
+// concrete service (which would create a wire-time ordering loop with
+// AccountUsageService).
+//
+// All requests issued by the implementation MUST go through agymimic so
+// the wire fingerprint, identity, and token refresh match real agy.exe.
+type NativeQuotaFetcher interface {
+	FetchQuota(ctx context.Context, account *Account) (
+		*antigravity.FetchAvailableModelsResponse,
+		*antigravity.LoadCodeAssistResponse,
+		error,
+	)
+}
+
 // AntigravityQuotaFetcher 从 Antigravity API 获取额度
 type AntigravityQuotaFetcher struct {
-	proxyRepo ProxyRepository
+	proxyRepo     ProxyRepository
+	nativeFetcher NativeQuotaFetcher // set via SetNativeFetcher post-wire
 }
 
 // NewAntigravityQuotaFetcher 创建 AntigravityQuotaFetcher
 func NewAntigravityQuotaFetcher(proxyRepo ProxyRepository) *AntigravityQuotaFetcher {
 	return &AntigravityQuotaFetcher{proxyRepo: proxyRepo}
+}
+
+// SetNativeFetcher injects the AntigravityNativeGatewayService impl after
+// construction. Wired in cmd/server/wire_gen.go once both services exist.
+func (f *AntigravityQuotaFetcher) SetNativeFetcher(nf NativeQuotaFetcher) {
+	f.nativeFetcher = nf
 }
 
 // CanFetch 检查是否可以获取此账户的额度
@@ -45,7 +68,62 @@ func (f *AntigravityQuotaFetcher) CanFetch(account *Account) bool {
 }
 
 // FetchQuota 获取 Antigravity 账户额度信息
+//
+// Native accounts (platform=antigravity_native) route through the agymimic
+// SDK exclusively — fetchAvailableModels and loadCodeAssist both go via
+// AntigravityNativeGatewayService.FetchQuota so the access_token is
+// auto-refreshed by agymimic.ensureFresh() and the wire matches agy.exe.
+// Legacy antigravity accounts use the in-tree antigravity.Client.
 func (f *AntigravityQuotaFetcher) FetchQuota(ctx context.Context, account *Account, proxyURL string) (*QuotaResult, error) {
+	if account != nil && account.Platform == PlatformAntigravityNative {
+		return f.fetchQuotaNative(ctx, account)
+	}
+	return f.fetchQuotaLegacy(ctx, account, proxyURL)
+}
+
+// fetchQuotaNative wraps NativeQuotaFetcher with the same
+// QuotaResult/UsageInfo shape the legacy code path returns.
+func (f *AntigravityQuotaFetcher) fetchQuotaNative(ctx context.Context, account *Account) (*QuotaResult, error) {
+	if f.nativeFetcher == nil {
+		return nil, fmt.Errorf("native quota: NativeQuotaFetcher not wired")
+	}
+	modelsResp, loadResp, err := f.nativeFetcher.FetchQuota(ctx, account)
+	if err != nil {
+		// 403 Forbidden: don't error, surface is_forbidden so the dashboard
+		// banner shows the right state (validation / violation / forbidden).
+		var forbiddenErr *antigravity.ForbiddenError
+		if errors.As(err, &forbiddenErr) {
+			now := time.Now()
+			fbType := classifyForbiddenType(forbiddenErr.Body)
+			return &QuotaResult{
+				UsageInfo: &UsageInfo{
+					UpdatedAt:       &now,
+					IsForbidden:     true,
+					ForbiddenReason: forbiddenErr.Body,
+					ForbiddenType:   fbType,
+					ValidationURL:   extractValidationURL(forbiddenErr.Body),
+					NeedsVerify:     fbType == forbiddenTypeValidation,
+					IsBanned:        fbType == forbiddenTypeViolation,
+					ErrorCode:       errorCodeForbidden,
+				},
+			}, nil
+		}
+		return nil, err
+	}
+
+	tierRaw := ""
+	tierNormalized := ""
+	if loadResp != nil {
+		tierRaw = loadResp.GetTier()
+		tierNormalized = normalizeTier(tierRaw)
+	}
+	usageInfo := f.buildUsageInfo(modelsResp, tierRaw, tierNormalized, loadResp)
+	return &QuotaResult{UsageInfo: usageInfo}, nil
+}
+
+// fetchQuotaLegacy is the original cloudcode-pa path used by
+// platform=antigravity accounts. Unchanged behavior.
+func (f *AntigravityQuotaFetcher) fetchQuotaLegacy(ctx context.Context, account *Account, proxyURL string) (*QuotaResult, error) {
 	accessToken := account.GetCredential("access_token")
 	projectID := account.GetCredential("project_id")
 

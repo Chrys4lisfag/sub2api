@@ -174,6 +174,10 @@ func initializeApplication(buildInfo handler.BuildInfo) (*Application, error) {
 	antigravityNativeOAuthService := service.NewAntigravityNativeOAuthService(proxyRepository)
 	antigravityGatewayService := service.NewAntigravityGatewayService(accountRepository, gatewayCache, schedulerSnapshotService, antigravityTokenProvider, rateLimitService, httpUpstream, settingService, internal500CounterCache)
 	antigravityNativeGatewayService := service.NewAntigravityNativeGatewayService(accountRepository, proxyRepository, antigravityNativeOAuthService)
+	// Inject the agymimic-backed native gateway as the quota fetcher
+	// for platform=antigravity_native. Keeps native dashboard refresh on
+	// the agymimic wire (token auto-refresh + agy.exe headers).
+	antigravityQuotaFetcher.SetNativeFetcher(antigravityNativeGatewayService)
 	accountTestService := service.NewAccountTestService(accountRepository, geminiTokenProvider, claudeTokenProvider, antigravityGatewayService, httpUpstream, configConfig, tlsFingerprintProfileService)
 	crsSyncService := service.NewCRSSyncService(accountRepository, proxyRepository, oAuthService, openAIOAuthService, geminiOAuthService, configConfig)
 	accountHandler := admin.NewAccountHandler(adminService, oAuthService, openAIOAuthService, geminiOAuthService, antigravityOAuthService, antigravityNativeOAuthService, rateLimitService, accountUsageService, accountTestService, concurrencyService, crsSyncService, sessionLimitCache, rpmCache, compositeTokenCacheInvalidator)

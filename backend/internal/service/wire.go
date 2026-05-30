@@ -131,6 +131,20 @@ func ProvideAntigravityTokenProvider(
 	return p
 }
 
+// ProvideAntigravityQuotaFetcher constructs the quota fetcher and wires
+// the agymimic-backed native gateway into it via SetNativeFetcher. This
+// ensures platform=antigravity_native dashboard refreshes route through
+// agymimic (token auto-refresh + agy.exe wire fingerprint) rather than
+// the legacy in-tree antigravity.Client.
+func ProvideAntigravityQuotaFetcher(
+	proxyRepo ProxyRepository,
+	nativeGateway *AntigravityNativeGatewayService,
+) *AntigravityQuotaFetcher {
+	f := NewAntigravityQuotaFetcher(proxyRepo)
+	f.SetNativeFetcher(nativeGateway)
+	return f
+}
+
 // ProvideDashboardAggregationService 创建并启动仪表盘聚合服务
 func ProvideDashboardAggregationService(repo DashboardAggregationRepository, timingWheel *TimingWheelService, cfg *config.Config) *DashboardAggregationService {
 	svc := NewDashboardAggregationService(repo, timingWheel, cfg)
@@ -549,7 +563,7 @@ var ProviderSet = wire.NewSet(
 	ProvideDashboardAggregationService,
 	ProvideUsageCleanupService,
 	ProvideDeferredService,
-	NewAntigravityQuotaFetcher,
+	ProvideAntigravityQuotaFetcher,
 	NewUserAttributeService,
 	NewUsageCache,
 	NewTotpService,
