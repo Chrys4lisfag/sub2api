@@ -52,7 +52,12 @@ func New(tokens *auth.Tokens, opts ...Option) *Client {
 		endpoint: I.EndpointDailySandbox,
 		httpc: &http.Client{
 			Transport: &http.Transport{
-				ForceAttemptHTTP2:     true, // agy uses HTTP/2 to cloudcode-pa
+				// Real agy.exe uses HTTP/1.1 with Transfer-Encoding: chunked to
+				// cloudcode-pa (verified via Frida capture May 2026). Earlier
+				// http2debug=2 logs that suggested HTTP/2 were ONLY for the
+				// Unleash + oauth endpoints; cloudcode-pa traffic bypassed Go
+				// stdlib http2 entirely. Match the real wire.
+				ForceAttemptHTTP2:     false,
 				MaxIdleConns:          16,
 				IdleConnTimeout:       90 * time.Second,
 				ResponseHeaderTimeout: 60 * time.Second,

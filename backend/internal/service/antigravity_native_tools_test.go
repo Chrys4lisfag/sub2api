@@ -1,0 +1,231 @@
+package service
+
+import (
+	"encoding/json"
+	"strings"
+	"testing"
+)
+
+// TestConvertSchemaToGeminiSchema verifies the parametersJsonSchema →
+// parameters Gemini Schema conversion produces UPPERCASE types, drops
+// JSON-Schema-only keys, and flattens anyOf nullable polyfills.
+func TestConvertSchemaToGeminiSchema_BasicObject(t *testing.T) {
+	in := map[string]any{
+		"$schema":     "https://json-schema.org/draft/2020-12/schema",
+		"type":        "object",
+		"description": "List files",
+		"properties": map[string]any{
+			"paths": map[string]any{
+				"type": "array",
+				"items": map[string]any{
+					"type": "string",
+				},
+			},
+			"limit": map[string]any{
+				"type":    "integer",
+				"default": 100,
+			},
+		},
+		"required": []any{"paths"},
+	}
+	out := convertSchemaToGeminiSchema(in)
+	if out["type"] != "OBJECT" {
+		t.Errorf("type want OBJECT got %v", out["type"])
+	}
+	if _, has := out["$schema"]; has {
+		t.Errorf("$schema should be stripped")
+	}
+	props := out["properties"].(map[string]any)
+	if props["paths"].(map[string]any)["type"] != "ARRAY" {
+		t.Errorf("paths.type want ARRAY")
+	}
+	if props["paths"].(map[string]any)["items"].(map[string]any)["type"] != "STRING" {
+		t.Errorf("paths.items.type want STRING")
+	}
+	if _, has := props["limit"].(map[string]any)["default"]; has {
+		t.Errorf("default should be stripped")
+	}
+	req := out["required"].([]any)
+	if len(req) != 1 || req[0] != "paths" {
+		t.Errorf("required mismatch: %v", req)
+	}
+}
+
+func TestConvertSchemaToGeminiSchema_AnyOfNullableFlatten(t *testing.T) {
+	// Common JSON Schema "nullable" polyfill: anyOf with type:null branch.
+	in := map[string]any{
+		"anyOf": []any{
+			map[string]any{"type": "string"},
+			map[string]any{"type": "null"},
+		},
+	}
+	out := convertSchemaToGeminiSchema(in)
+	if out["type"] != "STRING" {
+		t.Errorf("anyOf nullable not flattened to STRING, got %v", out)
+	}
+}
+
+func TestConvertSchemaToGeminiSchema_AllOfMerge(t *testing.T) {
+	in := map[string]any{
+		"allOf": []any{
+			map[string]any{"type": "object", "properties": map[string]any{"a": map[string]any{"type": "string"}}},
+			map[string]any{"properties": map[string]any{"b": map[string]any{"type": "integer"}}},
+		},
+	}
+	out := convertSchemaToGeminiSchema(in)
+	if out["type"] != "OBJECT" {
+		t.Errorf("allOf merged type want OBJECT got %v", out["type"])
+	}
+	// Only the FIRST branch's properties get merged (shallow merge by design).
+	props := out["properties"].(map[string]any)
+	if _, has := props["a"]; !has {
+		t.Errorf("allOf merge lost property a: %v", props)
+	}
+}
+
+// TestPreprocess_NoMcp_NoAggregator covers the non-aggregator codepath:
+// the report should not include MCP tools.
+func TestPreprocess_NoMcp_NoAggregator(t *testing.T) {
+	body := []byte(`{"contents":[],"tools":[{"functionDeclarations":[
+		{"name":"find","parametersJsonSchema":{"type":"object","properties":{"paths":{"type":"array","items":{"type":"string"}}},"required":["paths"]}},
+		{"name":"read","parametersJsonSchema":{"type":"object","properties":{"path":{"type":"string"}},"required":["path"]}}
+	]}]}`)
+	out, report, err := preprocessNativeBody(body, false)
+	if err != nil {
+		t.Fatalf("unexpected err: %v", err)
+	}
+	if report.AggregatorOn {
+		t.Errorf("aggregator should be off")
+	}
+	if len(report.McpTools) != 0 {
+		t.Errorf("no mcp tools should be hidden, got %d", len(report.McpTools))
+	}
+	if report.Normalized < 2 {
+		t.Errorf("expected at least 2 normalizations, got %d", report.Normalized)
+	}
+	// Verify out body uses `parameters` not `parametersJsonSchema`.
+	if strings.Contains(string(out), "parametersJsonSchema") {
+		t.Errorf("parametersJsonSchema not stripped: %s", out)
+	}
+	if !strings.Contains(string(out), `"parameters":`) {
+		t.Errorf("parameters key missing: %s", out)
+	}
+}
+
+// TestPreprocess_McpAggregator covers the main fix path: many MCP tools
+// should be collapsed into a single call_mcp_tool entry + 2 helpers.
+func TestPreprocess_McpAggregator(t *testing.T) {
+	body := []byte(`{"contents":[],"tools":[{"functionDeclarations":[
+		{"name":"find","parametersJsonSchema":{"type":"object","properties":{"paths":{"type":"array","items":{"type":"string"}}}}},
+		{"name":"mcp__github_official_get_pull_request","parametersJsonSchema":{"type":"object","properties":{"owner":{"type":"string"},"repo":{"type":"string"}}}},
+		{"name":"mcp__github_official_create_issue","parametersJsonSchema":{"type":"object","properties":{"owner":{"type":"string"},"repo":{"type":"string"},"title":{"type":"string"}}}},
+		{"name":"mcp__ida_orchestrator_read_memory","parametersJsonSchema":{"type":"object","properties":{"regions":{"type":"array"}}}}
+	]}]}`)
+	out, report, err := preprocessNativeBody(body, true)
+	if err != nil {
+		t.Fatalf("unexpected err: %v", err)
+	}
+	if !report.AggregatorOn {
+		t.Errorf("aggregator should be on")
+	}
+	if len(report.McpTools) != 3 {
+		t.Errorf("expected 3 mcp tools captured, got %d", len(report.McpTools))
+	}
+	// Out body should NOT contain the original mcp__ names in declarations.
+	if strings.Count(string(out), `"name":"mcp__`) > 0 {
+		t.Errorf("mcp__ names leaked into outbound body")
+	}
+	// Out body MUST contain call_mcp_tool + list_mcp_tools + read_mcp_tool_schema.
+	for _, want := range []string{"call_mcp_tool", "list_mcp_tools", "read_mcp_tool_schema"} {
+		if !strings.Contains(string(out), `"name":"`+want+`"`) {
+			t.Errorf("aggregator tool %q missing: %s", want, out)
+		}
+	}
+}
+
+// TestRewriteAggregatedFunctionCalls_BasicMatch verifies the SSE
+// back-translator rewrites a call_mcp_tool functionCall into the original
+// mcp__server_tool name + inner Arguments.
+func TestRewriteAggregatedFunctionCalls_BasicMatch(t *testing.T) {
+	report := toolPrepReport{
+		AggregatorOn: true,
+		McpTools: []mcpToolHandle{
+			{FullName: "mcp__github_official_get_pull_request", Decl: map[string]any{"name": "mcp__github_official_get_pull_request"}},
+		},
+	}
+	payload := []byte(`{"candidates":[{"content":{"parts":[
+		{"functionCall":{"name":"call_mcp_tool","args":{"ServerName":"github-official","ToolName":"get_pull_request","Arguments":{"owner":"acme","repo":"x"}}}}
+	]}}]}`)
+	out := rewriteAggregatedFunctionCalls(payload, report)
+	if !strings.Contains(string(out), `"name":"mcp__github_official_get_pull_request"`) {
+		t.Fatalf("rewrite missing: %s", out)
+	}
+	// Verify Arguments unpacked
+	var parsed map[string]any
+	_ = json.Unmarshal(out, &parsed)
+	parts := parsed["candidates"].([]any)[0].(map[string]any)["content"].(map[string]any)["parts"].([]any)
+	fc := parts[0].(map[string]any)["functionCall"].(map[string]any)
+	args := fc["args"].(map[string]any)
+	if args["owner"] != "acme" {
+		t.Errorf("Arguments not unwrapped: %v", args)
+	}
+	// Verify ServerName/ToolName are NOT in the rewritten args.
+	if _, has := args["ServerName"]; has {
+		t.Errorf("ServerName leaked into args after rewrite")
+	}
+}
+
+// TestRewriteAggregatedFunctionCalls_AggregatorOff is a no-op.
+func TestRewriteAggregatedFunctionCalls_AggregatorOff(t *testing.T) {
+	report := toolPrepReport{AggregatorOn: false}
+	payload := []byte(`{"candidates":[{"content":{"parts":[{"functionCall":{"name":"call_mcp_tool","args":{}}}]}}]}`)
+	out := rewriteAggregatedFunctionCalls(payload, report)
+	if string(out) != string(payload) {
+		t.Errorf("aggregator off should be no-op")
+	}
+}
+
+// TestRewriteSSELineFunctionCalls validates the line-level wrapper that
+// preserves the SSE `data:` prefix + CRLF tail.
+func TestRewriteSSELineFunctionCalls(t *testing.T) {
+	report := toolPrepReport{
+		AggregatorOn: true,
+		McpTools: []mcpToolHandle{
+			{FullName: "mcp__serena_find_file", Decl: map[string]any{"name": "mcp__serena_find_file"}},
+		},
+	}
+	line := []byte(`data: {"candidates":[{"content":{"parts":[{"functionCall":{"name":"call_mcp_tool","args":{"ServerName":"serena","ToolName":"find_file","Arguments":{"file_mask":"*.go","relative_path":"."}}}}]}}]}` + "\n")
+	out := rewriteSSELineFunctionCalls(line, report)
+	if !strings.HasPrefix(string(out), "data: {") {
+		t.Errorf("data: prefix lost: %s", out)
+	}
+	if !strings.HasSuffix(string(out), "\n") {
+		t.Errorf("trailing newline lost")
+	}
+	if !strings.Contains(string(out), `"mcp__serena_find_file"`) {
+		t.Errorf("rewrite missing: %s", out)
+	}
+}
+
+func TestAccountToolAggregatorEnabled_Default(t *testing.T) {
+	a := &Account{Credentials: map[string]any{}}
+	if !accountToolAggregatorEnabled(a) {
+		t.Errorf("default should be ON")
+	}
+}
+
+func TestAccountToolAggregatorEnabled_Disabled(t *testing.T) {
+	a := &Account{Credentials: map[string]any{"tool_aggregator": false}}
+	if accountToolAggregatorEnabled(a) {
+		t.Errorf("explicit false should be OFF")
+	}
+}
+
+func TestAccountToolAggregatorEnabled_StringForms(t *testing.T) {
+	for _, s := range []string{"false", "off", "0", "no", "FALSE"} {
+		a := &Account{Credentials: map[string]any{"tool_aggregator": s}}
+		if accountToolAggregatorEnabled(a) {
+			t.Errorf("string %q should be OFF", s)
+		}
+	}
+}

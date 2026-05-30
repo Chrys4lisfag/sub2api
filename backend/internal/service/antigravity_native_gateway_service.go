@@ -258,8 +258,18 @@ func (s *AntigravityNativeGatewayService) ForwardGemini(
 		wireModel = originalModel
 	}
 
-	// Wrap the incoming body in the v1internal envelope. body is the
-	// Gemini-format inner request ({contents, generationConfig, …}).
+	// Run the tool-list preprocessing pipeline (schema normalize +
+	// optional call_mcp_tool aggregator). Mutates `body` JSON in place
+	// before envelope wrap. Aggregator is enabled per account via the
+	// `tool_aggregator` credential flag (defaults to true — main fix
+	// for the omp 200+ tools empty-args failure mode).
+	useAggregator := accountToolAggregatorEnabled(account)
+	body, toolReport, err := preprocessNativeBody(body, useAggregator)
+	if err != nil {
+		return nil, fmt.Errorf("native gemini: tool preprocess: %w", err)
+	}
+
+	// Wrap the now-normalized body in the v1internal envelope.
 	envelope, err := wrapNativeV1Internal(cli.ProjectID(), wireModel, body)
 	if err != nil {
 		return nil, fmt.Errorf("native gemini: envelope: %w", err)
@@ -289,9 +299,9 @@ func (s *AntigravityNativeGatewayService) ForwardGemini(
 	}
 
 	if stream {
-		return s.streamGeminiToClient(ctx, c, account.ID, resp, startTime, originalModel, wireModel)
+		return s.streamGeminiToClient(ctx, c, account.ID, resp, startTime, originalModel, wireModel, toolReport)
 	}
-	return s.passNonStreamingGemini(ctx, c, account.ID, resp, startTime, originalModel, wireModel)
+	return s.passNonStreamingGemini(ctx, c, account.ID, resp, startTime, originalModel, wireModel, toolReport)
 }
 
 // Forward handles Claude-format requests. Native does not implement the
@@ -321,11 +331,29 @@ func (s *AntigravityNativeGatewayService) Forward(
 // helpers
 // ────────────────────────────────────────────────────────────────────────────
 
-// wrapNativeV1Internal wraps a Gemini-format `request` body in the agy v1
-// envelope: {project, model, request:{...}, userAgent, requestId}.
+// wrapNativeV1Internal wraps a Gemini-format inner request body in the
+// envelope agy.exe sends to /v1internal:streamGenerateContent. Verified
+// via Frida capture of crypto/tls.Conn.Write (May 2026):
+//
+//	{
+//	  "project":     "<project_id>",
+//	  "requestId":   "checkpoint/<uuid>",   // NOT "agent-<uuid>"
+//	  "model":       "<wire_model>",        // envelope-level
+//	  "userAgent":   "antigravity",
+//	  "requestType": "checkpoint",          // agy always sends this
+//	  "request": {
+//	    "contents":       [...],
+//	    "systemInstruction": {...},
+//	    "tools":           [...],
+//	    "toolConfig":      {"functionCallingConfig":{"mode":"NONE"}},
+//	    "generationConfig":{...},
+//	    "sessionId":       "<int64-as-string-or-int>"
+//	  }
+//	}
+//
+// Returns the marshaled envelope ready for the HTTP body.
 func wrapNativeV1Internal(projectID, model string, geminiBody []byte) ([]byte, error) {
-	// First, decide whether the incoming body is already a v1internal envelope
-	// (idempotent passthrough) or a bare Gemini request body to be wrapped.
+	// Idempotent passthrough: caller may have pre-built the full envelope.
 	if len(geminiBody) > 0 && bytes.Contains(geminiBody, []byte(`"userAgent":"antigravity"`)) {
 		return geminiBody, nil
 	}
@@ -336,21 +364,134 @@ func wrapNativeV1Internal(projectID, model string, geminiBody []byte) ([]byte, e
 			return nil, fmt.Errorf("decode body: %w", err)
 		}
 	}
-	// If the caller already gave us {"request": {...}} double-wrap, unwrap once.
+	// Caller-handed double-wrap: {"request": {...}} → unwrap once.
 	if r, ok := inner["request"].(map[string]any); ok && len(inner) == 1 {
 		inner = r
 	}
 
+	// Inject sessionId on the inner request if the caller didn't supply one.
+	// agy sends a deterministic 64-bit int. We synthesize a session per
+	// envelope build; the upstream backend uses sessionId for trajectory
+	// correlation but does not validate it for cryptographic continuity.
+	if _, present := inner["sessionId"]; !present {
+		inner["sessionId"] = newSessionID()
+	}
+
+	// Inject generationConfig defaults agy.exe always sends. Caller-provided
+	// values win — we only fill gaps.
+	applyAgyDefaultsToInnerRequest(inner, model)
+
 	envelope := map[string]any{
+		"requestId":   "checkpoint/" + uuid.NewString(),
 		"model":       model,
-		"request":     inner,
 		"userAgent":   "antigravity",
-		"requestId":   "agent-" + uuid.NewString(),
+		"requestType": "checkpoint",
+		"request":     inner,
 	}
 	if projectID != "" {
 		envelope["project"] = projectID
 	}
 	return json.Marshal(envelope)
+}
+
+// newSessionID synthesizes a session correlator in the same shape real
+// agy emits — a base-10 int64 (sometimes negative; sign-bit set by
+// agy's hashing scheme). Per-envelope uniqueness is sufficient.
+func newSessionID() string {
+	// Take the low 63 bits of a fresh UUID as a positive int64, then flip
+	// the sign half the time so the distribution matches real agy traffic
+	// (we observed negative values like -3750763034362895579 in captures).
+	u := uuid.New()
+	hi := uint64(u[8])<<56 | uint64(u[9])<<48 | uint64(u[10])<<40 | uint64(u[11])<<32 |
+		uint64(u[12])<<24 | uint64(u[13])<<16 | uint64(u[14])<<8 | uint64(u[15])
+	signed := int64(hi)
+	return fmt.Sprintf("%d", signed)
+}
+
+// applyAgyDefaultsToInnerRequest fills in generationConfig + toolConfig
+// defaults that real agy.exe always sends. Values present in `inner` are
+// preserved — we only patch gaps so callers can override per-request.
+//
+// Verified vs Frida capture (model=gemini-3.5-flash-low, "Medium" tier):
+//
+//	"toolConfig":      {"functionCallingConfig": {"mode": "NONE"}},
+//	"generationConfig": {
+//	  "maxOutputTokens": 16384,
+//	  "thinkingConfig":  {"includeThoughts": true, "thinkingBudget": 4000}
+//	}
+//
+// thinkingBudget scales with model tier per the fetchAvailableModels probe:
+//
+//	gemini-3-flash             → -1 (dynamic)
+//	gemini-3.5-flash-extra-low → 1000   (Low)
+//	gemini-3.5-flash-low       → 4000   (Medium)
+//	gemini-3-flash-agent       → 10000  (High)
+//	gemini-3.1-pro-low         → 1001
+//	gemini-pro-agent           → 10001  (3.1 Pro High)
+//	claude-*                   → 1024
+//	gpt-oss-120b-medium        → 8192
+func applyAgyDefaultsToInnerRequest(inner map[string]any, wireModel string) {
+	if inner == nil {
+		return
+	}
+
+	// toolConfig.functionCallingConfig.mode: agy sends "NONE" to let the
+	// model decide if a tool call is needed. Caller can override to AUTO/ANY.
+	if _, present := inner["toolConfig"]; !present {
+		inner["toolConfig"] = map[string]any{
+			"functionCallingConfig": map[string]any{
+				"mode": "NONE",
+			},
+		}
+	}
+
+	// generationConfig defaults — fill in thinkingConfig per tier.
+	gc, _ := inner["generationConfig"].(map[string]any)
+	if gc == nil {
+		gc = map[string]any{}
+		inner["generationConfig"] = gc
+	}
+	if _, present := gc["maxOutputTokens"]; !present {
+		gc["maxOutputTokens"] = 16384
+	}
+	tc, _ := gc["thinkingConfig"].(map[string]any)
+	if tc == nil {
+		tc = map[string]any{}
+		gc["thinkingConfig"] = tc
+	}
+	if _, present := tc["includeThoughts"]; !present {
+		tc["includeThoughts"] = true
+	}
+	if _, present := tc["thinkingBudget"]; !present {
+		tc["thinkingBudget"] = thinkingBudgetForModel(wireModel)
+	}
+}
+
+// thinkingBudgetForModel returns the budget agy uses for each known wire
+// model. Values match the fetchAvailableModels probe of daily-cloudcode-pa
+// (May 2026). Unknown models fall back to -1 (dynamic).
+func thinkingBudgetForModel(wire string) int {
+	switch strings.ToLower(strings.TrimSpace(wire)) {
+	case "gemini-3-flash":
+		return -1
+	case "gemini-3.5-flash-extra-low":
+		return 1000
+	case "gemini-3.5-flash-low":
+		return 4000
+	case "gemini-3-flash-agent":
+		return 10000
+	case "gemini-3.1-pro-low":
+		return 1001
+	case "gemini-pro-agent":
+		return 10001
+	case "gemini-3.1-flash-lite", "gemini-3.1-flash-image", "gemini-3.1-flash-image-preview":
+		return -1
+	case "claude-sonnet-4-6", "claude-opus-4-6-thinking":
+		return 1024
+	case "gpt-oss-120b-medium":
+		return 8192
+	}
+	return -1
 }
 
 func chooseGeminiAction(action string, stream bool) string {
@@ -372,6 +513,7 @@ func (s *AntigravityNativeGatewayService) streamGeminiToClient(
 	resp *http.Response,
 	startTime time.Time,
 	originalModel, wireModel string,
+	toolReport toolPrepReport,
 ) (*ForwardResult, error) {
 	c.Header("Content-Type", "text/event-stream")
 	c.Header("Cache-Control", "no-cache")
@@ -420,6 +562,11 @@ func (s *AntigravityNativeGatewayService) streamGeminiToClient(
 				line := buf[:idx+1]
 				buf = buf[idx+1:]
 				out := unwrapAgyResponseEnvelopeLine(line)
+				// Back-translate call_mcp_tool function calls in this SSE
+				// chunk so omp sees the original mcp__<server>_<tool>
+				// function name + the inner Arguments object. No-op when
+				// aggregator is off or no MCP tools were hidden.
+				out = rewriteSSELineFunctionCalls(out, toolReport)
 				if _, wErr := c.Writer.Write(out); wErr != nil {
 					result.ClientDisconnect = true
 					_, _ = io.Copy(io.Discard, resp.Body)
@@ -556,6 +703,7 @@ func (s *AntigravityNativeGatewayService) passNonStreamingGemini(
 	resp *http.Response,
 	startTime time.Time,
 	originalModel, wireModel string,
+	toolReport toolPrepReport,
 ) (*ForwardResult, error) {
 	raw, err := io.ReadAll(resp.Body)
 	if err != nil {
@@ -566,6 +714,9 @@ func (s *AntigravityNativeGatewayService) passNonStreamingGemini(
 	// unwrap before forwarding so non-streaming clients also see the
 	// canonical shape.
 	out := unwrapAgyResponseEnvelopeBody(raw)
+	// Back-translate call_mcp_tool function calls if the aggregator was
+	// used for this request — keeps omp's tool dispatch transparent.
+	out = rewriteAggregatedFunctionCalls(out, toolReport)
 	c.Header("Content-Type", "application/json")
 	c.Writer.WriteHeader(http.StatusOK)
 	_, _ = c.Writer.Write(out)

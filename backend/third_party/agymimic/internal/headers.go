@@ -6,75 +6,88 @@ import (
 	"runtime"
 )
 
-// Platform string used in Client-Metadata + UA tail (per agy.exe runtime).
-func platformTag() string {
-	switch runtime.GOOS {
-	case "windows":
-		return "WINDOWS"
-	case "darwin":
-		return "MACOS"
-	case "linux":
-		return "LINUX"
-	default:
-		return "UNKNOWN"
-	}
-}
+// Real agy.exe wire fingerprint (verified empirically via Frida capture of
+// crypto/tls.Conn.Write to daily-cloudcode-pa.googleapis.com, May 2026):
+//
+//   POST /v1internal:streamGenerateContent?alt=sse HTTP/1.1
+//   Host: daily-cloudcode-pa.googleapis.com
+//   User-Agent: antigravity/cli/<version> <os>/<arch>
+//   Transfer-Encoding: chunked
+//   Authorization: Bearer ya29.<token>
+//   Content-Type: application/json
+//   Accept-Encoding: gzip
+//
+// Notably absent (earlier versions of this file added these — they are NOT
+// part of agy's wire and may even trigger upstream anti-bot heuristics):
+//   - Client-Metadata
+//   - X-Goog-Api-Client
 
+// uaTail returns the {os}/{arch} suffix matching the host runtime — agy
+// uses the real OS (windows/amd64 on Windows, darwin/arm64 on macOS, etc.)
+// not a fixed value. Earlier comments claimed darwin/arm64 was mandatory;
+// that was a misread — daily-cloudcode-pa accepts any standard combo.
 func uaTail() string {
-	// agy.exe and CLIProxyAPI both ALWAYS advertise darwin/arm64 in their UA
-	// regardless of actual OS. Wrong suffix → backend returns
-	//   "This version of Antigravity is no longer supported" (despite version being current).
-	return "darwin/arm64"
+	osTag := runtime.GOOS
+	switch osTag {
+	case "darwin", "linux", "windows":
+		// keep as-is
+	default:
+		osTag = "linux"
+	}
+	archTag := runtime.GOARCH
+	switch archTag {
+	case "amd64", "arm64", "arm", "386":
+		// keep
+	default:
+		archTag = "amd64"
+	}
+	return osTag + "/" + archTag
 }
 
-// AntigravityUA returns the short runtime UA used by generate/stream/model-list calls.
-// Matches agy.exe's `antigravity/<ver> <os>/<arch>` format.
+// AntigravityUA returns the runtime UA agy.exe uses for cloudcode-pa
+// requests: "antigravity/cli/<version> <os>/<arch>".
+//
+// Note the inserted "/cli/" segment — agy embeds the surface type
+// (cli vs desktop) in the UA. We always identify as cli since agymimic
+// has no UI/IDE counterpart.
 func AntigravityUA(version string) string {
 	if version == "" {
 		version = LatestAntigravityVersion()
 	}
-	return fmt.Sprintf("antigravity/%s %s", version, uaTail())
+	return fmt.Sprintf("antigravity/cli/%s %s", version, uaTail())
 }
 
-// LoadCodeAssistUA returns the long Electron-style UA used for loadCodeAssist
-// and other control-plane calls. agy.exe sends this form for "Mozilla-looking"
-// requests so the backend treats the call as coming from the desktop IDE.
+// LoadCodeAssistUA — alias of AntigravityUA. Earlier revisions used a
+// long Mozilla/Electron UA for loadCodeAssist/onboardUser thinking the
+// backend gated those endpoints on a "desktop IDE" UA. The Frida capture
+// shows agy sends the SAME short UA for all v1internal:* paths.
 func LoadCodeAssistUA(version string) string {
-	if version == "" {
-		version = LatestAntigravityVersion()
-	}
-	return fmt.Sprintf(
-		"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) "+
-			"Antigravity/%s Chrome/138.0.7204.235 Electron/37.3.1 Safari/537.36",
-		version,
-	)
-}
-
-// ClientMetadata returns the `Client-Metadata` header value agy sends.
-func ClientMetadata() string {
-	return fmt.Sprintf(`{"ideType":"ANTIGRAVITY","platform":"%s","pluginType":"GEMINI"}`, platformTag())
+	return AntigravityUA(version)
 }
 
 // SetAntigravityHeaders writes the agy.exe-style header set onto req.
-// Pass version="" to use DefaultAntigravityVersion.
+// Pass version="" to use the live-refreshed Antigravity version.
+//
+// Wire-verified header set (May 2026):
+//   - User-Agent
+//   - Content-Type: application/json
+//   - Authorization: Bearer <token>  (when accessToken provided)
+//   - Accept-Encoding: gzip
+//
+// We intentionally do NOT set Client-Metadata or X-Goog-Api-Client —
+// real agy doesn't, and adding them changed nothing functionally while
+// diverging from the captured wire.
 func SetAntigravityHeaders(req *http.Request, accessToken, version string) {
 	req.Header.Set("User-Agent", AntigravityUA(version))
-	req.Header.Set("X-Goog-Api-Client", "google-cloud-sdk vscode_cloudshelleditor/0.1")
-	req.Header.Set("Client-Metadata", ClientMetadata())
 	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept-Encoding", "gzip")
 	if accessToken != "" {
 		req.Header.Set("Authorization", "Bearer "+accessToken)
 	}
 }
 
-// SetLoadCodeAssistHeaders writes the long-UA header set used by agy for
-// loadCodeAssist / onboardUser calls.
+// SetLoadCodeAssistHeaders — alias of SetAntigravityHeaders. Same header
+// set per wire capture; earlier divergence was speculative.
 func SetLoadCodeAssistHeaders(req *http.Request, accessToken, version string) {
-	req.Header.Set("User-Agent", LoadCodeAssistUA(version))
-	req.Header.Set("X-Goog-Api-Client", "google-cloud-sdk vscode_cloudshelleditor/0.1")
-	req.Header.Set("Client-Metadata", ClientMetadata())
-	req.Header.Set("Content-Type", "application/json")
-	if accessToken != "" {
-		req.Header.Set("Authorization", "Bearer "+accessToken)
-	}
+	SetAntigravityHeaders(req, accessToken, version)
 }

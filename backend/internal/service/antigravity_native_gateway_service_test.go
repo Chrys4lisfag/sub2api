@@ -29,8 +29,8 @@ func TestWrapNativeV1Internal_BareGeminiBody(t *testing.T) {
 		t.Errorf("userAgent: want antigravity, got %v", envelope["userAgent"])
 	}
 	rid, ok := envelope["requestId"].(string)
-	if !ok || !strings.HasPrefix(rid, "agent-") {
-		t.Errorf("requestId: want agent-<uuid>, got %v", envelope["requestId"])
+	if !ok || !strings.HasPrefix(rid, "checkpoint/") {
+		t.Errorf("requestId: want checkpoint/<uuid>, got %v", envelope["requestId"])
 	}
 	req, ok := envelope["request"].(map[string]any)
 	if !ok {
