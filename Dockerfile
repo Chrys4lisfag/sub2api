@@ -94,11 +94,14 @@ RUN VERSION_VALUE="${VERSION}" && \
 RUN echo "=== binary embed check ===" && \
     ls -la /app/sub2api && \
     bin_size=$(stat -c '%s' /app/sub2api) && \
-    echo "binary size: $bin_size" && \
-    test "$bin_size" -gt 80000000 || (echo "FATAL: binary < 80MB — likely missing embed" && exit 1) && \
+    echo "binary size: $bin_size (expect ~90 MB with frontend embedded)" && \
+    test "$bin_size" -gt 88000000 || (echo "FATAL: binary < 88 MB — embed likely empty (90 MB local baseline)" && exit 1) && \
     grep -c vendor-vue /app/sub2api > /tmp/vc.txt && vc=$(cat /tmp/vc.txt) && \
-    echo "vendor-vue refs in binary: $vc" && \
-    test "$vc" -gt 0 || (echo "FATAL: binary does not contain vendor-vue — embed empty" && exit 1)
+    echo "vendor-vue refs in binary: $vc (expect > 50)" && \
+    test "$vc" -gt 50 || (echo "FATAL: vendor-vue refs < 50 — embed only partially applied" && exit 1) && \
+    grep -c AccountsView /app/sub2api > /tmp/av.txt && av=$(cat /tmp/av.txt) && \
+    echo "AccountsView refs: $av" && \
+    test "$av" -gt 5 || (echo "FATAL: AccountsView chunk missing — embed incomplete" && exit 1)
 
 # -----------------------------------------------------------------------------
 # Stage 3: PostgreSQL Client (version-matched with docker-compose)
