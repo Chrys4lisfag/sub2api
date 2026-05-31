@@ -1352,3 +1352,40 @@ func isVersionRejectionPayload(body []byte) bool {
 	}
 	return false
 }
+
+// FetchUpstreamModels returns the list of model IDs the upstream
+// (cloudcode-pa) advertises for this native account. Wraps agymimic's
+// api.Client.FetchAvailableModels which talks the v1internal:
+// fetchAvailableModels RPC. Reuses the per-account client cache built
+// during streamGenerateContent — so first sync after a native account
+// is created may pay the cache-build cost (~200 ms), subsequent syncs
+// are warm.
+//
+// Used by the admin "Sync upstream supported models" button in the
+// account edit modal. The legacy antigravity path (LegacyOAuthService)
+// can't refresh native tokens — this method is the native-specific
+// equivalent.
+func (s *AntigravityNativeGatewayService) FetchUpstreamModels(ctx context.Context, account *Account) ([]string, error) {
+	if account == nil {
+		return nil, fmt.Errorf("native fetch models: nil account")
+	}
+	if account.Platform != domain.PlatformAntigravityNative {
+		return nil, fmt.Errorf("native fetch models: wrong platform %q", account.Platform)
+	}
+	cli, err := s.getClient(ctx, account)
+	if err != nil {
+		return nil, fmt.Errorf("native fetch models: client: %w", err)
+	}
+	models, err := cli.FetchAvailableModels(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("native fetch models: upstream: %w", err)
+	}
+	out := make([]string, 0, len(models))
+	for _, m := range models {
+		id := strings.TrimSpace(m.ID)
+		if id != "" {
+			out = append(out, id)
+		}
+	}
+	return out, nil
+}

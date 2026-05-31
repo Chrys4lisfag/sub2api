@@ -81,7 +81,25 @@ func (s *AccountTestService) FetchUpstreamSupportedModels(ctx context.Context, a
 		return nil, newUpstreamModelSyncConfigError("Account is required", nil)
 	}
 
-	if IsAntigravityFamily(account.Platform) && account.Type != AccountTypeAPIKey {
+	// Native antigravity accounts use a different transport (agymimic) and
+	// can't share the legacy token provider. Route them to the native
+	// gateway's FetchUpstreamModels which uses the per-account agymimic
+	// Client (token refresh + project_id baked in).
+	if account.Platform == PlatformAntigravityNative && account.Type != AccountTypeAPIKey {
+		if s.antigravityNativeGatewayService == nil {
+			return nil, newUpstreamModelSyncConfigError("Antigravity native gateway is not configured", nil)
+		}
+		models, err := s.antigravityNativeGatewayService.FetchUpstreamModels(ctx, account)
+		if err != nil {
+			return nil, newUpstreamModelSyncUpstreamError("Failed to fetch native Antigravity models", err)
+		}
+		if len(models) == 0 {
+			return nil, newUpstreamModelSyncUpstreamError("Native Antigravity upstream returned no models", nil)
+		}
+		return dedupeAndSortModelIDs(models), nil
+	}
+
+	if account.Platform == PlatformAntigravity && account.Type != AccountTypeAPIKey {
 		return s.fetchAntigravityOAuthUpstreamModels(ctx, account)
 	}
 
