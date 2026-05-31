@@ -57,6 +57,65 @@ func AntigravityWireModel(modelName string) string {
 	}
 }
 
+// ResolveWireFromBody returns the wire model name, taking the caller's
+// explicit `thinkingConfig.thinkingLevel` into account when the public
+// name is the suffix-less Gemini 3.5 Flash base.
+//
+// This lets an upstream client expose a single model entry
+// (`gemini-3.5-flash`) and pick the real backend tier via the slider:
+//
+//	body.thinkingLevel == "high"          → wire gemini-3-flash-agent       (high)
+//	body.thinkingLevel ∈ {medium,""}      → wire gemini-3.5-flash-low       (mid)
+//	body.thinkingLevel ∈ {low, minimal}   → wire gemini-3.5-flash-extra-low (low)
+//
+// Suffixed variants (-high / -medium / -low) keep the existing
+// AntigravityWireModel behavior — the suffix wins, body thinkingLevel
+// does not re-route the wire. This preserves the explicit-tier contract
+// for clients that pin a specific variant.
+//
+// body may be the bare Gemini request (pre-v1internal wrap, key path
+// `generationConfig.thinkingConfig.thinkingLevel`) or the wrapped form
+// (`request.generationConfig...`); both are checked.
+func ResolveWireFromBody(publicName string, body []byte) string {
+	normalized := strings.ToLower(strings.TrimSpace(strings.TrimPrefix(publicName, "models/")))
+	if normalized != "gemini-3.5-flash" {
+		return AntigravityWireModel(publicName)
+	}
+	if len(body) == 0 || !gjson.ValidBytes(body) {
+		return AntigravityWireModel(publicName)
+	}
+	level := extractThinkingLevel(body)
+	switch level {
+	case "high":
+		return "gemini-3-flash-agent"
+	case "minimal", "low":
+		return "gemini-3.5-flash-extra-low"
+	case "medium", "":
+		return "gemini-3.5-flash-low"
+	default:
+		return AntigravityWireModel(publicName)
+	}
+}
+
+// extractThinkingLevel returns the first non-empty thinkingLevel found in
+// either the pre-wrap (`generationConfig…`) or post-wrap
+// (`request.generationConfig…`) location, normalized to lowercase.
+// Returns "" when neither is set.
+func extractThinkingLevel(body []byte) string {
+	keys := []string{
+		"generationConfig.thinkingConfig.thinkingLevel",
+		"generationConfig.thinkingConfig.thinking_level",
+		"request.generationConfig.thinkingConfig.thinkingLevel",
+		"request.generationConfig.thinkingConfig.thinking_level",
+	}
+	for _, k := range keys {
+		if v := strings.ToLower(strings.TrimSpace(gjson.GetBytes(body, k).String())); v != "" {
+			return v
+		}
+	}
+	return ""
+}
+
 // DefaultVariantThinkingLevel returns the implied thinking effort level for
 // public Gemini 3.5 Flash variant model IDs. Returns "" when the model
 // does not carry an implicit default (caller's explicit thinking config
@@ -91,7 +150,7 @@ func ApplyWireModelToBody(body []byte) []byte {
 		return body
 	}
 
-	wire := AntigravityWireModel(publicName)
+	wire := ResolveWireFromBody(publicName, body)
 	out := body
 	if wire != publicName {
 		if updated, err := sjson.SetBytes(out, "model", wire); err == nil {

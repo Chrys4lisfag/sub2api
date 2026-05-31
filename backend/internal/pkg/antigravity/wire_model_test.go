@@ -153,3 +153,97 @@ func TestExtractSessionID(t *testing.T) {
 		t.Fatalf("ExtractSessionID returned %q for nil", got)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// ResolveWireFromBody
+// ---------------------------------------------------------------------------
+
+func TestResolveWireFromBody_BaseFlashPicksWireFromThinkingLevel(t *testing.T) {
+	cases := []struct {
+		name       string
+		body       string
+		wantWire   string
+	}{
+		// pre-wrap body (Gemini-format, used by native gateway pre-envelope)
+		{
+			name:     "high → flash-agent (pre-wrap)",
+			body:     `{"model":"gemini-3.5-flash","generationConfig":{"thinkingConfig":{"thinkingLevel":"high"}}}`,
+			wantWire: "gemini-3-flash-agent",
+		},
+		{
+			name:     "medium → flash-low (pre-wrap)",
+			body:     `{"model":"gemini-3.5-flash","generationConfig":{"thinkingConfig":{"thinkingLevel":"medium"}}}`,
+			wantWire: "gemini-3.5-flash-low",
+		},
+		{
+			name:     "low → extra-low (pre-wrap)",
+			body:     `{"model":"gemini-3.5-flash","generationConfig":{"thinkingConfig":{"thinkingLevel":"low"}}}`,
+			wantWire: "gemini-3.5-flash-extra-low",
+		},
+		{
+			name:     "minimal → extra-low (pre-wrap)",
+			body:     `{"model":"gemini-3.5-flash","generationConfig":{"thinkingConfig":{"thinkingLevel":"minimal"}}}`,
+			wantWire: "gemini-3.5-flash-extra-low",
+		},
+		// post-wrap body (v1internal envelope, used by legacy ApplyWireModelToBody)
+		{
+			name:     "high → flash-agent (post-wrap)",
+			body:     `{"model":"gemini-3.5-flash","request":{"generationConfig":{"thinkingConfig":{"thinkingLevel":"HIGH"}}}}`,
+			wantWire: "gemini-3-flash-agent",
+		},
+		{
+			name:     "snake_case key honored",
+			body:     `{"model":"gemini-3.5-flash","request":{"generationConfig":{"thinkingConfig":{"thinking_level":"high"}}}}`,
+			wantWire: "gemini-3-flash-agent",
+		},
+		// absent → mid (matches AntigravityWireModel default)
+		{
+			name:     "no thinkingLevel → mid wire",
+			body:     `{"model":"gemini-3.5-flash","generationConfig":{}}`,
+			wantWire: "gemini-3.5-flash-low",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := ResolveWireFromBody("gemini-3.5-flash", []byte(tc.body))
+			if got != tc.wantWire {
+				t.Errorf("got %q want %q", got, tc.wantWire)
+			}
+		})
+	}
+}
+
+func TestResolveWireFromBody_SuffixedVariantsIgnoreBodyLevel(t *testing.T) {
+	// -high variant must keep mapping to flash-agent regardless of body.
+	body := []byte(`{"model":"gemini-3.5-flash-high","generationConfig":{"thinkingConfig":{"thinkingLevel":"low"}}}`)
+	if got := ResolveWireFromBody("gemini-3.5-flash-high", body); got != "gemini-3-flash-agent" {
+		t.Errorf("suffix should win: got %q want gemini-3-flash-agent", got)
+	}
+	// -low variant must keep mapping to extra-low regardless of body.
+	body = []byte(`{"model":"gemini-3.5-flash-low","generationConfig":{"thinkingConfig":{"thinkingLevel":"high"}}}`)
+	if got := ResolveWireFromBody("gemini-3.5-flash-low", body); got != "gemini-3.5-flash-extra-low" {
+		t.Errorf("suffix should win: got %q want gemini-3.5-flash-extra-low", got)
+	}
+}
+
+func TestResolveWireFromBody_NoBodyFallsBackToWireModel(t *testing.T) {
+	if got := ResolveWireFromBody("gemini-3.5-flash", nil); got != "gemini-3.5-flash-low" {
+		t.Errorf("nil body fallback: got %q", got)
+	}
+	if got := ResolveWireFromBody("gemini-3.5-flash", []byte(`not json`)); got != "gemini-3.5-flash-low" {
+		t.Errorf("invalid json fallback: got %q", got)
+	}
+}
+
+func TestApplyWireModelToBody_BaseFlashRoutesByThinkingLevel(t *testing.T) {
+	// High in body should rewrite both the model field AND keep the level
+	// the caller set so the backend sees a coherent (model, thinkingLevel) pair.
+	body := []byte(`{"model":"gemini-3.5-flash","request":{"generationConfig":{"thinkingConfig":{"thinkingLevel":"high"}}}}`)
+	out := ApplyWireModelToBody(body)
+	if got := gjson.GetBytes(out, "model").String(); got != "gemini-3-flash-agent" {
+		t.Errorf("model not rewritten: %s", out)
+	}
+	if got := gjson.GetBytes(out, "request.generationConfig.thinkingConfig.thinkingLevel").String(); got != "high" {
+		t.Errorf("explicit thinkingLevel was clobbered: %s", out)
+	}
+}
