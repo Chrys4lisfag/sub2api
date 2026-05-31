@@ -35,6 +35,7 @@ import (
 	"github.com/Wei-Shaw/sub2api/internal/pkg/antigravity"
 	agynative "github.com/Wei-Shaw/sub2api/internal/pkg/antigravity_native"
 	"github.com/koval/agymimic/api"
+	"github.com/koval/agymimic/fingerprint"
 	"github.com/koval/agymimic/metrics"
 )
 
@@ -291,11 +292,27 @@ func (s *AntigravityNativeGatewayService) ForwardGemini(
 	if resp.StatusCode != http.StatusOK {
 		raw, _ := io.ReadAll(resp.Body)
 		logNativeUpstreamError(ctx, account.ID, originalModel, wireModel, action, stream, resp.StatusCode, resp.Header, raw)
+
+		// If upstream rejected our advertised Antigravity version, kick
+		// the fingerprint refresher out of its 6 h slumber so the NEXT
+		// request uses the fresh manifest. The current request still
+		// surfaces the error to the caller — we don't auto-retry here
+		// because envelope/headers were already serialized with the old
+		// version. The gateway handler's failover loop (or the client's
+		// next request) picks up the refreshed value.
+		if isAntigravityVersionRejection(resp.StatusCode, raw) {
+			slog.WarnContext(ctx, "native: upstream rejected version, forcing fingerprint refresh",
+				slog.Int64("account_id", account.ID),
+				slog.Int("status", resp.StatusCode))
+			fingerprint.ForceRefresh()
+		}
+
 		return nil, &UpstreamFailoverError{
-			StatusCode:          resp.StatusCode,
-			ResponseBody:        raw,
-			ResponseHeaders:     resp.Header,
-			PassthroughVerbatim: true,
+			StatusCode:             resp.StatusCode,
+			ResponseBody:           raw,
+			ResponseHeaders:        resp.Header,
+			PassthroughVerbatim:    true,
+			RetryableOnSameAccount: isAntigravityVersionRejection(resp.StatusCode, raw),
 		}
 	}
 
@@ -568,6 +585,30 @@ func (s *AntigravityNativeGatewayService) streamGeminiToClient(
 				// function name + the inner Arguments object. No-op when
 				// aggregator is off or no MCP tools were hidden.
 				out = rewriteSSELineFunctionCalls(out, toolReport)
+
+				// If we haven't sent ANY bytes yet AND this chunk carries
+				// a version-rejection payload, kick the refresher and
+				// return a clean failover error. After the first byte is
+				// flushed we're committed (streaming SSE can't undo) —
+				// just trigger refresh so the next request lands clean.
+				if isVersionRejectionPayload(out) {
+					slog.WarnContext(ctx, "native: version-rejection text in SSE chunk, forcing fingerprint refresh",
+						slog.Int64("account_id", accountID),
+						slog.Bool("any_bytes_sent", !first))
+					fingerprint.ForceRefresh()
+					if first {
+						// Drain remaining body so the connection can be reused.
+						_, _ = io.Copy(io.Discard, resp.Body)
+						return nil, &UpstreamFailoverError{
+							StatusCode:             http.StatusBadRequest,
+							ResponseBody:           out,
+							ResponseHeaders:        resp.Header,
+							PassthroughVerbatim:    false,
+							RetryableOnSameAccount: true,
+						}
+					}
+				}
+
 				if _, wErr := c.Writer.Write(out); wErr != nil {
 					result.ClientDisconnect = true
 					_, _ = io.Copy(io.Discard, resp.Body)
@@ -718,6 +759,25 @@ func (s *AntigravityNativeGatewayService) passNonStreamingGemini(
 	// Back-translate call_mcp_tool function calls if the aggregator was
 	// used for this request — keeps omp's tool dispatch transparent.
 	out = rewriteAggregatedFunctionCalls(out, toolReport)
+
+	// Some upstream errors arrive as 200 OK with an `error` field or with
+	// the rejection text smuggled into candidates[].content.parts[].text.
+	// If the body LOOKS LIKE a version-rejection, kick the refresher and
+	// return a failover error so the gateway retries on the next account
+	// (or on the next request once the manifest refresh lands).
+	if isVersionRejectionPayload(out) {
+		slog.WarnContext(ctx, "native: version-rejection text in 200 body, forcing fingerprint refresh",
+			slog.Int64("account_id", accountID))
+		fingerprint.ForceRefresh()
+		return nil, &UpstreamFailoverError{
+			StatusCode:             http.StatusBadRequest,
+			ResponseBody:           out,
+			ResponseHeaders:        resp.Header,
+			PassthroughVerbatim:    false,
+			RetryableOnSameAccount: true,
+		}
+	}
+
 	c.Header("Content-Type", "application/json")
 	c.Writer.WriteHeader(http.StatusOK)
 	_, _ = c.Writer.Write(out)
@@ -1203,4 +1263,92 @@ func (s *AntigravityNativeGatewayService) maybePersistRefreshedTokens(
 	}
 	// (cached client still has fresh tokens in memory; persistence above is
 	// purely for the next process start / dashboard poll.)
+}
+
+// isAntigravityVersionRejection identifies an upstream response that the
+// daily-cloudcode-pa endpoint emits when the User-Agent's Antigravity
+// version is below the current accepted minimum. Body is the verbatim
+// upstream response (truncated by the caller in some paths — we only
+// scan the first 4 KiB).
+//
+// Patterns observed in the wild:
+//
+//	HTTP 400 FAILED_PRECONDITION
+//	  "This version of Antigravity is no longer supported. Please update..."
+//	HTTP 426 Upgrade Required
+//	  "Antigravity version <X.Y.Z> is no longer supported"
+//
+// We match case-insensitively on the canonical phrase + a small set of
+// equivalent variants Google has used historically. Returns true when
+// any pattern is detected.
+func isAntigravityVersionRejection(status int, body []byte) bool {
+	// Status filter — version errors land on 400 (FAILED_PRECONDITION)
+	// or 426 (Upgrade Required). 4xx with the keyword in body, anything
+	// other than 5xx, is fair game.
+	if status < 400 || status >= 500 {
+		return false
+	}
+	if len(body) == 0 {
+		return false
+	}
+	scan := body
+	if len(scan) > 4096 {
+		scan = scan[:4096]
+	}
+	low := bytes.ToLower(scan)
+	keywords := [][]byte{
+		[]byte("no longer supported"),
+		[]byte("please update"),
+		[]byte("client version is too old"),
+		[]byte("upgrade required"),
+		[]byte("antigravity version"),
+		[]byte("version of antigravity"),
+	}
+	hits := 0
+	for _, k := range keywords {
+		if bytes.Contains(low, k) {
+			hits++
+			if hits >= 1 && bytes.Contains(low, []byte("antigravity")) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// isVersionRejectionPayload scans a 200 OK response body for telltale
+// signs that upstream actually rejected the request because the client
+// version is too old. cloudcode-pa occasionally returns 200 with the
+// error payload either:
+//
+//   - at top level: `{"error":{"message":"This version of Antigravity is no longer supported"}}`
+//   - inside candidates[].content.parts[].text smuggled as model output
+//
+// We treat either pattern as a hard failure and trigger force-refresh +
+// failover so the user doesn't see the rejection text as the model's reply.
+func isVersionRejectionPayload(body []byte) bool {
+	if len(body) == 0 {
+		return false
+	}
+	scan := body
+	if len(scan) > 16*1024 {
+		scan = scan[:16*1024]
+	}
+	low := bytes.ToLower(scan)
+	// Must mention antigravity AND a "outdated client" phrase.
+	if !bytes.Contains(low, []byte("antigravity")) {
+		return false
+	}
+	patterns := [][]byte{
+		[]byte("no longer supported"),
+		[]byte("please update"),
+		[]byte("client version is too old"),
+		[]byte("upgrade required"),
+	}
+	for _, p := range patterns {
+		if bytes.Contains(low, p) {
+			return true
+		}
+	}
+	return false
 }

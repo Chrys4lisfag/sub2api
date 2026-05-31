@@ -101,3 +101,43 @@ func RefreshAntigravityVersion(ctx context.Context) (string, error) {
 	versionMu.Unlock()
 	return cachedVersion, nil
 }
+
+// ---------------------------------------------------------------------------
+// Force-refresh hook — lets the gateway layer signal "current advertised
+// version is being rejected upstream; please refresh now". The fingerprint
+// package wires the real refresher into this slot during fingerprint.Install;
+// callers that detect "no longer supported" / similar errors call
+// ForceRefreshFingerprint() and the refresher fetches the current manifest
+// out-of-cycle, updates the cache, and the next request uses the new value.
+//
+// Defense in depth: even if Google rolls a new mandatory version BEFORE our
+// 6 h poll wakes up, the first rejected request triggers a refresh and the
+// retry succeeds.
+
+var (
+	forceRefreshMu sync.RWMutex
+	forceRefreshFn func()
+)
+
+// SetForceRefreshFingerprint registers the callback the fingerprint
+// refresher uses to perform an out-of-cycle manifest pull. Pass nil to
+// clear. Subsequent calls overwrite. Safe for concurrent use.
+func SetForceRefreshFingerprint(fn func()) {
+	forceRefreshMu.Lock()
+	forceRefreshFn = fn
+	forceRefreshMu.Unlock()
+}
+
+// ForceRefreshFingerprint asks the registered refresher to fetch a fresh
+// manifest immediately. No-op when no refresher is installed. The call
+// dispatches the refresh on a goroutine so the caller (typically deep
+// inside the gateway request path) doesn't block. Idempotent — multiple
+// rapid calls coalesce because the refresher's mutex serializes them.
+func ForceRefreshFingerprint() {
+	forceRefreshMu.RLock()
+	fn := forceRefreshFn
+	forceRefreshMu.RUnlock()
+	if fn != nil {
+		go fn()
+	}
+}

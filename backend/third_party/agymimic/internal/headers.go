@@ -72,22 +72,22 @@ func LoadCodeAssistUA(version string) string {
 //   - User-Agent
 //   - Content-Type: application/json
 //   - Authorization: Bearer <token>  (when accessToken provided)
-//   - Accept-Encoding: gzip
 //
-// We intentionally do NOT set Client-Metadata or X-Goog-Api-Client —
-// real agy doesn't, and adding them changed nothing functionally while
-// diverging from the captured wire.
+// We intentionally do NOT set:
+//   - Client-Metadata / X-Goog-Api-Client (agy doesn't send these)
+//   - Accept-Encoding (Go's http.Transport adds "gzip" automatically AND
+//     transparently decompresses the response body — but ONLY when the
+//     caller hasn't set Accept-Encoding manually. Setting it explicitly
+//     here turns off auto-decompress and forces every caller to gunzip
+//     by hand — sub2api's non-streaming gateway forgot to do that and
+//     leaked gzip bytes to omp as "garbled model output").
 func SetAntigravityHeaders(req *http.Request, accessToken, version string) {
 	req.Header.Set("User-Agent", AntigravityUA(version))
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Accept-Encoding", "gzip")
 	if accessToken != "" {
 		req.Header.Set("Authorization", "Bearer "+accessToken)
 	}
 }
-
-// SetLoadCodeAssistHeaders — alias of SetAntigravityHeaders. Same header
-// set per wire capture; earlier divergence was speculative.
 func SetLoadCodeAssistHeaders(req *http.Request, accessToken, version string) {
 	SetAntigravityHeaders(req, accessToken, version)
 }

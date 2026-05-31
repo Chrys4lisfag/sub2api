@@ -358,6 +358,52 @@ func Install(ctx context.Context, opts Options) *Refresher {
 		}
 	}
 	r := New(opts)
+	// Wire the force-refresh hook so gateway code that detects upstream
+	// "no longer supported" errors can trigger an out-of-cycle manifest
+	// pull without coupling to the refresher type directly.
+	I.SetForceRefreshFingerprint(func() {
+		refreshCtx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+		defer cancel()
+		if _, err := r.Refresh(refreshCtx); err != nil {
+			opts.Logger("force refresh failed: %v", err)
+		}
+	})
+
+	// Eager SYNCHRONOUS initial refresh: block here until the manifest is
+	// fetched (or fails). Previously the eager refresh ran inside the
+	// background loop goroutine, which meant the first 100-300 ms of
+	// requests after Install could still use the stale DefaultAntigravityVersion.
+	// Bounded by a 30 s deadline so we don't hang process startup if the
+	// manifest endpoint is unreachable; on timeout we keep the cached
+	// default and let the background loop retry every Interval.
+	initCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	if s, err := r.Refresh(initCtx); err == nil {
+		opts.Logger("fingerprint: startup refresh ok version=%s go=%s sha512=%s...", s.Version, s.GoVersion, firstN(s.SHA512, 12))
+	} else {
+		opts.Logger("fingerprint: startup refresh FAILED (using fallback %s): %v", I.DefaultAntigravityVersion, err)
+	}
+	cancel()
+
 	r.Start(ctx)
 	return r
+}
+
+// firstN returns the first n chars of s, or s if shorter. Used to keep
+// startup log lines compact.
+func firstN(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return s[:n]
+}
+
+// ForceRefresh asks the installed Refresher (the one returned by
+// Install) to fetch a fresh manifest right now. Callers from outside
+// the agymimic module use this when they detect that the upstream
+// rejected the currently advertised Antigravity version — e.g. sub2api's
+// native gateway sees `HTTP 400 "no longer supported"`. Re-entrant safe
+// (the underlying refresher serializes via its mutex) and no-op when no
+// Install has run yet. The refresh dispatches on a goroutine.
+func ForceRefresh() {
+	I.ForceRefreshFingerprint()
 }
