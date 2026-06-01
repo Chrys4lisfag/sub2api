@@ -37,6 +37,7 @@ import (
 	"github.com/koval/agymimic/api"
 	"github.com/koval/agymimic/fingerprint"
 	"github.com/koval/agymimic/metrics"
+	"github.com/koval/agymimic/types"
 )
 
 // AntigravityNativeGatewayService is the platform=antigravity_native gateway.
@@ -1391,4 +1392,96 @@ func (s *AntigravityNativeGatewayService) FetchUpstreamModels(ctx context.Contex
 		}
 	}
 	return out, nil
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// TestConnection — admin "Test Account Connection" probe for native accounts.
+// Issues a single non-streaming /v1internal:generateContent through agymimic
+// so the dialog can show actual model output instead of a black box.
+// ────────────────────────────────────────────────────────────────────────────
+
+// TestConnection sends a minimal probe (single "." user turn + identity-patch
+// systemInstruction, maxOutputTokens=16) and returns the first candidate's
+// text. Routes entirely through agymimic so the wire fingerprint matches
+// agy.exe and the access_token is auto-refreshed.
+//
+// Returns a TestConnectionResult with .Text == the model output and
+// .MappedModel == the wire model name the request actually used (after
+// public→wire translation).
+func (s *AntigravityNativeGatewayService) TestConnection(
+	ctx context.Context,
+	account *Account,
+	modelID string,
+) (*TestConnectionResult, error) {
+	if account == nil {
+		return nil, fmt.Errorf("native test: nil account")
+	}
+	if account.Platform != domain.PlatformAntigravityNative {
+		return nil, fmt.Errorf("native test: wrong platform %q", account.Platform)
+	}
+
+	cli, err := s.getClient(ctx, account)
+	if err != nil {
+		return nil, err
+	}
+
+	// Resolve the wire model the same way ForwardGemini does so the probe
+	// hits the exact tier the admin selected (including the
+	// thinking-level-driven path for the suffix-less base flash).
+	probeReq := types.GenerateInner{
+		Contents: []types.Content{
+			{
+				Role:  "user",
+				Parts: []types.Part{{Text: "."}},
+			},
+		},
+		SystemInstruction: &types.SystemInstruction{
+			Parts: []types.Part{{Text: antigravity.GetDefaultIdentityPatch()}},
+		},
+		GenerationConfig: &types.GenerationConfig{
+			MaxOutputTokens: 16,
+		},
+	}
+
+	// ResolveWireFromBody expects the body bytes; serialize a placeholder
+	// envelope so it can read both `model` and `request.generationConfig…`.
+	// For the test probe there is no caller-supplied thinking level, so
+	// the wire resolution collapses to the same result as
+	// AntigravityWireModel(modelID).
+	wireModel := antigravity.AntigravityWireModel(modelID)
+	if wireModel == "" {
+		wireModel = modelID
+	}
+
+	resp, err := cli.Generate(ctx, wireModel, probeReq)
+	if err != nil {
+		return nil, fmt.Errorf("native test: generate: %w", err)
+	}
+	s.maybePersistRefreshedTokens(ctx, account, cli)
+
+	text := extractTextFromAgyResponse(resp)
+	return &TestConnectionResult{
+		Text:        text,
+		MappedModel: wireModel,
+	}, nil
+}
+
+// extractTextFromAgyResponse returns the concatenated text of every
+// non-thought Part in the first candidate. agymimic's parsed Response is
+// already the unwrapped form (no `response: {...}` envelope), so we can
+// walk Candidates → Content.Parts directly.
+func extractTextFromAgyResponse(resp *types.Response) string {
+	if resp == nil || len(resp.Response.Candidates) == 0 {
+		return ""
+	}
+	var sb strings.Builder
+	for _, p := range resp.Response.Candidates[0].Content.Parts {
+		if p.Thought {
+			continue // skip CoT — connection test only needs final answer
+		}
+		if p.Text != "" {
+			sb.WriteString(p.Text)
+		}
+	}
+	return sb.String()
 }

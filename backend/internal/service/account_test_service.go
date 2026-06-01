@@ -927,18 +927,33 @@ func (s *AccountTestService) routeAntigravityTest(c *gin.Context, account *Accou
 		}
 		return s.testClaudeAccountConnection(c, account, modelID)
 	}
-	// V1: native Antigravity (OAuth via agymimic) doesn't yet have a dedicated
-	// test-connection probe wired into AccountTestService. Emit a no-op success
-	// so the admin UI's "test connection" doesn't error out. TODO: probe via
-	// antigravityNativeGatewayService.ForwardGemini once that field is plumbed
-	// onto AccountTestService.
+	// Native Antigravity (OAuth via agymimic): probe through the native
+	// gateway service so the admin "Test Account Connection" dialog gets
+	// the actual model output, refreshing tokens + matching wire
+	// fingerprint as a side effect.
 	if account.Platform == PlatformAntigravityNative {
+		if s.antigravityNativeGatewayService == nil {
+			return s.sendErrorAndEnd(c, "Antigravity native gateway service not configured")
+		}
 		c.Writer.Header().Set("Content-Type", "text/event-stream")
 		c.Writer.Header().Set("Cache-Control", "no-cache")
 		c.Writer.Header().Set("Connection", "keep-alive")
 		c.Writer.Header().Set("X-Accel-Buffering", "no")
 		c.Writer.Flush()
-		s.sendEvent(c, TestEvent{Type: "test_start", Model: modelID})
+
+		testModelID := modelID
+		if testModelID == "" {
+			testModelID = "gemini-3.5-flash"
+		}
+		s.sendEvent(c, TestEvent{Type: "test_start", Model: testModelID})
+
+		result, err := s.antigravityNativeGatewayService.TestConnection(c.Request.Context(), account, testModelID)
+		if err != nil {
+			return s.sendErrorAndEnd(c, err.Error())
+		}
+		if result != nil && result.Text != "" {
+			s.sendEvent(c, TestEvent{Type: "content", Text: result.Text})
+		}
 		s.sendEvent(c, TestEvent{Type: "test_complete", Success: true})
 		return nil
 	}
