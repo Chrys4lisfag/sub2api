@@ -947,7 +947,7 @@ func (s *AccountTestService) routeAntigravityTest(c *gin.Context, account *Accou
 		}
 		s.sendEvent(c, TestEvent{Type: "test_start", Model: testModelID})
 
-		result, err := s.antigravityNativeGatewayService.TestConnection(c.Request.Context(), account, testModelID)
+		result, err := s.antigravityNativeGatewayService.TestConnection(c.Request.Context(), account, testModelID, prompt)
 		if err != nil {
 			return s.sendErrorAndEnd(c, err.Error())
 		}

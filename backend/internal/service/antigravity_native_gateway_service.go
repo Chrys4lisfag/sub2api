@@ -1412,6 +1412,7 @@ func (s *AntigravityNativeGatewayService) TestConnection(
 	ctx context.Context,
 	account *Account,
 	modelID string,
+	prompt string,
 ) (*TestConnectionResult, error) {
 	if account == nil {
 		return nil, fmt.Errorf("native test: nil account")
@@ -1425,29 +1426,32 @@ func (s *AntigravityNativeGatewayService) TestConnection(
 		return nil, err
 	}
 
-	// Resolve the wire model the same way ForwardGemini does so the probe
-	// hits the exact tier the admin selected (including the
-	// thinking-level-driven path for the suffix-less base flash).
+	// Use the caller's prompt when provided so the dialog's "Prompt: 'hi'"
+	// label matches what the model actually sees. Fall back to "ping" if
+	// the UI sent an empty string.
+	userPrompt := strings.TrimSpace(prompt)
+	if userPrompt == "" {
+		userPrompt = "ping"
+	}
 	probeReq := types.GenerateInner{
 		Contents: []types.Content{
 			{
 				Role:  "user",
-				Parts: []types.Part{{Text: "."}},
+				Parts: []types.Part{{Text: userPrompt}},
 			},
 		},
 		SystemInstruction: &types.SystemInstruction{
 			Parts: []types.Part{{Text: antigravity.GetDefaultIdentityPatch()}},
 		},
+		// Enough headroom for a short reply ("Hello!" etc) but still cheap.
+		// maxOutputTokens=16 with "." as the prompt frequently returned an
+		// empty candidate (the model couldn't fit anything past the
+		// thoughtSignature prelude).
 		GenerationConfig: &types.GenerationConfig{
-			MaxOutputTokens: 16,
+			MaxOutputTokens: 256,
 		},
 	}
 
-	// ResolveWireFromBody expects the body bytes; serialize a placeholder
-	// envelope so it can read both `model` and `request.generationConfig…`.
-	// For the test probe there is no caller-supplied thinking level, so
-	// the wire resolution collapses to the same result as
-	// AntigravityWireModel(modelID).
 	wireModel := antigravity.AntigravityWireModel(modelID)
 	if wireModel == "" {
 		wireModel = modelID
@@ -1460,28 +1464,89 @@ func (s *AntigravityNativeGatewayService) TestConnection(
 	s.maybePersistRefreshedTokens(ctx, account, cli)
 
 	text := extractTextFromAgyResponse(resp)
+	// Log the response shape diagnostics. If text is empty we still want
+	// to know whether the upstream returned candidates / parts / a finish
+	// reason that explains it (MAX_TOKENS, SAFETY, etc).
+	slog.InfoContext(ctx, "native test connection probe",
+		"account_id", account.ID,
+		"public_model", modelID,
+		"wire_model", wireModel,
+		"text_len", len(text),
+		"candidates", responseCandidateCount(resp),
+		"finish_reason", responseFirstFinishReason(resp),
+		"parts_summary", responsePartsSummary(resp),
+	)
 	return &TestConnectionResult{
 		Text:        text,
 		MappedModel: wireModel,
 	}, nil
 }
 
-// extractTextFromAgyResponse returns the concatenated text of every
-// non-thought Part in the first candidate. agymimic's parsed Response is
-// already the unwrapped form (no `response: {...}` envelope), so we can
-// walk Candidates → Content.Parts directly.
+// extractTextFromAgyResponse returns the concatenated text of every Part
+// in the first candidate. Thought parts are included only when no other
+// text is found, so a candidate that contains nothing but a thought
+// signature still surfaces something readable rather than an empty box.
 func extractTextFromAgyResponse(resp *types.Response) string {
 	if resp == nil || len(resp.Response.Candidates) == 0 {
 		return ""
 	}
-	var sb strings.Builder
-	for _, p := range resp.Response.Candidates[0].Content.Parts {
-		if p.Thought {
-			continue // skip CoT — connection test only needs final answer
+	parts := resp.Response.Candidates[0].Content.Parts
+	var realText strings.Builder
+	var thoughtText strings.Builder
+	for _, p := range parts {
+		if p.Text == "" {
+			continue
 		}
-		if p.Text != "" {
-			sb.WriteString(p.Text)
+		if p.Thought {
+			thoughtText.WriteString(p.Text)
+			continue
+		}
+		realText.WriteString(p.Text)
+	}
+	if realText.Len() > 0 {
+		return realText.String()
+	}
+	return thoughtText.String()
+}
+
+// responseCandidateCount returns len(candidates) for log diagnostics.
+func responseCandidateCount(resp *types.Response) int {
+	if resp == nil {
+		return 0
+	}
+	return len(resp.Response.Candidates)
+}
+
+// responseFirstFinishReason returns Candidates[0].FinishReason ("" if
+// no candidates). Surfaces MAX_TOKENS / SAFETY / OTHER for diagnostics.
+func responseFirstFinishReason(resp *types.Response) string {
+	if resp == nil || len(resp.Response.Candidates) == 0 {
+		return ""
+	}
+	return resp.Response.Candidates[0].FinishReason
+}
+
+// responsePartsSummary returns a compact "n=text,thought,fn,inline,empty"
+// breakdown of Candidates[0].Content.Parts for log diagnostics.
+func responsePartsSummary(resp *types.Response) string {
+	if resp == nil || len(resp.Response.Candidates) == 0 {
+		return "no_candidates"
+	}
+	var text, thought, fn, inline, empty int
+	for _, p := range resp.Response.Candidates[0].Content.Parts {
+		switch {
+		case p.Thought && p.Text != "":
+			thought++
+		case p.Text != "":
+			text++
+		case p.FunctionCall != nil:
+			fn++
+		case p.InlineData != nil:
+			inline++
+		default:
+			empty++
 		}
 	}
-	return sb.String()
+	return fmt.Sprintf("text=%d thought=%d fn=%d inline=%d empty=%d",
+		text, thought, fn, inline, empty)
 }
