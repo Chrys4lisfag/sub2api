@@ -78,10 +78,20 @@ func applyToolPreprocessing(inner map[string]any, useAggregator bool) toolPrepRe
 		}
 		if useAggregator && len(report.McpTools) > 0 {
 			kept = append(kept, buildCallMcpToolDecl())
-			kept = append(kept, buildListMcpToolsDecl())
-			kept = append(kept, buildReadMcpToolSchemaDecl())
+			// NOTE: previously we also appended buildListMcpToolsDecl()
+			// and buildReadMcpToolSchemaDecl() here. The model would
+			// dutifully call them per call_mcp_tool's description, omp's
+			// runtime had no matching tool, and the call failed with
+			// "Tool list_mcp_tools not found". Instead of exposing them
+			// as model-callable functions, we now INJECT the catalog
+			// directly into systemInstruction (see injectMcpCatalogIntoSystemInstruction)
+			// so the model sees every MCP tool's name + schema upfront
+			// without needing a separate discovery round-trip.
 		}
 		tool["functionDeclarations"] = kept
+	}
+	if useAggregator && len(report.McpTools) > 0 {
+		injectMcpCatalogIntoSystemInstruction(inner, report.McpTools)
 	}
 	return report
 }
@@ -290,10 +300,11 @@ func pickFirstNonNullBranch(branches []any) map[string]any {
 func buildCallMcpToolDecl() map[string]any {
 	return map[string]any{
 		"name": "call_mcp_tool",
-		"description": "Call a lazy-loaded MCP tool. Use list_mcp_tools first to discover available servers/tools, " +
-			"then read_mcp_tool_schema to fetch the argument schema, then call this tool. " +
-			"ServerName + ToolName are the MCP server name and tool name; Arguments is the JSON object " +
-			"matching the tool's input schema.",
+		"description": "Invoke an MCP tool. The MCP catalog (server names, tool names, " +
+			"argument schemas) is provided in the system instructions; pick a (ServerName, " +
+			"ToolName) pair from there and supply Arguments as a JSON object matching the " +
+			"tool's input schema. toolAction/toolSummary are short labels for the activity " +
+			"feed and may be omitted.",
 		"parameters": map[string]any{
 			"type": "OBJECT",
 			"properties": map[string]any{
@@ -444,4 +455,151 @@ func (r toolPrepReport) renderMcpToolSchema(server, tool string) []byte {
 		return buf
 	}
 	return []byte(`{}`)
+}
+
+// injectMcpCatalogIntoSystemInstruction prepends an MCP-tool catalog block
+// to the request's systemInstruction text part. Format mirrors what real
+// agy.exe ships in its prompt context — concise newline-separated entries
+// with server, tool, description, and the parsed input-schema JSON so the
+// model can construct correct Arguments to call_mcp_tool.
+//
+// Idempotent on the catalog block: if a prior call already injected the
+// marker line, we skip. The catalog block is fenced by sentinel lines so
+// future injections can locate-and-replace without doubling up.
+//
+// Catalog layout (truncated to ~6 KiB total to keep input token budget
+// reasonable on large MCP sets):
+//
+//	## MCP TOOL CATALOG (call via call_mcp_tool) ##
+//	server: github-official | tool: create_issue
+//	  description: Create a new issue in a repository.
+//	  args_schema: {"type":"object","properties":{"owner":{"type":"string"}, ...}}
+//	server: github-official | tool: get_pull_request
+//	  description: ...
+//	  args_schema: {...}
+//	## END MCP TOOL CATALOG ##
+//
+// Mutates `inner` in place. No-op when there are no MCP tools.
+func injectMcpCatalogIntoSystemInstruction(inner map[string]any, mcpTools []mcpToolHandle) {
+	if inner == nil || len(mcpTools) == 0 {
+		return
+	}
+	catalog := buildMcpCatalogText(mcpTools)
+	if catalog == "" {
+		return
+	}
+
+	// Get-or-create systemInstruction.parts[0].text
+	sysAny, has := inner["systemInstruction"]
+	if !has {
+		// Build a fresh systemInstruction with our catalog as the sole content.
+		inner["systemInstruction"] = map[string]any{
+			"role": "user",
+			"parts": []any{
+				map[string]any{"text": catalog},
+			},
+		}
+		return
+	}
+	sys, ok := sysAny.(map[string]any)
+	if !ok {
+		// Caller gave us a non-object — overwrite with our shape.
+		inner["systemInstruction"] = map[string]any{
+			"role":  "user",
+			"parts": []any{map[string]any{"text": catalog}},
+		}
+		return
+	}
+	parts, _ := sys["parts"].([]any)
+	if len(parts) == 0 {
+		sys["parts"] = []any{map[string]any{"text": catalog}}
+		return
+	}
+	// Prepend catalog to the FIRST text part. Caller's text follows so
+	// the model still sees the original system context (identity, tool
+	// usage rules, etc.) — the catalog is supplementary.
+	first, _ := parts[0].(map[string]any)
+	if first == nil {
+		parts[0] = map[string]any{"text": catalog}
+		sys["parts"] = parts
+		return
+	}
+	existingText, _ := first["text"].(string)
+	if strings.Contains(existingText, mcpCatalogStartMarker) {
+		// Already injected — idempotent.
+		return
+	}
+	first["text"] = catalog + "\n\n" + existingText
+	parts[0] = first
+	sys["parts"] = parts
+}
+
+const (
+	mcpCatalogStartMarker = "## MCP TOOL CATALOG (call via call_mcp_tool) ##"
+	mcpCatalogEndMarker   = "## END MCP TOOL CATALOG ##"
+	// Soft byte limit on the catalog block to keep prompt token usage in
+	// check. ~6 KiB ≈ 1.5k tokens at typical English density.
+	mcpCatalogBudget = 6 * 1024
+)
+
+func buildMcpCatalogText(mcpTools []mcpToolHandle) string {
+	if len(mcpTools) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	b.WriteString(mcpCatalogStartMarker)
+	b.WriteByte('\n')
+	written := b.Len()
+	for _, h := range mcpTools {
+		server, tool := splitMcpFullName(h.FullName)
+		desc, _ := h.Decl["description"].(string)
+		desc = strings.TrimSpace(desc)
+		if len(desc) > 240 {
+			desc = desc[:237] + "..."
+		}
+		// Schema: prefer parametersJsonSchema (original omp shape, more
+		// expressive than the trimmed Gemini Schema we emit on the wire).
+		schema := h.Decl["parametersJsonSchema"]
+		if schema == nil {
+			schema = h.Decl["parameters"]
+		}
+		schemaBytes, _ := json.Marshal(schema)
+		entry := "server: " + server + " | tool: " + tool + "\n"
+		if desc != "" {
+			entry += "  description: " + desc + "\n"
+		}
+		if len(schemaBytes) > 0 && string(schemaBytes) != "null" {
+			s := string(schemaBytes)
+			if len(s) > 800 {
+				s = s[:797] + "..."
+			}
+			entry += "  args_schema: " + s + "\n"
+		}
+		// Stop adding entries once we've blown the budget. Real agy
+		// presents abbreviated entries when over budget — we just
+		// truncate so the model gets a fair sample of available tools.
+		if written+len(entry)+len(mcpCatalogEndMarker)+8 > mcpCatalogBudget {
+			b.WriteString("(...catalog truncated for token budget — call call_mcp_tool with any plausible (ServerName, ToolName) and the upstream will validate)\n")
+			break
+		}
+		b.WriteString(entry)
+		written += len(entry)
+	}
+	b.WriteString(mcpCatalogEndMarker)
+	return b.String()
+}
+
+// splitMcpFullName parses "mcp__<server>_<tool>" → (server, tool).
+// Mirrors the namespacing scheme omp's createMCPToolName uses.
+// Best-effort: when the server name contains underscores (sanitized
+// dashes), we pick the first underscore as the boundary. Edge cases
+// where the model later tries (server="ida", tool="orchestrator_read_memory")
+// still resolve via resolveMcpHandle's fuzzy match.
+func splitMcpFullName(full string) (server, tool string) {
+	stripped := strings.TrimPrefix(full, "mcp__")
+	idx := strings.Index(stripped, "_")
+	if idx <= 0 {
+		return stripped, stripped
+	}
+	return stripped[:idx], stripped[idx+1:]
 }

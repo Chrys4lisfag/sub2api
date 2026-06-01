@@ -113,13 +113,17 @@ func TestPreprocess_NoMcp_NoAggregator(t *testing.T) {
 }
 
 // TestPreprocess_McpAggregator covers the main fix path: many MCP tools
-// should be collapsed into a single call_mcp_tool entry + 2 helpers.
+// should be collapsed into a single call_mcp_tool entry, and the catalog
+// should be injected into systemInstruction (NOT exposed as model-callable
+// list_mcp_tools / read_mcp_tool_schema declarations — those were dropped
+// because omp's runtime didn't have matching tools, and the model would
+// get "Tool list_mcp_tools not found" loops).
 func TestPreprocess_McpAggregator(t *testing.T) {
 	body := []byte(`{"contents":[],"tools":[{"functionDeclarations":[
 		{"name":"find","parametersJsonSchema":{"type":"object","properties":{"paths":{"type":"array","items":{"type":"string"}}}}},
-		{"name":"mcp__github_official_get_pull_request","parametersJsonSchema":{"type":"object","properties":{"owner":{"type":"string"},"repo":{"type":"string"}}}},
-		{"name":"mcp__github_official_create_issue","parametersJsonSchema":{"type":"object","properties":{"owner":{"type":"string"},"repo":{"type":"string"},"title":{"type":"string"}}}},
-		{"name":"mcp__ida_orchestrator_read_memory","parametersJsonSchema":{"type":"object","properties":{"regions":{"type":"array"}}}}
+		{"name":"mcp__github_official_get_pull_request","description":"Get PR","parametersJsonSchema":{"type":"object","properties":{"owner":{"type":"string"},"repo":{"type":"string"}}}},
+		{"name":"mcp__github_official_create_issue","description":"New issue","parametersJsonSchema":{"type":"object","properties":{"owner":{"type":"string"},"repo":{"type":"string"},"title":{"type":"string"}}}},
+		{"name":"mcp__ida_orchestrator_read_memory","description":"Read mem","parametersJsonSchema":{"type":"object","properties":{"regions":{"type":"array"}}}}
 	]}]}`)
 	out, report, err := preprocessNativeBody(body, true)
 	if err != nil {
@@ -131,15 +135,53 @@ func TestPreprocess_McpAggregator(t *testing.T) {
 	if len(report.McpTools) != 3 {
 		t.Errorf("expected 3 mcp tools captured, got %d", len(report.McpTools))
 	}
+	outStr := string(out)
 	// Out body should NOT contain the original mcp__ names in declarations.
-	if strings.Count(string(out), `"name":"mcp__`) > 0 {
+	if strings.Count(outStr, `"name":"mcp__`) > 0 {
 		t.Errorf("mcp__ names leaked into outbound body")
 	}
-	// Out body MUST contain call_mcp_tool + list_mcp_tools + read_mcp_tool_schema.
-	for _, want := range []string{"call_mcp_tool", "list_mcp_tools", "read_mcp_tool_schema"} {
-		if !strings.Contains(string(out), `"name":"`+want+`"`) {
-			t.Errorf("aggregator tool %q missing: %s", want, out)
+	// Aggregator MUST contain call_mcp_tool.
+	if !strings.Contains(outStr, `"name":"call_mcp_tool"`) {
+		t.Errorf("call_mcp_tool declaration missing: %s", out)
+	}
+	// Aggregator MUST NOT contain the dropped synthetic tools.
+	for _, dropped := range []string{"list_mcp_tools", "read_mcp_tool_schema"} {
+		if strings.Contains(outStr, `"name":"`+dropped+`"`) {
+			t.Errorf("dropped tool %q leaked into outbound declarations", dropped)
 		}
+	}
+	// Catalog MUST be injected into systemInstruction.
+	if !strings.Contains(outStr, "MCP TOOL CATALOG") {
+		t.Errorf("MCP catalog not injected into systemInstruction: %s", out)
+	}
+	// Catalog must mention each MCP tool's tool name.
+	for _, want := range []string{"get_pull_request", "create_issue", "read_memory"} {
+		if !strings.Contains(outStr, want) {
+			t.Errorf("catalog missing tool %q: %s", want, out)
+		}
+	}
+}
+
+// TestInjectMcpCatalog_Idempotent — re-injection must not double the
+// catalog block.
+func TestInjectMcpCatalog_Idempotent(t *testing.T) {
+	inner := map[string]any{
+		"systemInstruction": map[string]any{
+			"role":  "user",
+			"parts": []any{map[string]any{"text": "existing system text"}},
+		},
+	}
+	tools := []mcpToolHandle{
+		{FullName: "mcp__server_one_tool_a", Decl: map[string]any{"description": "first tool"}},
+	}
+	injectMcpCatalogIntoSystemInstruction(inner, tools)
+	injectMcpCatalogIntoSystemInstruction(inner, tools)
+	text := inner["systemInstruction"].(map[string]any)["parts"].([]any)[0].(map[string]any)["text"].(string)
+	if strings.Count(text, mcpCatalogStartMarker) != 1 {
+		t.Errorf("catalog marker count != 1 after double-inject: %d in %q", strings.Count(text, mcpCatalogStartMarker), text)
+	}
+	if !strings.Contains(text, "existing system text") {
+		t.Errorf("existing system text was lost after inject")
 	}
 }
 
