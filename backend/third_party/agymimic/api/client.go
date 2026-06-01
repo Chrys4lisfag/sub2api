@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"os"
 	"strings"
@@ -52,15 +53,41 @@ func New(tokens *auth.Tokens, opts ...Option) *Client {
 		endpoint: I.EndpointDailySandbox,
 		httpc: &http.Client{
 			Transport: &http.Transport{
-				// Real agy.exe uses HTTP/1.1 with Transfer-Encoding: chunked to
-				// cloudcode-pa (verified via Frida capture May 2026). Earlier
-				// http2debug=2 logs that suggested HTTP/2 were ONLY for the
-				// Unleash + oauth endpoints; cloudcode-pa traffic bypassed Go
-				// stdlib http2 entirely. Match the real wire.
-				ForceAttemptHTTP2:     false,
-				MaxIdleConns:          16,
-				IdleConnTimeout:       90 * time.Second,
+				// Real agy.exe uses HTTP/1.1 with Transfer-Encoding: chunked
+				// to cloudcode-pa (verified via Frida capture May 2026).
+				// Earlier http2debug=2 logs that suggested HTTP/2 were ONLY
+				// for the Unleash + oauth endpoints; cloudcode-pa traffic
+				// bypassed Go stdlib http2 entirely. Match the real wire.
+				ForceAttemptHTTP2: false,
+
+				// Connection pool tuning. Go's stdlib defaults are too
+				// conservative for an agentic chat workload — especially
+				// MaxIdleConnsPerHost=2, which silently caps reuse to 2
+				// connections per upstream regardless of how big the
+				// global pool is. Raise both so concurrent turns within
+				// the same conversation (or across simultaneous omp
+				// sessions sharing an account) all hit warm sockets and
+				// avoid the ~150-300 ms TCP+TLS handshake penalty.
+				MaxIdleConns:        64,
+				MaxIdleConnsPerHost: 16,
+				IdleConnTimeout:     5 * time.Minute,
+
+				// Real agy keeps a long-lived process so its sockets stay
+				// warm for the whole session. We can't quite match that
+				// (per-account cache lives for the sub2api process
+				// lifetime, but individual idle connections get pruned),
+				// but 5 minutes covers typical multi-turn omp workflows
+				// without leaking sockets indefinitely.
 				ResponseHeaderTimeout: 60 * time.Second,
+
+				// Honor DNS cache + TCP keepalive at the OS layer so the
+				// kernel-side connection stays healthy across long idle
+				// gaps. Default (15 s) is fine for most networks; setting
+				// explicitly here documents the intent.
+				DialContext: (&net.Dialer{
+					Timeout:   10 * time.Second,
+					KeepAlive: 30 * time.Second,
+				}).DialContext,
 			},
 			Timeout: 0, // streaming — never bound the whole call
 		},
