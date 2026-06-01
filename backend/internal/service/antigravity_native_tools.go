@@ -383,21 +383,123 @@ func buildReadMcpToolSchemaDecl() map[string]any {
 func (r toolPrepReport) resolveMcpHandle(server, tool string) (mcpToolHandle, bool) {
 	serverNorm := strings.ReplaceAll(server, "-", "_")
 	toolNorm := strings.ReplaceAll(tool, "-", "_")
+
+	// Tier 1: exact mcp__server_tool match.
 	want := "mcp__" + serverNorm + "_" + toolNorm
 	for _, h := range r.McpTools {
 		if h.FullName == want {
 			return h, true
 		}
 	}
-	// Fuzzy: server-only prefix match — the model may have stripped the
-	// server prefix if the tool name was already namespaced.
+
+	// Tier 2: server-prefix + tool-suffix exact match. Catches omp's
+	// prefix-stripping (server "electerm" + tool "list_bookmarks" maps to
+	// real name "mcp__electerm_list_electerm_bookmarks").
 	prefix := "mcp__" + serverNorm + "_"
 	for _, h := range r.McpTools {
 		if strings.HasPrefix(h.FullName, prefix) && strings.HasSuffix(h.FullName, "_"+toolNorm) {
 			return h, true
 		}
 	}
+
+	// Tier 3: server-prefix + Levenshtein-closest tool. Model
+	// hallucinations like "get_electerm_bookmarks" (instead of the
+	// catalog's "list_electerm_bookmarks") fall through to here. We
+	// scan all tools under the requested server, score them by
+	// edit-distance against the requested tool name, and pick the
+	// closest if it's within a sensible threshold (≤ 40% of the
+	// longer string's length — keeps "list" vs "get" matching but
+	// rejects wholesale renames like "create_issue" → "list_files").
+	var best mcpToolHandle
+	bestDist := -1
+	for _, h := range r.McpTools {
+		if !strings.HasPrefix(h.FullName, prefix) {
+			continue
+		}
+		// extract the per-tool portion under the server prefix
+		toolPart := strings.TrimPrefix(h.FullName, prefix)
+		d := levenshtein(toolNorm, toolPart)
+		if bestDist == -1 || d < bestDist {
+			bestDist = d
+			best = h
+		}
+	}
+	if bestDist >= 0 {
+		longer := len(toolNorm)
+		if l := len(strings.TrimPrefix(best.FullName, prefix)); l > longer {
+			longer = l
+		}
+		if longer > 0 && bestDist*100/longer <= 40 {
+			return best, true
+		}
+	}
+
+	// Tier 4: scan ALL handles by Levenshtein on the full name. Catches
+	// model hallucinations on BOTH server + tool. Same 40% threshold.
+	want = "mcp__" + serverNorm + "_" + toolNorm
+	best = mcpToolHandle{}
+	bestDist = -1
+	for _, h := range r.McpTools {
+		d := levenshtein(want, h.FullName)
+		if bestDist == -1 || d < bestDist {
+			bestDist = d
+			best = h
+		}
+	}
+	if bestDist >= 0 {
+		longer := len(want)
+		if l := len(best.FullName); l > longer {
+			longer = l
+		}
+		if longer > 0 && bestDist*100/longer <= 30 {
+			return best, true
+		}
+	}
+
 	return mcpToolHandle{}, false
+}
+
+// levenshtein returns the Levenshtein edit distance between two strings.
+// Pure-Go, no deps. Used by resolveMcpHandle's fuzzy tier to recover from
+// model hallucinations on MCP tool names.
+func levenshtein(a, b string) int {
+	if a == b {
+		return 0
+	}
+	if len(a) == 0 {
+		return len(b)
+	}
+	if len(b) == 0 {
+		return len(a)
+	}
+	// Two-row dynamic programming table.
+	prev := make([]int, len(b)+1)
+	curr := make([]int, len(b)+1)
+	for j := range prev {
+		prev[j] = j
+	}
+	for i := 1; i <= len(a); i++ {
+		curr[0] = i
+		for j := 1; j <= len(b); j++ {
+			cost := 1
+			if a[i-1] == b[j-1] {
+				cost = 0
+			}
+			del := prev[j] + 1
+			ins := curr[j-1] + 1
+			sub := prev[j-1] + cost
+			m := del
+			if ins < m {
+				m = ins
+			}
+			if sub < m {
+				m = sub
+			}
+			curr[j] = m
+		}
+		prev, curr = curr, prev
+	}
+	return prev[len(b)]
 }
 
 // renderMcpToolCatalog returns a JSON-encoded array of
@@ -549,6 +651,10 @@ func buildMcpCatalogText(mcpTools []mcpToolHandle) string {
 	var b strings.Builder
 	b.WriteString(mcpCatalogStartMarker)
 	b.WriteByte('\n')
+	b.WriteString("Each entry below lists ONE MCP tool. To invoke a tool, emit a\n")
+	b.WriteString("functionCall to call_mcp_tool with EXACTLY the (ServerName,\n")
+	b.WriteString("ToolName) pair shown here. Do not paraphrase names — the\n")
+	b.WriteString("aggregator matches them literally.\n\n")
 	written := b.Len()
 	for _, h := range mcpTools {
 		server, tool := splitMcpFullName(h.FullName)
@@ -564,7 +670,15 @@ func buildMcpCatalogText(mcpTools []mcpToolHandle) string {
 			schema = h.Decl["parameters"]
 		}
 		schemaBytes, _ := json.Marshal(schema)
-		entry := "server: " + server + " | tool: " + tool + "\n"
+		// Compact one-line header that shows BOTH the wire-style name
+		// (mcp__server_tool, which the model will see in conversation
+		// history after the first turn) AND the explicit (ServerName,
+		// ToolName) pair the model must use with call_mcp_tool. The
+		// duplication is intentional — emphasizes the exact tool name
+		// to reduce paraphrase hallucinations (observed e.g.
+		// list_electerm_bookmarks → get_electerm_bookmarks).
+		entry := "- " + h.FullName + "\n"
+		entry += "  call as: call_mcp_tool(ServerName=\"" + server + "\", ToolName=\"" + tool + "\", Arguments={...})\n"
 		if desc != "" {
 			entry += "  description: " + desc + "\n"
 		}
@@ -579,7 +693,7 @@ func buildMcpCatalogText(mcpTools []mcpToolHandle) string {
 		// presents abbreviated entries when over budget — we just
 		// truncate so the model gets a fair sample of available tools.
 		if written+len(entry)+len(mcpCatalogEndMarker)+8 > mcpCatalogBudget {
-			b.WriteString("(...catalog truncated for token budget — call call_mcp_tool with any plausible (ServerName, ToolName) and the upstream will validate)\n")
+			b.WriteString("(...catalog truncated for token budget — only the above tools are guaranteed valid; call_mcp_tool with any plausible pair may also succeed if the upstream recognizes it)\n")
 			break
 		}
 		b.WriteString(entry)

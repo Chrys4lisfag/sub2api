@@ -271,3 +271,83 @@ func TestAccountToolAggregatorEnabled_StringForms(t *testing.T) {
 		}
 	}
 }
+
+// TestResolveMcpHandle_HallucinatedToolName — the live deploy caught the
+// model hallucinating "get_electerm_bookmarks" when the catalog actually
+// advertised "list_electerm_bookmarks". With the Levenshtein fuzzy tier,
+// we should still find the right handle.
+func TestResolveMcpHandle_HallucinatedToolName(t *testing.T) {
+	report := toolPrepReport{
+		AggregatorOn: true,
+		McpTools: []mcpToolHandle{
+			{FullName: "mcp__electerm_list_electerm_bookmarks", Decl: map[string]any{"description": "list"}},
+			{FullName: "mcp__electerm_open_electerm_bookmark", Decl: map[string]any{"description": "open"}},
+			{FullName: "mcp__electerm_send_electerm_terminal_command", Decl: map[string]any{"description": "send"}},
+		},
+	}
+	// Model hallucinated "get_electerm_bookmarks" instead of "list_electerm_bookmarks".
+	got, ok := report.resolveMcpHandle("electerm", "get_electerm_bookmarks")
+	if !ok {
+		t.Fatal("fuzzy resolve should find list_electerm_bookmarks despite get_/list_ swap")
+	}
+	if got.FullName != "mcp__electerm_list_electerm_bookmarks" {
+		t.Errorf("fuzzy picked wrong tool: %s", got.FullName)
+	}
+}
+
+// TestResolveMcpHandle_RejectsWildlyDifferent — fuzzy must NOT match when
+// the requested name has no meaningful overlap.
+func TestResolveMcpHandle_RejectsWildlyDifferent(t *testing.T) {
+	report := toolPrepReport{
+		AggregatorOn: true,
+		McpTools: []mcpToolHandle{
+			{FullName: "mcp__electerm_list_electerm_bookmarks", Decl: map[string]any{"description": "list"}},
+		},
+	}
+	// Wholly unrelated tool name on a server that does have other tools.
+	// 40% threshold rejects this.
+	_, ok := report.resolveMcpHandle("electerm", "execute_terminal_command_with_extra_words")
+	if ok {
+		t.Error("fuzzy should reject wildly mismatched tool name on existing server")
+	}
+}
+
+// TestResolveMcpHandle_PrefixStrip — omp's createMCPToolName strips the
+// server prefix when redundant. If model emits the short ToolName, we
+// still find the handle that has the full prefixed name.
+func TestResolveMcpHandle_PrefixStrip(t *testing.T) {
+	report := toolPrepReport{
+		AggregatorOn: true,
+		McpTools: []mcpToolHandle{
+			{FullName: "mcp__github_official_get_pull_request", Decl: map[string]any{"description": "pr"}},
+		},
+	}
+	got, ok := report.resolveMcpHandle("github-official", "get_pull_request")
+	if !ok {
+		t.Fatalf("dash-normalized server + exact tool should resolve, got !ok")
+	}
+	if got.FullName != "mcp__github_official_get_pull_request" {
+		t.Errorf("wrong handle: %s", got.FullName)
+	}
+}
+
+// TestLevenshtein_Basics — sanity-check the edit-distance helper.
+func TestLevenshtein_Basics(t *testing.T) {
+	cases := []struct {
+		a, b string
+		want int
+	}{
+		{"", "", 0},
+		{"abc", "abc", 0},
+		{"abc", "abd", 1},
+		{"list_bookmarks", "get_bookmarks", 3},
+		{"", "abc", 3},
+		{"abc", "", 3},
+	}
+	for _, c := range cases {
+		got := levenshtein(c.a, c.b)
+		if got != c.want {
+			t.Errorf("levenshtein(%q,%q) = %d, want %d", c.a, c.b, got, c.want)
+		}
+	}
+}
