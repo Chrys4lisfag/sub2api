@@ -157,6 +157,18 @@ const openAIAllowCodexPluginCacheTTL = 60 * time.Second
 const openAIAllowCodexPluginErrorTTL = 5 * time.Second
 const openAIAllowCodexPluginDBTimeout = 5 * time.Second
 
+// cachedAntigravityNativeListTools — 60s TTL cache for the
+// agy_list_tools emulation toggle. Read on every antigravity_native
+// gateway request, so caching avoids per-request DB hits.
+type cachedAntigravityNativeListTools struct {
+	value     bool
+	expiresAt int64
+}
+
+const antigravityNativeListToolsCacheTTL = 60 * time.Second
+const antigravityNativeListToolsErrorTTL = 5 * time.Second
+const antigravityNativeListToolsDBTimeout = 5 * time.Second
+
 const openAIQuotaAutoPauseSettingsCacheTTL = 60 * time.Second
 const openAIQuotaAutoPauseSettingsErrorTTL = 5 * time.Second
 const openAIQuotaAutoPauseSettingsDBTimeout = 5 * time.Second
@@ -186,6 +198,8 @@ type SettingService struct {
 	openAICodexUACache          atomic.Value // *cachedOpenAICodexUserAgent
 	openAICodexUASF             singleflight.Group
 	openAIAllowCodexPluginCache atomic.Value // *cachedOpenAIAllowCodexPlugin
+	antigravityNativeListToolsCache atomic.Value // *cachedAntigravityNativeListTools
+	antigravityNativeListToolsSF    singleflight.Group
 	openAIAllowCodexPluginSF    singleflight.Group
 
 	// openAIQuotaAutoPauseSettingsCache holds the most recently observed quota auto-pause
@@ -1096,6 +1110,53 @@ func (s *SettingService) IsOpenAIAllowClaudeCodeCodexPluginEnabled(ctx context.C
 	return false
 }
 
+// IsAntigravityNativeListToolsEmulationEnabled — 全局开关：是否启用
+// agy_list_tools 透明 MCP 发现工具。默认关闭。
+// 读取自 SettingKeyAntigravityNativeListToolsEmulation；每次 antigravity_native
+// 网关请求都会调用，所以使用 60s TTL atomic.Value 缓存避免 DB 热路径。
+func (s *SettingService) IsAntigravityNativeListToolsEmulationEnabled(ctx context.Context) bool {
+	if cached, ok := s.antigravityNativeListToolsCache.Load().(*cachedAntigravityNativeListTools); ok && cached != nil {
+		if time.Now().UnixNano() < cached.expiresAt {
+			return cached.value
+		}
+	}
+	result, _, _ := s.antigravityNativeListToolsSF.Do("antigravity_native_list_tools_emulation", func() (any, error) {
+		if cached, ok := s.antigravityNativeListToolsCache.Load().(*cachedAntigravityNativeListTools); ok && cached != nil {
+			if time.Now().UnixNano() < cached.expiresAt {
+				return cached.value, nil
+			}
+		}
+		dbCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), antigravityNativeListToolsDBTimeout)
+		defer cancel()
+		value, err := s.settingRepo.GetValue(dbCtx, SettingKeyAntigravityNativeListToolsEmulation)
+		if err != nil {
+			if errors.Is(err, ErrSettingNotFound) {
+				s.antigravityNativeListToolsCache.Store(&cachedAntigravityNativeListTools{
+					value:     false,
+					expiresAt: time.Now().Add(antigravityNativeListToolsCacheTTL).UnixNano(),
+				})
+				return false, nil
+			}
+			slog.Warn("failed to get antigravity_native_list_tools_emulation setting", "error", err)
+			s.antigravityNativeListToolsCache.Store(&cachedAntigravityNativeListTools{
+				value:     false,
+				expiresAt: time.Now().Add(antigravityNativeListToolsErrorTTL).UnixNano(),
+			})
+			return false, nil
+		}
+		enabled := value == "true"
+		s.antigravityNativeListToolsCache.Store(&cachedAntigravityNativeListTools{
+			value:     enabled,
+			expiresAt: time.Now().Add(antigravityNativeListToolsCacheTTL).UnixNano(),
+		})
+		return enabled, nil
+	})
+	if val, ok := result.(bool); ok {
+		return val
+	}
+	return false
+}
+
 // SetOnUpdateCallback sets a callback function to be called when settings are updated
 // This is used for cache invalidation (e.g., HTML cache in frontend server)
 func (s *SettingService) SetOnUpdateCallback(callback func()) {
@@ -1898,6 +1959,7 @@ func (s *SettingService) buildSystemSettingsUpdates(ctx context.Context, setting
 	updates[SettingKeyAntigravityUserAgentVersion] = antigravity.NormalizeUserAgentVersion(settings.AntigravityUserAgentVersion)
 	updates[SettingKeyOpenAICodexUserAgent] = strings.TrimSpace(settings.OpenAICodexUserAgent)
 	updates[SettingKeyOpenAIAllowClaudeCodeCodexPlugin] = strconv.FormatBool(settings.OpenAIAllowClaudeCodeCodexPlugin)
+	updates[SettingKeyAntigravityNativeListToolsEmulation] = strconv.FormatBool(settings.AntigravityNativeListToolsEmulation)
 	updates[SettingPaymentVisibleMethodAlipaySource] = settings.PaymentVisibleMethodAlipaySource
 	updates[SettingPaymentVisibleMethodWxpaySource] = settings.PaymentVisibleMethodWxpaySource
 	updates[SettingPaymentVisibleMethodAlipayEnabled] = strconv.FormatBool(settings.PaymentVisibleMethodAlipayEnabled)
@@ -2065,6 +2127,11 @@ func (s *SettingService) refreshCachedSettings(settings *SystemSettings) {
 	s.openAIAllowCodexPluginCache.Store(&cachedOpenAIAllowCodexPlugin{
 		value:     settings.OpenAIAllowClaudeCodeCodexPlugin,
 		expiresAt: time.Now().Add(openAIAllowCodexPluginCacheTTL).UnixNano(),
+	})
+	s.antigravityNativeListToolsSF.Forget("antigravity_native_list_tools_emulation")
+	s.antigravityNativeListToolsCache.Store(&cachedAntigravityNativeListTools{
+		value:     settings.AntigravityNativeListToolsEmulation,
+		expiresAt: time.Now().Add(antigravityNativeListToolsCacheTTL).UnixNano(),
 	})
 	if s.onUpdate != nil {
 		s.onUpdate() // Invalidate cache after settings update
@@ -2811,6 +2878,7 @@ func (s *SettingService) InitializeDefaultSettings(ctx context.Context) error {
 		SettingKeyRewriteMessageCacheControl:         strconv.FormatBool(s.defaultRewriteMessageCacheControl()),
 		SettingKeyAntigravityUserAgentVersion:        "",
 		SettingKeyOpenAICodexUserAgent:               "",
+		SettingKeyAntigravityNativeListToolsEmulation: "false",
 		SettingPaymentVisibleMethodAlipaySource:      "",
 		SettingPaymentVisibleMethodWxpaySource:       "",
 		SettingPaymentVisibleMethodAlipayEnabled:     "false",
@@ -3332,6 +3400,7 @@ func (s *SettingService) parseSettings(settings map[string]string) *SystemSettin
 	result.AntigravityUserAgentVersion = antigravity.NormalizeUserAgentVersion(settings[SettingKeyAntigravityUserAgentVersion])
 	result.OpenAICodexUserAgent = strings.TrimSpace(settings[SettingKeyOpenAICodexUserAgent])
 	result.OpenAIAllowClaudeCodeCodexPlugin = settings[SettingKeyOpenAIAllowClaudeCodeCodexPlugin] == "true"
+	result.AntigravityNativeListToolsEmulation = settings[SettingKeyAntigravityNativeListToolsEmulation] == "true"
 
 	// Web search emulation: quick enabled check from the JSON config
 	if raw := settings[SettingKeyWebSearchEmulationConfig]; raw != "" {

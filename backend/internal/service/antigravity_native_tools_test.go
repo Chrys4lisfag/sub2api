@@ -90,7 +90,7 @@ func TestPreprocess_NoMcp_NoAggregator(t *testing.T) {
 		{"name":"find","parametersJsonSchema":{"type":"object","properties":{"paths":{"type":"array","items":{"type":"string"}}},"required":["paths"]}},
 		{"name":"read","parametersJsonSchema":{"type":"object","properties":{"path":{"type":"string"}},"required":["path"]}}
 	]}]}`)
-	out, report, err := preprocessNativeBody(body, false)
+	out, report, err := preprocessNativeBody(body, false, "")
 	if err != nil {
 		t.Fatalf("unexpected err: %v", err)
 	}
@@ -125,7 +125,7 @@ func TestPreprocess_McpAggregator(t *testing.T) {
 		{"name":"mcp__github_official_create_issue","description":"New issue","parametersJsonSchema":{"type":"object","properties":{"owner":{"type":"string"},"repo":{"type":"string"},"title":{"type":"string"}}}},
 		{"name":"mcp__ida_orchestrator_read_memory","description":"Read mem","parametersJsonSchema":{"type":"object","properties":{"regions":{"type":"array"}}}}
 	]}]}`)
-	out, report, err := preprocessNativeBody(body, true)
+	out, report, err := preprocessNativeBody(body, true, "")
 	if err != nil {
 		t.Fatalf("unexpected err: %v", err)
 	}
@@ -174,8 +174,8 @@ func TestInjectMcpCatalog_Idempotent(t *testing.T) {
 	tools := []mcpToolHandle{
 		{FullName: "mcp__server_one_tool_a", Decl: map[string]any{"description": "first tool"}},
 	}
-	injectMcpCatalogIntoSystemInstruction(inner, tools)
-	injectMcpCatalogIntoSystemInstruction(inner, tools)
+	injectMcpCatalogIntoSystemInstruction(inner, tools, "")
+	injectMcpCatalogIntoSystemInstruction(inner, tools, "")
 	text := inner["systemInstruction"].(map[string]any)["parts"].([]any)[0].(map[string]any)["text"].(string)
 	if strings.Count(text, mcpCatalogStartMarker) != 1 {
 		t.Errorf("catalog marker count != 1 after double-inject: %d in %q", strings.Count(text, mcpCatalogStartMarker), text)
@@ -349,5 +349,108 @@ func TestLevenshtein_Basics(t *testing.T) {
 		if got != c.want {
 			t.Errorf("levenshtein(%q,%q) = %d, want %d", c.a, c.b, got, c.want)
 		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// accountMcpAggregatorName / configurable name plumbing
+// ---------------------------------------------------------------------------
+
+func TestAccountMcpAggregatorName_DefaultEmpty(t *testing.T) {
+	if got := accountMcpAggregatorName(&Account{Credentials: map[string]any{}}); got != "call_mcp_tool" {
+		t.Errorf("empty cred should default to call_mcp_tool, got %q", got)
+	}
+	if got := accountMcpAggregatorName(nil); got != "call_mcp_tool" {
+		t.Errorf("nil account should default to call_mcp_tool, got %q", got)
+	}
+}
+
+func TestAccountMcpAggregatorName_Custom(t *testing.T) {
+	a := &Account{Credentials: map[string]any{"mcp_aggregator_name": "agy_call_mcp_tool"}}
+	if got := accountMcpAggregatorName(a); got != "agy_call_mcp_tool" {
+		t.Errorf("custom name not respected: got %q", got)
+	}
+}
+
+func TestAccountMcpAggregatorName_TrimsAndDefaults(t *testing.T) {
+	a := &Account{Credentials: map[string]any{"mcp_aggregator_name": "   "}}
+	if got := accountMcpAggregatorName(a); got != "call_mcp_tool" {
+		t.Errorf("whitespace-only should default, got %q", got)
+	}
+}
+
+func TestAccountMcpAggregatorName_InvalidFallsBack(t *testing.T) {
+	cases := []string{
+		"1starts_with_digit",
+		"has-dash",
+		"has space",
+		"has.dot",
+		strings.Repeat("a", 65), // too long
+	}
+	for _, bad := range cases {
+		a := &Account{Credentials: map[string]any{"mcp_aggregator_name": bad}}
+		if got := accountMcpAggregatorName(a); got != "call_mcp_tool" {
+			t.Errorf("invalid %q should fall back to default, got %q", bad, got)
+		}
+	}
+}
+
+func TestIsValidMcpAggregatorName(t *testing.T) {
+	good := []string{"a", "_x", "call_mcp_tool", "agy_call_mcp_tool", "FooBar123"}
+	for _, g := range good {
+		if !isValidMcpAggregatorName(g) {
+			t.Errorf("%q should be valid", g)
+		}
+	}
+	bad := []string{"", "1abc", "-x", "a-b", "a b", "a.b", strings.Repeat("a", 65)}
+	for _, b := range bad {
+		if isValidMcpAggregatorName(b) {
+			t.Errorf("%q should be invalid", b)
+		}
+	}
+}
+
+// TestPreprocess_CustomAggregatorName verifies the configured name is
+// used in the outbound declaration AND in the catalog text.
+func TestPreprocess_CustomAggregatorName(t *testing.T) {
+	body := []byte(`{"contents":[],"tools":[{"functionDeclarations":[
+		{"name":"mcp__github_official_get_pull_request","description":"Get PR","parametersJsonSchema":{"type":"object","properties":{"owner":{"type":"string"}}}}
+	]}]}`)
+	out, report, err := preprocessNativeBody(body, true, "agy_call_mcp_tool")
+	if err != nil {
+		t.Fatalf("unexpected err: %v", err)
+	}
+	if report.AggregatorName != "agy_call_mcp_tool" {
+		t.Errorf("report.AggregatorName not set: %q", report.AggregatorName)
+	}
+	outStr := string(out)
+	if !strings.Contains(outStr, `"name":"agy_call_mcp_tool"`) {
+		t.Errorf("custom aggregator decl missing: %s", outStr)
+	}
+	if strings.Contains(outStr, `"name":"call_mcp_tool"`) {
+		t.Errorf("default name leaked into outbound: %s", outStr)
+	}
+	if !strings.Contains(outStr, "agy_call_mcp_tool") {
+		t.Errorf("custom name missing from catalog body: %s", outStr)
+	}
+}
+
+// TestRewrite_CustomAggregatorName verifies the back-translator honors
+// the configured name when matching model output.
+func TestRewrite_CustomAggregatorName(t *testing.T) {
+	report := toolPrepReport{
+		AggregatorOn:   true,
+		AggregatorName: "agy_call_mcp_tool",
+		McpTools: []mcpToolHandle{
+			{FullName: "mcp__github_official_get_pull_request", Decl: map[string]any{}},
+		},
+	}
+	payload := []byte(`{"candidates":[{"content":{"parts":[{"functionCall":{"name":"agy_call_mcp_tool","args":{"ServerName":"github-official","ToolName":"get_pull_request","Arguments":{"owner":"a","repo":"b"}}}}]}}]}`)
+	out := rewriteAggregatedFunctionCalls(payload, report)
+	if !strings.Contains(string(out), `"name":"mcp__github_official_get_pull_request"`) {
+		t.Fatalf("rewrite missing under custom name: %s", out)
+	}
+	if strings.Contains(string(out), `"name":"agy_call_mcp_tool"`) {
+		t.Errorf("custom aggregator name leaked back to omp side: %s", out)
 	}
 }

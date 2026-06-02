@@ -443,6 +443,12 @@ const (
 	// SettingKeyOpenAIAllowClaudeCodeCodexPlugin 全局开关：是否额外放行 Claude Code 的 Codex 插件（默认 false）。
 	// 仅在账号 codex_cli_only 开启时生效；开启后无需逐账号配置 codex_cli_only_allowed_clients。
 	SettingKeyOpenAIAllowClaudeCodeCodexPlugin = "openai_allow_claude_code_codex_plugin"
+	// SettingKeyAntigravityNativeListToolsEmulation 全局开关：是否启用 antigravity_native
+	// 的 agy_list_tools 透明 MCP 发现工具（默认 false）。
+	// 开启后，sub2api 在每个 native 请求中注入 agy_list_tools 函数声明，让模型可以通过 top-level
+	// functionCall 主动发现 MCP 目录；调用被服务端透明拦截、合成 functionResponse、并以追加 contents
+	// 的方式重新发起 upstream 请求。客户端从不感知 agy_list_tools 调用。
+	SettingKeyAntigravityNativeListToolsEmulation = "antigravity_native_list_tools_emulation"
 
 	// 余额不足提醒
 	SettingKeyBalanceLowNotifyEnabled     = "balance_low_notify_enabled"      // 全局开关

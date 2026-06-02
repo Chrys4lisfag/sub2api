@@ -561,6 +561,7 @@ export interface SystemSettings {
   antigravity_user_agent_version: string;
   openai_codex_user_agent: string;
   openai_allow_claude_code_codex_plugin: boolean;
+  antigravity_native_list_tools_emulation: boolean;
   web_search_emulation_enabled?: boolean;
 
   // Payment configuration
@@ -794,6 +795,7 @@ export interface UpdateSettingsRequest {
   antigravity_user_agent_version?: string;
   openai_codex_user_agent?: string;
   openai_allow_claude_code_codex_plugin?: boolean;
+  antigravity_native_list_tools_emulation?: boolean;
   // Payment configuration
   payment_enabled?: boolean;
   risk_control_enabled?: boolean;

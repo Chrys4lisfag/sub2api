@@ -25,14 +25,21 @@ import (
 // applyToolPreprocessing runs both the schema normalizer and (if enabled
 // for this account) the MCP aggregator. Mutates `inner` in place.
 //
+// `aggregatorName` is the function name model emits to reach the
+// aggregator. Defaults to "call_mcp_tool" (agy parity) when empty.
+//
 // Returns a small report describing what was changed, useful for logging
 // and for the back-translation step in the response stream.
-func applyToolPreprocessing(inner map[string]any, useAggregator bool) toolPrepReport {
+func applyToolPreprocessing(inner map[string]any, useAggregator bool, aggregatorName string) toolPrepReport {
+	if aggregatorName == "" {
+		aggregatorName = defaultMcpAggregatorName
+	}
 	report := toolPrepReport{
-		Normalized:    0,
-		McpTools:      nil,
-		BuiltinTools:  nil,
-		AggregatorOn:  useAggregator,
+		Normalized:     0,
+		McpTools:       nil,
+		BuiltinTools:   nil,
+		AggregatorOn:   useAggregator,
+		AggregatorName: aggregatorName,
 	}
 	if inner == nil {
 		return report
@@ -77,7 +84,7 @@ func applyToolPreprocessing(inner map[string]any, useAggregator bool) toolPrepRe
 			kept = append(kept, fd)
 		}
 		if useAggregator && len(report.McpTools) > 0 {
-			kept = append(kept, buildCallMcpToolDecl())
+			kept = append(kept, buildCallMcpToolDecl(aggregatorName))
 			// NOTE: previously we also appended buildListMcpToolsDecl()
 			// and buildReadMcpToolSchemaDecl() here. The model would
 			// dutifully call them per call_mcp_tool's description, omp's
@@ -91,7 +98,7 @@ func applyToolPreprocessing(inner map[string]any, useAggregator bool) toolPrepRe
 		tool["functionDeclarations"] = kept
 	}
 	if useAggregator && len(report.McpTools) > 0 {
-		injectMcpCatalogIntoSystemInstruction(inner, report.McpTools)
+		injectMcpCatalogIntoSystemInstruction(inner, report.McpTools, aggregatorName)
 	}
 	return report
 }
@@ -101,10 +108,11 @@ func applyToolPreprocessing(inner map[string]any, useAggregator bool) toolPrepRe
 // invocations back to the original mcp__server_tool names that omp
 // expects to see in tool-call deltas.
 type toolPrepReport struct {
-	Normalized   int            // count of functionDeclarations whose schema we converted
-	McpTools     []mcpToolHandle // MCP tools that were hidden behind the aggregator
-	BuiltinTools []string        // non-MCP tools we kept verbatim
-	AggregatorOn bool
+	Normalized     int             // count of functionDeclarations whose schema we converted
+	McpTools       []mcpToolHandle // MCP tools that were hidden behind the aggregator
+	BuiltinTools   []string        // non-MCP tools we kept verbatim
+	AggregatorOn   bool
+	AggregatorName string // function name model uses to invoke aggregator (default "call_mcp_tool")
 }
 
 // mcpToolHandle remembers an MCP tool's original name + declaration so
@@ -297,13 +305,26 @@ func pickFirstNonNullBranch(branches []any) map[string]any {
 //	    "required": ["ServerName","ToolName"]
 //	  }
 //	}
-func buildCallMcpToolDecl() map[string]any {
+// defaultMcpAggregatorName is the on-wire function name real agy uses
+// to reach the MCP aggregator. Per-account credentials may override
+// via `mcp_aggregator_name` (see accountMcpAggregatorName).
+const defaultMcpAggregatorName = "call_mcp_tool"
+
+func buildCallMcpToolDecl(aggregatorName string) map[string]any {
+	if aggregatorName == "" {
+		aggregatorName = defaultMcpAggregatorName
+	}
 	return map[string]any{
-		"name": "call_mcp_tool",
-		"description": "Invoke an MCP tool. The MCP catalog (server names, tool names, " +
-			"argument schemas) is provided in the system instructions; pick a (ServerName, " +
-			"ToolName) pair from there and supply Arguments as a JSON object matching the " +
-			"tool's input schema. toolAction/toolSummary are short labels for the activity " +
+		"name": aggregatorName,
+		"description": "Invoke an MCP (Model Context Protocol) tool. MUST be called " +
+			"as a TOP-LEVEL functionCall — NEVER via `eval`/Python and NEVER as " +
+			"`tool.call_mcp_tool(...)` inside an eval cell (that path is not wired " +
+			"and will hang). This is the ONLY way to reach an MCP server; there " +
+			"are no individual mcp__* tools in the declarations. The MCP catalog " +
+			"(server names, tool names, argument schemas) is in the system " +
+			"instructions; pick a (ServerName, ToolName) pair from there literally " +
+			"and supply Arguments as a JSON object matching the tool's input " +
+			"schema. toolAction/toolSummary are short labels for the activity " +
 			"feed and may be omitted.",
 		"parameters": map[string]any{
 			"type": "OBJECT",
@@ -332,6 +353,166 @@ func buildCallMcpToolDecl() map[string]any {
 			"required": []any{"ServerName", "ToolName"},
 		},
 	}
+}
+
+// ---------------------------------------------------------------------------
+// agy_list_tools — transparent server-side MCP discovery.
+//
+// When list-tools emulation is enabled (global setting), sub2api injects a
+// second function declaration alongside call_mcp_tool. The model can emit
+// agy_list_tools as a top-level functionCall to receive the FULL MCP
+// catalog as a functionResponse. The roundtrip is handled entirely server
+// side: sub2api intercepts the model's call, synthesizes a response, and
+// re-issues the upstream request with the assistant.call + user.response
+// pair appended. The downstream client never sees agy_list_tools at all.
+//
+// Why this is more workaround-resistant than catalog-in-systemInstruction
+// alone: a tool CALL is an action the model performs, not passive text it
+// reads. Performing the discovery commits the model to "MCP mode" — its
+// natural follow-up is call_mcp_tool, not a fallback like client-side
+// Python eval or manual filesystem inspection.
+// ---------------------------------------------------------------------------
+
+// defaultListToolsName is the on-wire function name for the discovery
+// helper. Kept stable for now; could be made configurable later.
+const defaultListToolsName = "agy_list_tools"
+
+// listToolsCallBudget caps the number of agy_list_tools roundtrips per
+// downstream client request. Prevents runaway loops when the model is
+// confused and keeps repeating the discovery call.
+const listToolsCallBudget = 3
+
+// buildAgyListToolsDecl returns the function declaration the model can
+// call to receive the full MCP catalog. Used only when list-tools
+// emulation is enabled (see accountListToolsEmulationEnabled).
+func buildAgyListToolsDecl() map[string]any {
+	return map[string]any{
+		"name": defaultListToolsName,
+		"description": "List available MCP (Model Context Protocol) tools and their " +
+			"argument schemas. Call `agy_list_tools` BEFORE `" + defaultMcpAggregatorName +
+			"` when you need to discover what MCP servers and tools are " +
+			"available, or to inspect the input schema of a specific tool. " +
+			"Returns a JSON object keyed by server name, with each server " +
+			"mapped to its tool list. Pass an optional `server` argument to " +
+			"filter to one server's tools. MUST be invoked as a TOP-LEVEL " +
+			"functionCall — NEVER via `eval`/Python and NEVER as " +
+			"`tool.agy_list_tools(...)` inside an eval cell.",
+		"parameters": map[string]any{
+			"type": "OBJECT",
+			"properties": map[string]any{
+				"server": map[string]any{
+					"type":        "STRING",
+					"description": "Optional: filter the returned catalog to one server's tools (e.g. \"electerm\", \"github-official\"). Omit to receive all servers.",
+				},
+			},
+		},
+	}
+}
+
+// synthesizeListToolsResponse builds the JSON object returned as the
+// `response` field of the functionResponse when the model calls
+// agy_list_tools. Shape:
+//
+//	{
+//	  "servers": {
+//	    "electerm": [
+//	      {
+//	        "name": "list_electerm_bookmarks",
+//	        "description": "...",
+//	        "args_schema": { ... }
+//	      },
+//	      ...
+//	    ],
+//	    "github-official": [ ... ]
+//	  },
+//	  "totalServers": 2,
+//	  "totalTools": 47,
+//	  "filteredBy": "electerm" // omitted when no filter
+//	}
+//
+// `serverFilter` is the optional `server` argument from the model's call.
+// Empty → return all servers. Unknown server name → return empty servers
+// map + helpful note in `unknownServer` field.
+func synthesizeListToolsResponse(mcpTools []mcpToolHandle, serverFilter string) map[string]any {
+	filter := strings.TrimSpace(serverFilter)
+	// Group tools by server (derived from full name "mcp__<server>_<tool>").
+	type toolEntry struct {
+		name        string
+		description string
+		schema      any
+	}
+	byServer := map[string][]toolEntry{}
+	totalTools := 0
+	for _, h := range mcpTools {
+		server, tool := splitMcpFullName(h.FullName)
+		if server == "" || tool == "" {
+			continue
+		}
+		if filter != "" && !serverNameMatches(server, filter) {
+			continue
+		}
+		desc, _ := h.Decl["description"].(string)
+		desc = strings.TrimSpace(desc)
+		var schema any
+		if s, ok := h.Decl["parametersJsonSchema"]; ok {
+			schema = s
+		} else if s, ok := h.Decl["parameters"]; ok {
+			schema = s
+		}
+		byServer[server] = append(byServer[server], toolEntry{
+			name:        tool,
+			description: desc,
+			schema:      schema,
+		})
+		totalTools++
+	}
+	// Serialize to map[string]any with sorted tool order per server (stable
+	// for caching + diffing).
+	servers := map[string]any{}
+	serverNames := make([]string, 0, len(byServer))
+	for s := range byServer {
+		serverNames = append(serverNames, s)
+	}
+	sort.Strings(serverNames)
+	for _, s := range serverNames {
+		entries := byServer[s]
+		sort.Slice(entries, func(i, j int) bool { return entries[i].name < entries[j].name })
+		arr := make([]any, 0, len(entries))
+		for _, e := range entries {
+			row := map[string]any{
+				"name":        e.name,
+				"description": e.description,
+			}
+			if e.schema != nil {
+				row["args_schema"] = e.schema
+			}
+			arr = append(arr, row)
+		}
+		servers[s] = arr
+	}
+	resp := map[string]any{
+		"servers":      servers,
+		"totalServers": len(servers),
+		"totalTools":   totalTools,
+	}
+	if filter != "" {
+		resp["filteredBy"] = filter
+		if len(servers) == 0 {
+			resp["unknownServer"] = filter
+			resp["hint"] = "No server matched. Call agy_list_tools with no `server` arg to see all available servers, or use call_mcp_tool with one of the literal names from the systemInstruction catalog."
+		}
+	}
+	return resp
+}
+
+// serverNameMatches compares server names from the catalog (which are
+// derived from mcp__<server>_ prefix via underscore convention) against
+// the user-friendly form (which may use dashes). Both directions
+// normalized to underscores for comparison.
+func serverNameMatches(serverFromCatalog, userFilter string) bool {
+	a := strings.ReplaceAll(serverFromCatalog, "-", "_")
+	b := strings.ReplaceAll(userFilter, "-", "_")
+	return strings.EqualFold(a, b)
 }
 
 func buildListMcpToolsDecl() map[string]any {
@@ -582,11 +763,14 @@ func (r toolPrepReport) renderMcpToolSchema(server, tool string) []byte {
 //	## END MCP TOOL CATALOG ##
 //
 // Mutates `inner` in place. No-op when there are no MCP tools.
-func injectMcpCatalogIntoSystemInstruction(inner map[string]any, mcpTools []mcpToolHandle) {
+func injectMcpCatalogIntoSystemInstruction(inner map[string]any, mcpTools []mcpToolHandle, aggregatorName string) {
 	if inner == nil || len(mcpTools) == 0 {
 		return
 	}
-	catalog := buildMcpCatalogText(mcpTools)
+	if aggregatorName == "" {
+		aggregatorName = defaultMcpAggregatorName
+	}
+	catalog := buildMcpCatalogText(mcpTools, aggregatorName)
 	if catalog == "" {
 		return
 	}
@@ -644,17 +828,44 @@ const (
 	mcpCatalogBudget = 6 * 1024
 )
 
-func buildMcpCatalogText(mcpTools []mcpToolHandle) string {
+func buildMcpCatalogText(mcpTools []mcpToolHandle, aggregatorName string) string {
 	if len(mcpTools) == 0 {
 		return ""
+	}
+	if aggregatorName == "" {
+		aggregatorName = defaultMcpAggregatorName
 	}
 	var b strings.Builder
 	b.WriteString(mcpCatalogStartMarker)
 	b.WriteByte('\n')
-	b.WriteString("Each entry below lists ONE MCP tool. To invoke a tool, emit a\n")
-	b.WriteString("functionCall to call_mcp_tool with EXACTLY the (ServerName,\n")
-	b.WriteString("ToolName) pair shown here. Do not paraphrase names — the\n")
-	b.WriteString("aggregator matches them literally.\n\n")
+	b.WriteString("HOW TO INVOKE: emit a TOP-LEVEL functionCall to `")
+	b.WriteString(aggregatorName)
+	b.WriteString("`\nwith EXACTLY the (ServerName, ToolName) pair from one of the\n")
+	b.WriteString("entries below. Do NOT paraphrase names — the aggregator matches\n")
+	b.WriteString("them literally. Do NOT invoke MCP tools via `eval`/Python; do NOT\n")
+	b.WriteString("call `tool.")
+	b.WriteString(aggregatorName)
+	b.WriteString("(...)` inside Python code (that path is\n")
+	b.WriteString("not supported and will hang). `")
+	b.WriteString(aggregatorName)
+	b.WriteString("` is the ONLY way to\n")
+	b.WriteString("reach an MCP server — there are no individual mcp__* tools in the\n")
+	b.WriteString("function declarations.\n\n")
+	b.WriteString("EXAMPLE: to list electerm bookmarks, emit\n")
+	b.WriteString("  functionCall{\n")
+	b.WriteString("    name: \"")
+	b.WriteString(aggregatorName)
+	b.WriteString("\",\n")
+	b.WriteString("    args: {\n")
+	b.WriteString("      ServerName: \"electerm\",\n")
+	b.WriteString("      ToolName: \"list_electerm_bookmarks\",\n")
+	b.WriteString("      Arguments: {}\n")
+	b.WriteString("    }\n")
+	b.WriteString("  }\n")
+	b.WriteString("DO this on your VERY FIRST turn when the user asks for an MCP\n")
+	b.WriteString("action — don't waste turns reading config files or probing\n")
+	b.WriteString("filesystem to figure out what's available; the catalog below\n")
+	b.WriteString("is the authoritative list.\n\n")
 	written := b.Len()
 	for _, h := range mcpTools {
 		server, tool := splitMcpFullName(h.FullName)

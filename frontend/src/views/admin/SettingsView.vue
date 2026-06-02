@@ -3961,6 +3961,19 @@
                 </div>
                 <Toggle v-model="form.openai_allow_claude_code_codex_plugin" />
               </div>
+
+              <!-- agy_list_tools transparent MCP discovery (Antigravity Native) -->
+              <div class="flex items-center justify-between">
+                <div class="pr-4">
+                  <label class="block text-sm font-medium text-gray-700 dark:text-gray-300">
+                    Antigravity Native: agy_list_tools (transparent MCP discovery)
+                  </label>
+                  <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">
+                    When enabled, sub2api injects an <code class="rounded bg-gray-100 px-1 dark:bg-dark-700">agy_list_tools</code> function declaration into native antigravity requests. The model can call it (top-level functionCall) to receive the full MCP catalog as a functionResponse; sub2api handles the discovery roundtrip transparently and re-issues the upstream request with the response appended. Clients never observe the discovery turn — only the final <code class="rounded bg-gray-100 px-1 dark:bg-dark-700">call_mcp_tool</code> output. Reinforces top-level tool-call habits and reduces fallback to client-side eval workarounds. Default off. Per-account override via the <code class="rounded bg-gray-100 px-1 dark:bg-dark-700">list_tools_emulation</code> credential.
+                  </p>
+                </div>
+                <Toggle v-model="form.antigravity_native_list_tools_emulation" />
+              </div>
             </div>
           </div>
           <!-- Web Search Emulation -->
@@ -7176,6 +7189,7 @@ const form = reactive<SettingsForm>({
   antigravity_user_agent_version: "",
   openai_codex_user_agent: "",
   openai_allow_claude_code_codex_plugin: false,
+  antigravity_native_list_tools_emulation: false,
   // 余额、订阅到期与账号限额通知
   balance_low_notify_enabled: false,
   balance_low_notify_threshold: 0,
@@ -8282,6 +8296,7 @@ async function saveSettings() {
       openai_codex_user_agent:
         form.openai_codex_user_agent?.trim() || "",
       openai_allow_claude_code_codex_plugin: form.openai_allow_claude_code_codex_plugin,
+      antigravity_native_list_tools_emulation: form.antigravity_native_list_tools_emulation,
       // Payment configuration
       payment_enabled: form.payment_enabled,
       risk_control_enabled: form.risk_control_enabled,

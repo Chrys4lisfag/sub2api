@@ -36,21 +36,24 @@ import (
 //
 // On JSON parse error: returns the original body unchanged + a zero
 // report. We never block a request on preprocessing failure.
-func preprocessNativeBody(body []byte, useAggregator bool) ([]byte, toolPrepReport, error) {
+func preprocessNativeBody(body []byte, useAggregator bool, aggregatorName string) ([]byte, toolPrepReport, error) {
+	if aggregatorName == "" {
+		aggregatorName = defaultMcpAggregatorName
+	}
 	if len(body) == 0 {
-		return body, toolPrepReport{AggregatorOn: useAggregator}, nil
+		return body, toolPrepReport{AggregatorOn: useAggregator, AggregatorName: aggregatorName}, nil
 	}
 	var inner map[string]any
 	if err := json.Unmarshal(body, &inner); err != nil {
 		// Pass-through — don't fail the request, just skip preprocessing.
-		return body, toolPrepReport{AggregatorOn: useAggregator}, nil
+		return body, toolPrepReport{AggregatorOn: useAggregator, AggregatorName: aggregatorName}, nil
 	}
 	// Handle the double-wrap shape consistently with wrapNativeV1Internal:
 	// caller might have already nested as {"request": {...}}.
 	if r, ok := inner["request"].(map[string]any); ok && len(inner) == 1 {
 		inner = r
 	}
-	report := applyToolPreprocessing(inner, useAggregator)
+	report := applyToolPreprocessing(inner, useAggregator, aggregatorName)
 	out, err := json.Marshal(inner)
 	if err != nil {
 		return body, report, nil
@@ -82,6 +85,49 @@ func accountToolAggregatorEnabled(account *Account) bool {
 		}
 	}
 	return true // default ON
+}
+
+// accountMcpAggregatorName returns the on-wire function name to use for
+// the MCP aggregator. Reads `mcp_aggregator_name` from per-account
+// credentials; defaults to "call_mcp_tool" (agy parity) when empty,
+// missing, or invalid.
+//
+// Validation: the name must match Gemini's functionDeclaration name
+// convention — leading letter or underscore, then [A-Za-z0-9_]. Invalid
+// names fall back to the default so a typo in admin UI can't break the
+// gateway.
+func accountMcpAggregatorName(account *Account) string {
+	if account == nil {
+		return defaultMcpAggregatorName
+	}
+	raw, _ := account.Credentials["mcp_aggregator_name"].(string)
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return defaultMcpAggregatorName
+	}
+	if !isValidMcpAggregatorName(raw) {
+		return defaultMcpAggregatorName
+	}
+	return raw
+}
+
+// isValidMcpAggregatorName enforces the Gemini functionDeclaration name
+// rules: 1-64 chars, leading [A-Za-z_], rest [A-Za-z0-9_].
+func isValidMcpAggregatorName(name string) bool {
+	if name == "" || len(name) > 64 {
+		return false
+	}
+	for i, r := range name {
+		switch {
+		case r >= 'a' && r <= 'z':
+		case r >= 'A' && r <= 'Z':
+		case r == '_':
+		case i > 0 && r >= '0' && r <= '9':
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 // rewriteAggregatedFunctionCalls walks a single SSE chunk's `candidates`
@@ -141,7 +187,11 @@ func rewriteAggregatedFunctionCalls(payload []byte, report toolPrepReport) []byt
 				continue
 			}
 			name, _ := fc["name"].(string)
-			if name != "call_mcp_tool" {
+			aggName := report.AggregatorName
+			if aggName == "" {
+				aggName = defaultMcpAggregatorName
+			}
+			if name != aggName {
 				continue
 			}
 			args, _ := fc["args"].(map[string]any)
@@ -192,10 +242,17 @@ func rewriteSSELineFunctionCalls(line []byte, report toolPrepReport) []byte {
 	if len(line) == 0 {
 		return line
 	}
-	// Fast-path: only parse if the keyword appears in the line.
-	if !containsToken(line, []byte("call_mcp_tool")) &&
-		!containsToken(line, []byte("list_mcp_tools")) &&
-		!containsToken(line, []byte("read_mcp_tool_schema")) {
+	// Fast-path: only parse if the configured aggregator name (or the
+	// legacy default) appears in the line.
+	aggName := report.AggregatorName
+	if aggName == "" {
+		aggName = defaultMcpAggregatorName
+	}
+	if !containsToken(line, []byte(aggName)) &&
+		(aggName == defaultMcpAggregatorName ||
+			!containsToken(line, []byte(defaultMcpAggregatorName))) {
+		// Either the model emitted neither the configured nor the legacy
+		// name → no work to do.
 		return line
 	}
 	// Find SSE prefix + payload split.

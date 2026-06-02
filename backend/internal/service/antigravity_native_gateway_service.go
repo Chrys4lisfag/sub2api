@@ -46,9 +46,10 @@ type AntigravityNativeGatewayService struct {
 	// Unleash metrics loop (organic-traffic mimicry) can spin up one mimic
 	// daemon per credential set. Also used by Invalidate callers that need
 	// to load a fresh credential snapshot.
-	accountRepo  AccountRepository
-	proxyRepo    ProxyRepository
-	oauthService *AntigravityNativeOAuthService
+	accountRepo    AccountRepository
+	proxyRepo      ProxyRepository
+	oauthService   *AntigravityNativeOAuthService
+	settingService *SettingService
 
 	// Per-account agymimic Client cache — keyed by account ID. Recreated on
 	// proxy/credential change (handled by callers via Invalidate).
@@ -84,13 +85,15 @@ func NewAntigravityNativeGatewayService(
 	accountRepo AccountRepository,
 	proxyRepo ProxyRepository,
 	oauthService *AntigravityNativeOAuthService,
+	settingService *SettingService,
 ) *AntigravityNativeGatewayService {
 	return &AntigravityNativeGatewayService{
-		accountRepo:  accountRepo,
-		proxyRepo:    proxyRepo,
-		oauthService: oauthService,
-		clientCache:  map[int64]*nativeCacheEntry{},
-		metricsCache: map[int64]*nativeMetricsEntry{},
+		accountRepo:    accountRepo,
+		proxyRepo:      proxyRepo,
+		oauthService:   oauthService,
+		settingService: settingService,
+		clientCache:    map[int64]*nativeCacheEntry{},
+		metricsCache:   map[int64]*nativeMetricsEntry{},
 	}
 }
 
@@ -125,6 +128,37 @@ func (s *AntigravityNativeGatewayService) Stop() {
 		delete(s.metricsCache, id)
 	}
 	s.metricsCacheMu.Unlock()
+}
+
+// isListToolsEmulationEnabled returns true when the agy_list_tools
+// transparent MCP discovery roundtrip is enabled for this request.
+// Resolution order:
+//
+//  1. Per-account credential `list_tools_emulation` (bool or string
+//     "true"/"false"/"on"/"off") — explicit override
+//  2. Global setting SettingKeyAntigravityNativeListToolsEmulation
+//  3. Default off
+//
+// When settingService is nil (tests / partial wire), only per-account
+// explicit credentials apply.
+func (s *AntigravityNativeGatewayService) isListToolsEmulationEnabled(ctx context.Context, account *Account) bool {
+	if account != nil {
+		if v, ok := account.Credentials["list_tools_emulation"].(bool); ok {
+			return v
+		}
+		if str, ok := account.Credentials["list_tools_emulation"].(string); ok {
+			switch strings.ToLower(strings.TrimSpace(str)) {
+			case "true", "on", "1", "yes":
+				return true
+			case "false", "off", "0", "no":
+				return false
+			}
+		}
+	}
+	if s.settingService == nil {
+		return false
+	}
+	return s.settingService.IsAntigravityNativeListToolsEmulationEnabled(ctx)
 }
 
 // ensureMetricsLoop spins up (or returns existing) the Unleash mimic-loop
@@ -270,9 +304,47 @@ func (s *AntigravityNativeGatewayService) ForwardGemini(
 	// `tool_aggregator` credential flag (defaults to true — main fix
 	// for the omp 200+ tools empty-args failure mode).
 	useAggregator := accountToolAggregatorEnabled(account)
-	body, toolReport, err := preprocessNativeBody(body, useAggregator)
+	aggregatorName := accountMcpAggregatorName(account)
+	body, toolReport, err := preprocessNativeBody(body, useAggregator, aggregatorName)
 	if err != nil {
 		return nil, fmt.Errorf("native gemini: tool preprocess: %w", err)
+	}
+
+	// agy_list_tools transparent discovery loop. Runs only when:
+	//   - the global setting (or per-account override) enables it
+	//   - the aggregator is on (otherwise there's no catalog to expose)
+	//   - the tools list contains at least one mcp__* tool
+	//
+	// Each loop iteration POSTs a non-streaming upstream request,
+	// inspects the response for a `functionCall{name: "agy_list_tools"}`,
+	// synthesizes a `functionResponse` with the MCP catalog (filtered by
+	// optional `server` arg), appends the assistant.call + user.response
+	// pair to the body's contents[], and re-issues. Loop terminates when
+	// the model emits real output (text or `call_mcp_tool`) or the
+	// budget is exhausted. The final response is then written to the
+	// client as one SSE event (for streaming clients) or one JSON body
+	// (for non-streaming). Clients never observe the discovery turns.
+	if s.isListToolsEmulationEnabled(ctx, account) && toolReport.AggregatorOn && len(toolReport.McpTools) > 0 {
+		startTime := time.Now()
+		finalResp, iters, loopErr := s.resolveAgyListToolsLoop(ctx, cli, wireModel, body, toolReport)
+		if loopErr == nil {
+			slog.InfoContext(ctx, "native: agy_list_tools loop completed",
+				slog.Int64("account_id", account.ID),
+				slog.Int("iterations", iters))
+			// Run the response through the existing back-translator so
+			// `call_mcp_tool` is rewritten to `mcp__server_tool` before
+			// the client sees it.
+			finalResp = rewriteAggregatedFunctionCalls(finalResp, toolReport)
+			return s.flushBufferedNativeResponse(ctx, c, account.ID, finalResp, startTime, originalModel, wireModel, toolReport, stream)
+		}
+		// On loop error: if it's an upstream-failover error, propagate;
+		// otherwise log + fall through to normal streaming path.
+		if _, isFailover := loopErr.(*UpstreamFailoverError); isFailover {
+			return nil, loopErr
+		}
+		slog.WarnContext(ctx, "native: agy_list_tools loop failed, falling back to normal streaming",
+			slog.Int64("account_id", account.ID),
+			slog.String("err", loopErr.Error()))
 	}
 
 	// Wrap the now-normalized body in the v1internal envelope.
@@ -800,6 +872,79 @@ func (s *AntigravityNativeGatewayService) passNonStreamingGemini(
 		UpstreamModel: wireModel,
 	}
 	if u := extractGeminiUsageFromResponse(raw); u != nil {
+		result.Usage.InputTokens = u.PromptTokens
+		result.Usage.OutputTokens = u.CandidateTokens
+		if u.ModelVersion != "" {
+			result.UpstreamModel = u.ModelVersion
+		}
+	}
+	return s.finalizeResult(result, startTime), nil
+}
+
+// flushBufferedNativeResponse writes a buffered non-streaming Gemini
+// response to the client. Used by the agy_list_tools loop after it has
+// collected the final upstream response (all discovery roundtrips
+// resolved). The body has already been unwrap-envelope'd + back-
+// translated by the caller — we just need to flush it in the format
+// the client requested.
+//
+// Streaming client (stream=true): emit one SSE event containing the
+// full response, then close. Most major SDKs (@google/genai etc.)
+// handle single-event streams correctly.
+//
+// Non-streaming client (stream=false): write the body as a normal JSON
+// response.
+func (s *AntigravityNativeGatewayService) flushBufferedNativeResponse(
+	ctx context.Context,
+	c *gin.Context,
+	accountID int64,
+	body []byte,
+	startTime time.Time,
+	originalModel, wireModel string,
+	toolReport toolPrepReport,
+	stream bool,
+) (*ForwardResult, error) {
+	// Unwrap agymimic's {response: {...}} envelope so client sees canonical Gemini shape.
+	out := unwrapAgyResponseEnvelopeBody(body)
+
+	// Same anomaly check + version-rejection guard as passNonStreamingGemini.
+	if isVersionRejectionPayload(out) {
+		slog.WarnContext(ctx, "native: version-rejection in agy_list_tools final response",
+			slog.Int64("account_id", accountID))
+		fingerprint.ForceRefresh()
+		return nil, &UpstreamFailoverError{
+			StatusCode:             http.StatusBadRequest,
+			ResponseBody:           out,
+			ResponseHeaders:        http.Header{},
+			PassthroughVerbatim:    false,
+			RetryableOnSameAccount: true,
+		}
+	}
+
+	if stream {
+		c.Header("Content-Type", "text/event-stream")
+		c.Header("Cache-Control", "no-cache")
+		c.Header("Connection", "keep-alive")
+		c.Writer.WriteHeader(http.StatusOK)
+		_, _ = c.Writer.Write(agyListToolsSSEEvent(out))
+		if flusher, ok := c.Writer.(http.Flusher); ok {
+			flusher.Flush()
+		}
+	} else {
+		c.Header("Content-Type", "application/json")
+		c.Writer.WriteHeader(http.StatusOK)
+		_, _ = c.Writer.Write(out)
+	}
+
+	if anomaly, details := inspectGeminiResponseForAnomalies(out); anomaly != "" {
+		logNativeRequestAnomaly(ctx, accountID, originalModel, wireModel, stream, out, anomaly, details)
+	}
+
+	result := &ForwardResult{
+		Model:         originalModel,
+		UpstreamModel: wireModel,
+	}
+	if u := extractGeminiUsageFromResponse(body); u != nil {
 		result.Usage.InputTokens = u.PromptTokens
 		result.Usage.OutputTokens = u.CandidateTokens
 		if u.ModelVersion != "" {

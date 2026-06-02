@@ -1280,6 +1280,50 @@
         </div>
       </div>
 
+      <!-- MCP Tool Aggregator (Antigravity Native only) -->
+      <div
+        v-if="account?.platform === 'antigravity_native'"
+        class="border-t border-gray-200 pt-4 dark:border-dark-600"
+      >
+        <div class="flex items-center justify-between">
+          <div>
+            <label class="input-label mb-0">MCP tool aggregator</label>
+            <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">
+              Mimics real agy.exe: replaces all <code class="rounded bg-gray-100 px-1 dark:bg-dark-700">mcp__*</code> tool declarations with a single aggregator function (default <code class="rounded bg-gray-100 px-1 dark:bg-dark-700">call_mcp_tool</code>). The MCP catalog is injected into systemInstruction so the model still knows what's available. Turning this OFF sends every MCP tool individually — only safe with &lt;20 MCP tools.
+            </p>
+          </div>
+          <button
+            type="button"
+            @click="toolAggregatorEnabled = !toolAggregatorEnabled"
+            :class="[
+              'relative inline-flex h-6 w-11 flex-shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none focus:ring-2 focus:ring-primary-500 focus:ring-offset-2',
+              toolAggregatorEnabled ? 'bg-primary-600' : 'bg-gray-200 dark:bg-dark-600'
+            ]"
+          >
+            <span
+              :class="[
+                'pointer-events-none inline-block h-5 w-5 transform rounded-full bg-white shadow ring-0 transition duration-200 ease-in-out',
+                toolAggregatorEnabled ? 'translate-x-5' : 'translate-x-0'
+              ]"
+            />
+          </button>
+        </div>
+        <div v-if="toolAggregatorEnabled" class="mt-3">
+          <label class="input-label">Aggregator function name</label>
+          <input
+            v-model="mcpAggregatorName"
+            type="text"
+            class="input w-full"
+            placeholder="call_mcp_tool"
+            maxlength="64"
+            pattern="[A-Za-z_][A-Za-z0-9_]*"
+          />
+          <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">
+            Override the on-wire function name the model emits. Leave empty for the agy-parity default <code class="rounded bg-gray-100 px-1 dark:bg-dark-700">call_mcp_tool</code>. Must match the identifier pattern: leading letter or underscore, then letters/digits/underscores (max 64 chars). Invalid input silently falls back to the default.
+          </p>
+        </div>
+      </div>
+
       <!-- Custom Unknown 429 Timeout Handling (all account types) -->
       <div class="border-t border-gray-200 pt-4 dark:border-dark-600">
         <div class="mb-3 flex items-center justify-between">
@@ -2577,6 +2621,8 @@ const autoPause5hDisabled = ref(false)
 const autoPause7dDisabled = ref(false)
 const mixedScheduling = ref(false) // For antigravity accounts: enable mixed scheduling
 const allowOverages = ref(false) // For antigravity accounts: enable AI Credits overages
+const toolAggregatorEnabled = ref(true) // antigravity_native: hide mcp__* tools behind call_mcp_tool aggregator (default ON)
+const mcpAggregatorName = ref('') // antigravity_native: override aggregator function name (empty → "call_mcp_tool")
 const antigravityModelRestrictionMode = ref<'whitelist' | 'mapping'>('whitelist')
 const antigravityWhitelistModels = ref<string[]>([])
 const antigravityModelMappings = ref<ModelMapping[]>([])
@@ -3135,6 +3181,25 @@ const syncFormFromAccount = (newAccount: Account | null) => {
     antigravityModelRestrictionMode.value = 'mapping'
     antigravityWhitelistModels.value = []
     antigravityModelMappings.value = []
+  }
+
+  // Load native-only MCP aggregator config (antigravity_native)
+  if (newAccount.platform === 'antigravity_native') {
+    const credentials = newAccount.credentials as Record<string, unknown> | undefined
+    const rawAgg = credentials?.tool_aggregator
+    if (typeof rawAgg === 'boolean') {
+      toolAggregatorEnabled.value = rawAgg
+    } else if (typeof rawAgg === 'string') {
+      const s = rawAgg.trim().toLowerCase()
+      toolAggregatorEnabled.value = !(s === 'false' || s === 'off' || s === '0' || s === 'no')
+    } else {
+      toolAggregatorEnabled.value = true // default ON
+    }
+    const rawName = credentials?.mcp_aggregator_name
+    mcpAggregatorName.value = typeof rawName === 'string' ? rawName : ''
+  } else {
+    toolAggregatorEnabled.value = true
+    mcpAggregatorName.value = ''
   }
 
   // Load quota control settings (Anthropic OAuth/SetupToken only)
@@ -4030,6 +4095,28 @@ const handleSubmit = async () => {
         delete newExtra.allow_overages
       }
       updatePayload.extra = newExtra
+    }
+
+    // For antigravity_native: persist MCP aggregator config in credentials
+    if (props.account.platform === 'antigravity_native') {
+      const currentCredentials = (updatePayload.credentials as Record<string, unknown>) ||
+        ((props.account.credentials as Record<string, unknown>) || {})
+      const newCredentials: Record<string, unknown> = { ...currentCredentials }
+      // tool_aggregator: default is ON, so only persist explicit OFF; this
+      // keeps default behavior implicit and credential JSON minimal.
+      if (toolAggregatorEnabled.value === false) {
+        newCredentials.tool_aggregator = false
+      } else {
+        delete newCredentials.tool_aggregator
+      }
+      // mcp_aggregator_name: empty → default "call_mcp_tool" (don't store).
+      const trimmed = mcpAggregatorName.value.trim()
+      if (trimmed !== '' && trimmed !== 'call_mcp_tool') {
+        newCredentials.mcp_aggregator_name = trimmed
+      } else {
+        delete newCredentials.mcp_aggregator_name
+      }
+      updatePayload.credentials = newCredentials
     }
 
     // For Anthropic OAuth/SetupToken accounts, handle quota control settings in extra
