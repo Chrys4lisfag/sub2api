@@ -449,6 +449,10 @@ const (
 	// functionCall 主动发现 MCP 目录；调用被服务端透明拦截、合成 functionResponse、并以追加 contents
 	// 的方式重新发起 upstream 请求。客户端从不感知 agy_list_tools 调用。
 	SettingKeyAntigravityNativeListToolsEmulation = "antigravity_native_list_tools_emulation"
+	// SettingKeyAntigravityNativeMcpAggregatorName 全局默认：antigravity_native 的 MCP 聚合器函数名。
+	// 空值或缺失 → "call_mcp_tool"（agy 真机抓包默认值）。
+	// 单账号 credentials.mcp_aggregator_name 优先于此全局值。
+	SettingKeyAntigravityNativeMcpAggregatorName = "antigravity_native_mcp_aggregator_name"
 
 	// 余额不足提醒
 	SettingKeyBalanceLowNotifyEnabled     = "balance_low_notify_enabled"      // 全局开关

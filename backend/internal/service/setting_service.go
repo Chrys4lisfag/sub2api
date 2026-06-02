@@ -169,6 +169,18 @@ const antigravityNativeListToolsCacheTTL = 60 * time.Second
 const antigravityNativeListToolsErrorTTL = 5 * time.Second
 const antigravityNativeListToolsDBTimeout = 5 * time.Second
 
+// cachedAntigravityNativeMcpAggregatorName — 60s TTL cache for the
+// global default MCP aggregator function name. Read by accountMcpAggregatorName
+// on every native request when per-account override is empty.
+type cachedAntigravityNativeMcpAggregatorName struct {
+	value     string
+	expiresAt int64
+}
+
+const antigravityNativeMcpAggregatorNameCacheTTL = 60 * time.Second
+const antigravityNativeMcpAggregatorNameErrorTTL = 5 * time.Second
+const antigravityNativeMcpAggregatorNameDBTimeout = 5 * time.Second
+
 const openAIQuotaAutoPauseSettingsCacheTTL = 60 * time.Second
 const openAIQuotaAutoPauseSettingsErrorTTL = 5 * time.Second
 const openAIQuotaAutoPauseSettingsDBTimeout = 5 * time.Second
@@ -210,6 +222,9 @@ type SettingService struct {
 	// instance owns its own cache, no shared package-level state.
 	openAIQuotaAutoPauseSettingsCache atomic.Value // *cachedOpenAIQuotaAutoPauseSettings
 	openAIQuotaAutoPauseSettingsSF    singleflight.Group
+
+	antigravityNativeMcpAggregatorNameCache atomic.Value // *cachedAntigravityNativeMcpAggregatorName
+	antigravityNativeMcpAggregatorNameSF    singleflight.Group
 }
 
 // DefaultPlatformQuotaSetting 单 platform 三档限额（nil = 沿用上层；0 = 显式禁用；>0 = 上限）
@@ -1168,6 +1183,57 @@ func (s *SettingService) SetVersion(version string) {
 	s.version = version
 }
 
+// GetAntigravityNativeMcpAggregatorName — 全局默认 MCP 聚合器函数名。
+// 默认 "call_mcp_tool"（agy 真机抓包默认）。读取 SettingKeyAntigravityNativeMcpAggregatorName，
+// 60s TTL atomic.Value 缓存避免热路径 DB 访问。无效输入（不匹配 [A-Za-z_][A-Za-z0-9_]{0,63}）
+// 也会安静地回落到默认，与 accountMcpAggregatorName 的校验一致。
+func (s *SettingService) GetAntigravityNativeMcpAggregatorName(ctx context.Context) string {
+	const fallback = "call_mcp_tool"
+	if cached, ok := s.antigravityNativeMcpAggregatorNameCache.Load().(*cachedAntigravityNativeMcpAggregatorName); ok && cached != nil {
+		if time.Now().UnixNano() < cached.expiresAt {
+			return cached.value
+		}
+	}
+	result, _, _ := s.antigravityNativeMcpAggregatorNameSF.Do("antigravity_native_mcp_aggregator_name", func() (any, error) {
+		if cached, ok := s.antigravityNativeMcpAggregatorNameCache.Load().(*cachedAntigravityNativeMcpAggregatorName); ok && cached != nil {
+			if time.Now().UnixNano() < cached.expiresAt {
+				return cached.value, nil
+			}
+		}
+		dbCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), antigravityNativeMcpAggregatorNameDBTimeout)
+		defer cancel()
+		value, err := s.settingRepo.GetValue(dbCtx, SettingKeyAntigravityNativeMcpAggregatorName)
+		if err != nil {
+			if errors.Is(err, ErrSettingNotFound) {
+				s.antigravityNativeMcpAggregatorNameCache.Store(&cachedAntigravityNativeMcpAggregatorName{
+					value:     fallback,
+					expiresAt: time.Now().Add(antigravityNativeMcpAggregatorNameCacheTTL).UnixNano(),
+				})
+				return fallback, nil
+			}
+			slog.Warn("failed to get antigravity_native_mcp_aggregator_name setting", "error", err)
+			s.antigravityNativeMcpAggregatorNameCache.Store(&cachedAntigravityNativeMcpAggregatorName{
+				value:     fallback,
+				expiresAt: time.Now().Add(antigravityNativeMcpAggregatorNameErrorTTL).UnixNano(),
+			})
+			return fallback, nil
+		}
+		trimmed := strings.TrimSpace(value)
+		if trimmed == "" || !isValidMcpAggregatorName(trimmed) {
+			trimmed = fallback
+		}
+		s.antigravityNativeMcpAggregatorNameCache.Store(&cachedAntigravityNativeMcpAggregatorName{
+			value:     trimmed,
+			expiresAt: time.Now().Add(antigravityNativeMcpAggregatorNameCacheTTL).UnixNano(),
+		})
+		return trimmed, nil
+	})
+	if val, ok := result.(string); ok && val != "" {
+		return val
+	}
+	return fallback
+}
+
 // PublicSettingsInjectionPayload is the JSON shape embedded into HTML as
 // `window.__APP_CONFIG__` so the frontend can hydrate feature flags & site
 // config before the first XHR finishes.
@@ -1960,6 +2026,7 @@ func (s *SettingService) buildSystemSettingsUpdates(ctx context.Context, setting
 	updates[SettingKeyOpenAICodexUserAgent] = strings.TrimSpace(settings.OpenAICodexUserAgent)
 	updates[SettingKeyOpenAIAllowClaudeCodeCodexPlugin] = strconv.FormatBool(settings.OpenAIAllowClaudeCodeCodexPlugin)
 	updates[SettingKeyAntigravityNativeListToolsEmulation] = strconv.FormatBool(settings.AntigravityNativeListToolsEmulation)
+	updates[SettingKeyAntigravityNativeMcpAggregatorName] = strings.TrimSpace(settings.AntigravityNativeMcpAggregatorName)
 	updates[SettingPaymentVisibleMethodAlipaySource] = settings.PaymentVisibleMethodAlipaySource
 	updates[SettingPaymentVisibleMethodWxpaySource] = settings.PaymentVisibleMethodWxpaySource
 	updates[SettingPaymentVisibleMethodAlipayEnabled] = strconv.FormatBool(settings.PaymentVisibleMethodAlipayEnabled)
@@ -2133,6 +2200,17 @@ func (s *SettingService) refreshCachedSettings(settings *SystemSettings) {
 		value:     settings.AntigravityNativeListToolsEmulation,
 		expiresAt: time.Now().Add(antigravityNativeListToolsCacheTTL).UnixNano(),
 	})
+	s.antigravityNativeMcpAggregatorNameSF.Forget("antigravity_native_mcp_aggregator_name")
+	{
+		v := strings.TrimSpace(settings.AntigravityNativeMcpAggregatorName)
+		if v == "" || !isValidMcpAggregatorName(v) {
+			v = "call_mcp_tool"
+		}
+		s.antigravityNativeMcpAggregatorNameCache.Store(&cachedAntigravityNativeMcpAggregatorName{
+			value:     v,
+			expiresAt: time.Now().Add(antigravityNativeMcpAggregatorNameCacheTTL).UnixNano(),
+		})
+	}
 	if s.onUpdate != nil {
 		s.onUpdate() // Invalidate cache after settings update
 	}
@@ -2879,6 +2957,7 @@ func (s *SettingService) InitializeDefaultSettings(ctx context.Context) error {
 		SettingKeyAntigravityUserAgentVersion:        "",
 		SettingKeyOpenAICodexUserAgent:               "",
 		SettingKeyAntigravityNativeListToolsEmulation: "false",
+		SettingKeyAntigravityNativeMcpAggregatorName: "",
 		SettingPaymentVisibleMethodAlipaySource:      "",
 		SettingPaymentVisibleMethodWxpaySource:       "",
 		SettingPaymentVisibleMethodAlipayEnabled:     "false",
@@ -3401,6 +3480,7 @@ func (s *SettingService) parseSettings(settings map[string]string) *SystemSettin
 	result.OpenAICodexUserAgent = strings.TrimSpace(settings[SettingKeyOpenAICodexUserAgent])
 	result.OpenAIAllowClaudeCodeCodexPlugin = settings[SettingKeyOpenAIAllowClaudeCodeCodexPlugin] == "true"
 	result.AntigravityNativeListToolsEmulation = settings[SettingKeyAntigravityNativeListToolsEmulation] == "true"
+	result.AntigravityNativeMcpAggregatorName = strings.TrimSpace(settings[SettingKeyAntigravityNativeMcpAggregatorName])
 
 	// Web search emulation: quick enabled check from the JSON config
 	if raw := settings[SettingKeyWebSearchEmulationConfig]; raw != "" {

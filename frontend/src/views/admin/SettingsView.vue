@@ -3962,6 +3962,24 @@
                 <Toggle v-model="form.openai_allow_claude_code_codex_plugin" />
               </div>
 
+              <!-- Antigravity Native: global MCP aggregator function name -->
+              <div>
+                <label class="input-label">
+                  Antigravity Native: MCP aggregator function name
+                </label>
+                <input
+                  v-model="form.antigravity_native_mcp_aggregator_name"
+                  type="text"
+                  class="input w-full font-mono text-sm"
+                  placeholder="call_mcp_tool"
+                  maxlength="64"
+                  pattern="[A-Za-z_][A-Za-z0-9_]*"
+                />
+                <p class="mt-1.5 text-xs text-gray-500 dark:text-gray-400">
+                  Global default function name the model emits to invoke the MCP aggregator. Leave empty for the agy-parity default <code class="rounded bg-gray-100 px-1 dark:bg-dark-700">call_mcp_tool</code> (matches what real agy.exe sends on the wire). Must match the identifier pattern: leading letter or underscore, then letters/digits/underscores (max 64 chars). Invalid input silently falls back to the default. Per-account override via the <code class="rounded bg-gray-100 px-1 dark:bg-dark-700">mcp_aggregator_name</code> credential takes precedence.
+                </p>
+              </div>
+
               <!-- agy_list_tools transparent MCP discovery (Antigravity Native) -->
               <div class="flex items-center justify-between">
                 <div class="pr-4">
@@ -7190,6 +7208,7 @@ const form = reactive<SettingsForm>({
   openai_codex_user_agent: "",
   openai_allow_claude_code_codex_plugin: false,
   antigravity_native_list_tools_emulation: false,
+  antigravity_native_mcp_aggregator_name: "",
   // 余额、订阅到期与账号限额通知
   balance_low_notify_enabled: false,
   balance_low_notify_threshold: 0,
@@ -8297,6 +8316,8 @@ async function saveSettings() {
         form.openai_codex_user_agent?.trim() || "",
       openai_allow_claude_code_codex_plugin: form.openai_allow_claude_code_codex_plugin,
       antigravity_native_list_tools_emulation: form.antigravity_native_list_tools_emulation,
+      antigravity_native_mcp_aggregator_name:
+        form.antigravity_native_mcp_aggregator_name?.trim() || "",
       // Payment configuration
       payment_enabled: form.payment_enabled,
       risk_control_enabled: form.risk_control_enabled,

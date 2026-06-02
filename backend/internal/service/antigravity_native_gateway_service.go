@@ -161,6 +161,35 @@ func (s *AntigravityNativeGatewayService) isListToolsEmulationEnabled(ctx contex
 	return s.settingService.IsAntigravityNativeListToolsEmulationEnabled(ctx)
 }
 
+// resolveMcpAggregatorName returns the effective MCP aggregator function
+// name for this request. Resolution order:
+//
+//  1. Per-account credential `mcp_aggregator_name` (if set + valid)
+//  2. Global setting SettingKeyAntigravityNativeMcpAggregatorName
+//     (cached, 60s TTL, validated)
+//  3. Built-in default "call_mcp_tool" (agy parity)
+//
+// Invalid per-account values fall through to global; invalid global
+// values fall through to default. This keeps the gateway robust against
+// typos at either layer.
+func (s *AntigravityNativeGatewayService) resolveMcpAggregatorName(ctx context.Context, account *Account) string {
+	// Per-account override has highest priority.
+	if account != nil {
+		raw, _ := account.Credentials["mcp_aggregator_name"].(string)
+		raw = strings.TrimSpace(raw)
+		if raw != "" && isValidMcpAggregatorName(raw) {
+			return raw
+		}
+	}
+	// Global default via cached setting.
+	if s.settingService != nil {
+		if name := s.settingService.GetAntigravityNativeMcpAggregatorName(ctx); name != "" {
+			return name
+		}
+	}
+	return defaultMcpAggregatorName
+}
+
 // ensureMetricsLoop spins up (or returns existing) the Unleash mimic-loop
 // goroutine for one account. Idempotent: re-entry returns the cached
 // client unless Invalidate cleared it. Failures are non-fatal — V1 keeps
@@ -304,7 +333,7 @@ func (s *AntigravityNativeGatewayService) ForwardGemini(
 	// `tool_aggregator` credential flag (defaults to true — main fix
 	// for the omp 200+ tools empty-args failure mode).
 	useAggregator := accountToolAggregatorEnabled(account)
-	aggregatorName := accountMcpAggregatorName(account)
+	aggregatorName := s.resolveMcpAggregatorName(ctx, account)
 	body, toolReport, err := preprocessNativeBody(body, useAggregator, aggregatorName)
 	if err != nil {
 		return nil, fmt.Errorf("native gemini: tool preprocess: %w", err)
