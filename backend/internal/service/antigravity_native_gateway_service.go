@@ -46,10 +46,11 @@ type AntigravityNativeGatewayService struct {
 	// Unleash metrics loop (organic-traffic mimicry) can spin up one mimic
 	// daemon per credential set. Also used by Invalidate callers that need
 	// to load a fresh credential snapshot.
-	accountRepo    AccountRepository
-	proxyRepo      ProxyRepository
-	oauthService   *AntigravityNativeOAuthService
-	settingService *SettingService
+	accountRepo     AccountRepository
+	proxyRepo       ProxyRepository
+	oauthService    *AntigravityNativeOAuthService
+	settingService  *SettingService
+	chatHistoryLog  *ChatHistoryLogService
 
 	// Per-account agymimic Client cache — keyed by account ID. Recreated on
 	// proxy/credential change (handled by callers via Invalidate).
@@ -86,12 +87,14 @@ func NewAntigravityNativeGatewayService(
 	proxyRepo ProxyRepository,
 	oauthService *AntigravityNativeOAuthService,
 	settingService *SettingService,
+	chatHistoryLog *ChatHistoryLogService,
 ) *AntigravityNativeGatewayService {
 	return &AntigravityNativeGatewayService{
 		accountRepo:    accountRepo,
 		proxyRepo:      proxyRepo,
 		oauthService:   oauthService,
 		settingService: settingService,
+		chatHistoryLog: chatHistoryLog,
 		clientCache:    map[int64]*nativeCacheEntry{},
 		metricsCache:   map[int64]*nativeMetricsEntry{},
 	}
@@ -130,35 +133,26 @@ func (s *AntigravityNativeGatewayService) Stop() {
 	s.metricsCacheMu.Unlock()
 }
 
-// isListToolsEmulationEnabled returns true when the agy_list_tools
-// transparent MCP discovery roundtrip is enabled for this request.
-// Resolution order:
-//
-//  1. Per-account credential `list_tools_emulation` (bool or string
-//     "true"/"false"/"on"/"off") — explicit override
-//  2. Global setting SettingKeyAntigravityNativeListToolsEmulation
-//  3. Default off
-//
-// When settingService is nil (tests / partial wire), only per-account
-// explicit credentials apply.
-func (s *AntigravityNativeGatewayService) isListToolsEmulationEnabled(ctx context.Context, account *Account) bool {
-	if account != nil {
-		if v, ok := account.Credentials["list_tools_emulation"].(bool); ok {
-			return v
-		}
-		if str, ok := account.Credentials["list_tools_emulation"].(string); ok {
-			switch strings.ToLower(strings.TrimSpace(str)) {
-			case "true", "on", "1", "yes":
-				return true
-			case "false", "off", "0", "no":
-				return false
-			}
-		}
-	}
+// resolveMcpDiscoveryMode returns the GLOBAL MCP discovery mode for
+// this request. Per the project decision, discovery mode is global-only
+// (no per-account override). Resolution: cached setting → default "both".
+func (s *AntigravityNativeGatewayService) resolveMcpDiscoveryMode(ctx context.Context) string {
 	if s.settingService == nil {
-		return false
+		return McpDiscoveryModeBoth
 	}
-	return s.settingService.IsAntigravityNativeListToolsEmulationEnabled(ctx)
+	return s.settingService.GetAntigravityNativeMcpDiscoveryMode(ctx)
+}
+
+// modeDeclaresListTool reports whether the given discovery mode causes
+// agy_list_tools to be declared upstream + loop-detected.
+func modeDeclaresListTool(mode string) bool {
+	return mode == McpDiscoveryModeListTool || mode == McpDiscoveryModeBoth
+}
+
+// modeInjectsCatalog reports whether the given discovery mode causes a
+// full MCP catalog to be injected into systemInstruction.
+func modeInjectsCatalog(mode string) bool {
+	return mode == McpDiscoveryModePrompt || mode == McpDiscoveryModeBoth
 }
 
 // resolveMcpAggregatorName returns the effective MCP aggregator function
@@ -328,46 +322,42 @@ func (s *AntigravityNativeGatewayService) ForwardGemini(
 	}
 
 	// Run the tool-list preprocessing pipeline (schema normalize +
-	// optional call_mcp_tool aggregator). Mutates `body` JSON in place
-	// before envelope wrap. Aggregator is enabled per account via the
-	// `tool_aggregator` credential flag (defaults to true — main fix
-	// for the omp 200+ tools empty-args failure mode).
+	// optional call_mcp_tool aggregator + agy_list_tools decl injection
+	// + MCP catalog injection). Behavior is driven by the global
+	// discovery mode setting:
+	//
+	//   "prompt"    — full catalog in systemInstruction, NO agy_list_tools decl
+	//   "list_tool" — minimal hint catalog, agy_list_tools decl present
+	//   "both"      — full catalog + agy_list_tools decl (recommended)
+	//
+	// The agy_list_tools decl is added upfront (NOT inside the loop) so
+	// the model can see it on the very first turn and choose to call it
+	// for discovery — fixing the chicken-and-egg where prior versions
+	// only declared it inside an already-running loop.
 	useAggregator := accountToolAggregatorEnabled(account)
 	aggregatorName := s.resolveMcpAggregatorName(ctx, account)
-	body, toolReport, err := preprocessNativeBody(body, useAggregator, aggregatorName)
+	discoveryMode := s.resolveMcpDiscoveryMode(ctx)
+	body, toolReport, err := preprocessNativeBody(body, useAggregator, aggregatorName, discoveryMode)
 	if err != nil {
 		return nil, fmt.Errorf("native gemini: tool preprocess: %w", err)
 	}
 
-	// agy_list_tools transparent discovery loop. Runs only when:
-	//   - the global setting (or per-account override) enables it
-	//   - the aggregator is on (otherwise there's no catalog to expose)
-	//   - the tools list contains at least one mcp__* tool
-	//
-	// Each loop iteration POSTs a non-streaming upstream request,
-	// inspects the response for a `functionCall{name: "agy_list_tools"}`,
-	// synthesizes a `functionResponse` with the MCP catalog (filtered by
-	// optional `server` arg), appends the assistant.call + user.response
-	// pair to the body's contents[], and re-issues. Loop terminates when
-	// the model emits real output (text or `call_mcp_tool`) or the
-	// budget is exhausted. The final response is then written to the
-	// client as one SSE event (for streaming clients) or one JSON body
-	// (for non-streaming). Clients never observe the discovery turns.
-	if s.isListToolsEmulationEnabled(ctx, account) && toolReport.AggregatorOn && len(toolReport.McpTools) > 0 {
+	// agy_list_tools transparent discovery loop. Runs only when the mode
+	// declares the discovery tool AND the aggregator is on AND there's
+	// at least one mcp__* tool. The decl itself is already present in
+	// the request body from preprocessing; the loop just intercepts the
+	// model's call, synthesizes a functionResponse, and re-issues.
+	if modeDeclaresListTool(discoveryMode) && toolReport.AggregatorOn && len(toolReport.McpTools) > 0 {
 		startTime := time.Now()
 		finalResp, iters, loopErr := s.resolveAgyListToolsLoop(ctx, cli, wireModel, body, toolReport)
 		if loopErr == nil {
 			slog.InfoContext(ctx, "native: agy_list_tools loop completed",
 				slog.Int64("account_id", account.ID),
+				slog.String("mode", discoveryMode),
 				slog.Int("iterations", iters))
-			// Run the response through the existing back-translator so
-			// `call_mcp_tool` is rewritten to `mcp__server_tool` before
-			// the client sees it.
 			finalResp = rewriteAggregatedFunctionCalls(finalResp, toolReport)
-			return s.flushBufferedNativeResponse(ctx, c, account.ID, finalResp, startTime, originalModel, wireModel, toolReport, stream)
+			return s.flushBufferedNativeResponse(ctx, c, account, body, finalResp, startTime, originalModel, wireModel, toolReport, stream, iters)
 		}
-		// On loop error: if it's an upstream-failover error, propagate;
-		// otherwise log + fall through to normal streaming path.
 		if _, isFailover := loopErr.(*UpstreamFailoverError); isFailover {
 			return nil, loopErr
 		}
@@ -926,13 +916,19 @@ func (s *AntigravityNativeGatewayService) passNonStreamingGemini(
 func (s *AntigravityNativeGatewayService) flushBufferedNativeResponse(
 	ctx context.Context,
 	c *gin.Context,
-	accountID int64,
+	account *Account,
+	requestBody []byte,
 	body []byte,
 	startTime time.Time,
 	originalModel, wireModel string,
 	toolReport toolPrepReport,
 	stream bool,
+	agyListToolsIterations int,
 ) (*ForwardResult, error) {
+	accountID := int64(0)
+	if account != nil {
+		accountID = account.ID
+	}
 	// Unwrap agymimic's {response: {...}} envelope so client sees canonical Gemini shape.
 	out := unwrapAgyResponseEnvelopeBody(body)
 
@@ -980,7 +976,61 @@ func (s *AntigravityNativeGatewayService) flushBufferedNativeResponse(
 			result.UpstreamModel = u.ModelVersion
 		}
 	}
+	s.maybeLogChatHistory(ctx, account, requestBody, body, originalModel, wireModel,
+		toolReport.DiscoveryMode, toolReport.AggregatorName, stream, startTime,
+		0, agyListToolsIterations, "")
 	return s.finalizeResult(result, startTime), nil
+}
+
+// maybeLogChatHistory builds + enqueues a ChatHistoryEntry when logging
+// is enabled globally AND for this account. All work is async-safe; on
+// failure we drop the entry rather than block the request.
+func (s *AntigravityNativeGatewayService) maybeLogChatHistory(
+	ctx context.Context,
+	account *Account,
+	requestBody []byte,
+	responseBody []byte,
+	originalModel, wireModel, discoveryMode, aggregatorName string,
+	stream bool,
+	startTime time.Time,
+	firstTokenMs int64,
+	agyListToolsIterations int,
+	errMsg string,
+) {
+	if s.chatHistoryLog == nil || !s.chatHistoryLog.IsEnabled() {
+		return
+	}
+	if !AccountAllowsChatHistory(account) {
+		return
+	}
+	var reqObj, respObj map[string]any
+	if len(requestBody) > 0 {
+		_ = json.Unmarshal(requestBody, &reqObj)
+	}
+	if len(responseBody) > 0 {
+		_ = json.Unmarshal(unwrapAgyResponseEnvelopeBody(responseBody), &respObj)
+	}
+	var accountID int64
+	if account != nil {
+		accountID = account.ID
+	}
+	entry := ChatHistoryEntry{
+		AccountID:              accountID,
+		Platform:               "antigravity_native",
+		Model:                  originalModel,
+		WireModel:              wireModel,
+		Stream:                 stream,
+		DiscoveryMode:          discoveryMode,
+		AggregatorName:         aggregatorName,
+		Request:                reqObj,
+		Response:               respObj,
+		ToolCallsSeen:          extractToolCallNamesFromResponse(respObj),
+		DurationMs:             time.Since(startTime).Milliseconds(),
+		FirstTokenMs:           firstTokenMs,
+		AgyListToolsIterations: agyListToolsIterations,
+		Error:                  errMsg,
+	}
+	s.chatHistoryLog.Log(entry)
 }
 
 func (s *AntigravityNativeGatewayService) finalizeResult(r *ForwardResult, startTime time.Time) *ForwardResult {

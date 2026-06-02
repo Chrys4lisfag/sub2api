@@ -443,16 +443,26 @@ const (
 	// SettingKeyOpenAIAllowClaudeCodeCodexPlugin 全局开关：是否额外放行 Claude Code 的 Codex 插件（默认 false）。
 	// 仅在账号 codex_cli_only 开启时生效；开启后无需逐账号配置 codex_cli_only_allowed_clients。
 	SettingKeyOpenAIAllowClaudeCodeCodexPlugin = "openai_allow_claude_code_codex_plugin"
-	// SettingKeyAntigravityNativeListToolsEmulation 全局开关：是否启用 antigravity_native
-	// 的 agy_list_tools 透明 MCP 发现工具（默认 false）。
-	// 开启后，sub2api 在每个 native 请求中注入 agy_list_tools 函数声明，让模型可以通过 top-level
-	// functionCall 主动发现 MCP 目录；调用被服务端透明拦截、合成 functionResponse、并以追加 contents
-	// 的方式重新发起 upstream 请求。客户端从不感知 agy_list_tools 调用。
+	// SettingKeyAntigravityNativeMcpDiscoveryMode 全局：antigravity_native 的 MCP 发现策略。
+	// 取值：
+	//   "prompt"    — 仅在 systemInstruction 注入完整 MCP 目录；不声明 agy_list_tools
+	//   "list_tool" — 仅声明 agy_list_tools；systemInstruction 只放最小服务器列表
+	//   "both"      — 同时注入目录 + 声明 agy_list_tools 作为兜底发现工具（默认/推荐）
+	// 历史兼容：旧的 antigravity_native_list_tools_emulation=true → "both"，false → "prompt"。
+	SettingKeyAntigravityNativeMcpDiscoveryMode = "antigravity_native_mcp_discovery_mode"
+	// SettingKeyAntigravityNativeListToolsEmulation 已弃用：仅用于向后兼容读取。
+	// 新写入路径只更新 SettingKeyAntigravityNativeMcpDiscoveryMode；旧值会在首次读取时迁移。
 	SettingKeyAntigravityNativeListToolsEmulation = "antigravity_native_list_tools_emulation"
 	// SettingKeyAntigravityNativeMcpAggregatorName 全局默认：antigravity_native 的 MCP 聚合器函数名。
 	// 空值或缺失 → "call_mcp_tool"（agy 真机抓包默认值）。
 	// 单账号 credentials.mcp_aggregator_name 优先于此全局值。
 	SettingKeyAntigravityNativeMcpAggregatorName = "antigravity_native_mcp_aggregator_name"
+	// SettingKeyChatHistoryEnabled 全局开关：是否将每次 upstream 请求/响应记录到磁盘日志，
+	// 用于事后诊断模型行为。默认 true。每账号可通过 credentials.chat_history_enabled=false 退出。
+	SettingKeyChatHistoryEnabled = "chat_history_enabled"
+	// SettingKeyChatHistoryMaxBytes 全局上限：chat-history 目录所有 .jsonl.gz 文件的总字节数。
+	// 超过即删除最旧文件。默认 500 MiB = 524288000。
+	SettingKeyChatHistoryMaxBytes = "chat_history_max_bytes"
 
 	// 余额不足提醒
 	SettingKeyBalanceLowNotifyEnabled     = "balance_low_notify_enabled"      // 全局开关

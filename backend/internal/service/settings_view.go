@@ -196,8 +196,10 @@ type SystemSettings struct {
 	AntigravityUserAgentVersion        string // Antigravity 上游 User-Agent 版本号；空值使用配置/默认值
 	OpenAICodexUserAgent               string // OpenAI Codex 上游完整 User-Agent；空值使用内置默认
 	OpenAIAllowClaudeCodeCodexPlugin   bool   // 全局开关：是否额外放行 Claude Code 的 Codex 插件（默认 false）
-	AntigravityNativeListToolsEmulation bool   // 全局开关：是否启用 agy_list_tools 透明 MCP 发现工具（默认 false）
+	AntigravityNativeMcpDiscoveryMode  string // 全局：MCP 发现策略；"prompt"|"list_tool"|"both"；默认 "both"
 	AntigravityNativeMcpAggregatorName string // 全局默认 MCP 聚合器函数名；空值 → "call_mcp_tool"（agy 真机默认）
+	ChatHistoryEnabled                 bool   // 全局开关：是否记录 chat history（默认 true）
+	ChatHistoryMaxBytes                int64  // chat history 目录总字节上限（默认 524288000 = 500 MiB）
 
 	// Web Search Emulation
 	WebSearchEmulationEnabled bool // 是否启用 web search 模拟

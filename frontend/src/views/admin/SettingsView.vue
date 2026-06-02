@@ -3980,17 +3980,66 @@
                 </p>
               </div>
 
-              <!-- agy_list_tools transparent MCP discovery (Antigravity Native) -->
+              <!-- Antigravity Native: MCP discovery mode (replaces old agy_list_tools toggle) -->
+              <div>
+                <label class="block text-sm font-medium text-gray-700 dark:text-gray-300">
+                  Antigravity Native: MCP discovery mode
+                </label>
+                <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">
+                  Controls how the model learns which MCP servers + tools are available. Default <code class="rounded bg-gray-100 px-1 dark:bg-dark-700">both</code> (recommended).
+                </p>
+                <div class="mt-3 space-y-2">
+                  <label class="flex cursor-pointer items-start gap-3 rounded-lg border border-gray-200 p-3 hover:bg-gray-50 dark:border-dark-600 dark:hover:bg-dark-700">
+                    <input type="radio" v-model="form.antigravity_native_mcp_discovery_mode" value="prompt" class="mt-1" />
+                    <div>
+                      <div class="text-sm font-medium text-gray-900 dark:text-white">Prompt only</div>
+                      <div class="text-xs text-gray-500 dark:text-gray-400">Inject the full MCP catalog (server, tool, schema) into systemInstruction. Do NOT declare the agy_list_tools discovery tool. Best for small MCP sets (&lt;30 tools).</div>
+                    </div>
+                  </label>
+                  <label class="flex cursor-pointer items-start gap-3 rounded-lg border border-gray-200 p-3 hover:bg-gray-50 dark:border-dark-600 dark:hover:bg-dark-700">
+                    <input type="radio" v-model="form.antigravity_native_mcp_discovery_mode" value="list_tool" class="mt-1" />
+                    <div>
+                      <div class="text-sm font-medium text-gray-900 dark:text-white">Discovery tool only</div>
+                      <div class="text-xs text-gray-500 dark:text-gray-400">Declare agy_list_tools as a top-level function. systemInstruction shows only server names + counts. Model calls agy_list_tools(server=X) to fetch full schemas on demand. Best for large MCP sets (200+ tools) where the catalog wouldn't fit.</div>
+                    </div>
+                  </label>
+                  <label class="flex cursor-pointer items-start gap-3 rounded-lg border border-gray-200 p-3 hover:bg-gray-50 dark:border-dark-600 dark:hover:bg-dark-700">
+                    <input type="radio" v-model="form.antigravity_native_mcp_discovery_mode" value="both" class="mt-1" />
+                    <div>
+                      <div class="text-sm font-medium text-gray-900 dark:text-white">Both (recommended)</div>
+                      <div class="text-xs text-gray-500 dark:text-gray-400">Inject the full MCP catalog AND declare agy_list_tools. Catalog is the primary reference; agy_list_tools is the fallback when model needs to verify a tool that may be truncated or paraphrased. Best general-purpose setting.</div>
+                    </div>
+                  </label>
+                </div>
+              </div>
+
+              <!-- Chat history logging (server-side request/response capture) -->
               <div class="flex items-center justify-between">
                 <div class="pr-4">
                   <label class="block text-sm font-medium text-gray-700 dark:text-gray-300">
-                    Antigravity Native: agy_list_tools (transparent MCP discovery)
+                    Chat history logging
                   </label>
                   <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">
-                    When enabled, sub2api injects an <code class="rounded bg-gray-100 px-1 dark:bg-dark-700">agy_list_tools</code> function declaration into native antigravity requests. The model can call it (top-level functionCall) to receive the full MCP catalog as a functionResponse; sub2api handles the discovery roundtrip transparently and re-issues the upstream request with the response appended. Clients never observe the discovery turn — only the final <code class="rounded bg-gray-100 px-1 dark:bg-dark-700">call_mcp_tool</code> output. Reinforces top-level tool-call habits and reduces fallback to client-side eval workarounds. Default off. Per-account override via the <code class="rounded bg-gray-100 px-1 dark:bg-dark-700">list_tools_emulation</code> credential.
+                    Captures upstream Gemini-format request + response per antigravity_native request to JSONL files on disk under <code class="rounded bg-gray-100 px-1 dark:bg-dark-700">/var/lib/sub2api/chat-history</code> (gzipped daily, capped at 500 MiB total — oldest deleted on overflow). Used for post-hoc diagnosis of model behavior. Sensitive headers (Authorization, tokens, secrets) are redacted before write. Per-account opt-out via the <code class="rounded bg-gray-100 px-1 dark:bg-dark-700">chat_history_enabled</code> credential. Default on (recommended).
                   </p>
                 </div>
-                <Toggle v-model="form.antigravity_native_list_tools_emulation" />
+                <Toggle v-model="form.chat_history_enabled" />
+              </div>
+
+              <div>
+                <label class="input-label">Chat history max bytes (total on-disk cap)</label>
+                <input
+                  v-model.number="form.chat_history_max_bytes"
+                  type="number"
+                  class="input w-full"
+                  min="1048576"
+                  max="10737418240"
+                  step="1048576"
+                  placeholder="524288000"
+                />
+                <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">
+                  Default <code class="rounded bg-gray-100 px-1 dark:bg-dark-700">524288000</code> = 500 MiB. When total on-disk size exceeds this, the oldest gzipped daily files are deleted until under the cap. Min 1 MiB, max 10 GiB.
+                </p>
               </div>
             </div>
           </div>
@@ -7207,8 +7256,10 @@ const form = reactive<SettingsForm>({
   antigravity_user_agent_version: "",
   openai_codex_user_agent: "",
   openai_allow_claude_code_codex_plugin: false,
-  antigravity_native_list_tools_emulation: false,
+  antigravity_native_mcp_discovery_mode: "both" as "prompt" | "list_tool" | "both",
   antigravity_native_mcp_aggregator_name: "",
+  chat_history_enabled: true,
+  chat_history_max_bytes: 524288000,
   // 余额、订阅到期与账号限额通知
   balance_low_notify_enabled: false,
   balance_low_notify_threshold: 0,
@@ -8315,9 +8366,11 @@ async function saveSettings() {
       openai_codex_user_agent:
         form.openai_codex_user_agent?.trim() || "",
       openai_allow_claude_code_codex_plugin: form.openai_allow_claude_code_codex_plugin,
-      antigravity_native_list_tools_emulation: form.antigravity_native_list_tools_emulation,
+      antigravity_native_mcp_discovery_mode: form.antigravity_native_mcp_discovery_mode,
       antigravity_native_mcp_aggregator_name:
         form.antigravity_native_mcp_aggregator_name?.trim() || "",
+      chat_history_enabled: form.chat_history_enabled,
+      chat_history_max_bytes: Number(form.chat_history_max_bytes) || 524288000,
       // Payment configuration
       payment_enabled: form.payment_enabled,
       risk_control_enabled: form.risk_control_enabled,

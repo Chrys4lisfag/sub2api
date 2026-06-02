@@ -18,6 +18,7 @@ package service
 
 import (
 	"encoding/json"
+	"fmt"
 	"sort"
 	"strings"
 )
@@ -30,9 +31,12 @@ import (
 //
 // Returns a small report describing what was changed, useful for logging
 // and for the back-translation step in the response stream.
-func applyToolPreprocessing(inner map[string]any, useAggregator bool, aggregatorName string) toolPrepReport {
+func applyToolPreprocessing(inner map[string]any, useAggregator bool, aggregatorName string, discoveryMode string) toolPrepReport {
 	if aggregatorName == "" {
 		aggregatorName = defaultMcpAggregatorName
+	}
+	if discoveryMode == "" {
+		discoveryMode = "both"
 	}
 	report := toolPrepReport{
 		Normalized:     0,
@@ -40,6 +44,7 @@ func applyToolPreprocessing(inner map[string]any, useAggregator bool, aggregator
 		BuiltinTools:   nil,
 		AggregatorOn:   useAggregator,
 		AggregatorName: aggregatorName,
+		DiscoveryMode:  discoveryMode,
 	}
 	if inner == nil {
 		return report
@@ -48,8 +53,11 @@ func applyToolPreprocessing(inner map[string]any, useAggregator bool, aggregator
 	if !ok || len(toolsAny) == 0 {
 		return report
 	}
-	// Each entry is { "functionDeclarations": [ ... ] }. We iterate and
-	// rebuild the slice.
+	// Mode flags (matches gateway helpers; duplicated here to avoid an
+	// import cycle between tool-prep and gateway packages).
+	declaresListTool := discoveryMode == "list_tool" || discoveryMode == "both"
+	injectsCatalog := discoveryMode == "prompt" || discoveryMode == "both"
+
 	for _, t := range toolsAny {
 		tool, ok := t.(map[string]any)
 		if !ok {
@@ -68,16 +76,13 @@ func applyToolPreprocessing(inner map[string]any, useAggregator bool, aggregator
 			}
 			name, _ := fd["name"].(string)
 			if useAggregator && strings.HasPrefix(name, "mcp__") {
-				// Stash the original tool so we can back-translate the
-				// call_mcp_tool invocation in the response stream.
 				report.McpTools = append(report.McpTools, mcpToolHandle{
 					FullName: name,
 					Decl:     fd,
 				})
-				continue // drop from outbound declarations
+				continue
 			}
 			report.BuiltinTools = append(report.BuiltinTools, name)
-			// Schema normalize regardless of aggregator mode.
 			if convertFunctionDeclarationSchema(fd) {
 				report.Normalized++
 			}
@@ -85,20 +90,19 @@ func applyToolPreprocessing(inner map[string]any, useAggregator bool, aggregator
 		}
 		if useAggregator && len(report.McpTools) > 0 {
 			kept = append(kept, buildCallMcpToolDecl(aggregatorName))
-			// NOTE: previously we also appended buildListMcpToolsDecl()
-			// and buildReadMcpToolSchemaDecl() here. The model would
-			// dutifully call them per call_mcp_tool's description, omp's
-			// runtime had no matching tool, and the call failed with
-			// "Tool list_mcp_tools not found". Instead of exposing them
-			// as model-callable functions, we now INJECT the catalog
-			// directly into systemInstruction (see injectMcpCatalogIntoSystemInstruction)
-			// so the model sees every MCP tool's name + schema upfront
-			// without needing a separate discovery round-trip.
+			// Declare agy_list_tools upfront so the model sees it on the
+			// VERY FIRST turn and can choose to call it for discovery.
+			// Prior versions injected this only inside the running loop,
+			// creating a chicken-and-egg where the model never knew the
+			// tool existed and therefore never called it.
+			if declaresListTool {
+				kept = append(kept, buildAgyListToolsDecl())
+			}
 		}
 		tool["functionDeclarations"] = kept
 	}
 	if useAggregator && len(report.McpTools) > 0 {
-		injectMcpCatalogIntoSystemInstruction(inner, report.McpTools, aggregatorName)
+		injectMcpCatalogIntoSystemInstruction(inner, report.McpTools, aggregatorName, discoveryMode, injectsCatalog, declaresListTool)
 	}
 	return report
 }
@@ -113,6 +117,7 @@ type toolPrepReport struct {
 	BuiltinTools   []string        // non-MCP tools we kept verbatim
 	AggregatorOn   bool
 	AggregatorName string // function name model uses to invoke aggregator (default "call_mcp_tool")
+	DiscoveryMode  string // "prompt" | "list_tool" | "both"
 }
 
 // mcpToolHandle remembers an MCP tool's original name + declaration so
@@ -763,33 +768,31 @@ func (r toolPrepReport) renderMcpToolSchema(server, tool string) []byte {
 //	## END MCP TOOL CATALOG ##
 //
 // Mutates `inner` in place. No-op when there are no MCP tools.
-func injectMcpCatalogIntoSystemInstruction(inner map[string]any, mcpTools []mcpToolHandle, aggregatorName string) {
+func injectMcpCatalogIntoSystemInstruction(inner map[string]any, mcpTools []mcpToolHandle, aggregatorName string, discoveryMode string, fullCatalog bool, declaresListTool bool) {
 	if inner == nil || len(mcpTools) == 0 {
 		return
 	}
 	if aggregatorName == "" {
 		aggregatorName = defaultMcpAggregatorName
 	}
-	catalog := buildMcpCatalogText(mcpTools, aggregatorName)
+	if discoveryMode == "" {
+		discoveryMode = "both"
+	}
+	catalog := buildMcpCatalogText(mcpTools, aggregatorName, fullCatalog, declaresListTool)
 	if catalog == "" {
 		return
 	}
 
-	// Get-or-create systemInstruction.parts[0].text
 	sysAny, has := inner["systemInstruction"]
 	if !has {
-		// Build a fresh systemInstruction with our catalog as the sole content.
 		inner["systemInstruction"] = map[string]any{
-			"role": "user",
-			"parts": []any{
-				map[string]any{"text": catalog},
-			},
+			"role":  "user",
+			"parts": []any{map[string]any{"text": catalog}},
 		}
 		return
 	}
 	sys, ok := sysAny.(map[string]any)
 	if !ok {
-		// Caller gave us a non-object — overwrite with our shape.
 		inner["systemInstruction"] = map[string]any{
 			"role":  "user",
 			"parts": []any{map[string]any{"text": catalog}},
@@ -801,9 +804,6 @@ func injectMcpCatalogIntoSystemInstruction(inner map[string]any, mcpTools []mcpT
 		sys["parts"] = []any{map[string]any{"text": catalog}}
 		return
 	}
-	// Prepend catalog to the FIRST text part. Caller's text follows so
-	// the model still sees the original system context (identity, tool
-	// usage rules, etc.) — the catalog is supplementary.
 	first, _ := parts[0].(map[string]any)
 	if first == nil {
 		parts[0] = map[string]any{"text": catalog}
@@ -812,7 +812,6 @@ func injectMcpCatalogIntoSystemInstruction(inner map[string]any, mcpTools []mcpT
 	}
 	existingText, _ := first["text"].(string)
 	if strings.Contains(existingText, mcpCatalogStartMarker) {
-		// Already injected — idempotent.
 		return
 	}
 	first["text"] = catalog + "\n\n" + existingText
@@ -821,95 +820,164 @@ func injectMcpCatalogIntoSystemInstruction(inner map[string]any, mcpTools []mcpT
 }
 
 const (
-	mcpCatalogStartMarker = "## MCP TOOL CATALOG (call via call_mcp_tool) ##"
+	mcpCatalogStartMarker = "## MCP TOOL CATALOG ##"
 	mcpCatalogEndMarker   = "## END MCP TOOL CATALOG ##"
-	// Soft byte limit on the catalog block to keep prompt token usage in
-	// check. ~6 KiB ≈ 1.5k tokens at typical English density.
-	mcpCatalogBudget = 6 * 1024
+	// Bumped from 6 KiB → 20 KiB so the full catalog (~200 mcp tools,
+	// each ~80 bytes name+desc + small schema) fits without truncation
+	// in most deployments. ~5 k tokens at typical English density —
+	// acceptable input overhead in exchange for never hiding a tool the
+	// model is about to need.
+	mcpCatalogBudget = 20 * 1024
 )
 
-func buildMcpCatalogText(mcpTools []mcpToolHandle, aggregatorName string) string {
+// buildMcpCatalogText constructs the MCP-tool catalog block injected
+// into systemInstruction.
+//
+// Modes:
+//   - fullCatalog=true:   includes every tool with description + schema
+//     (subject to budget; on overflow we DROP SCHEMAS first, never
+//     names, so every tool stays visible by name).
+//   - fullCatalog=false:  per-server name lists only — no schemas, no
+//     descriptions. The model is told to call agy_list_tools(server=X)
+//     for full details.
+//
+// Tools are grouped by server (alphabetized) so the model sees a
+// coherent inventory per MCP server rather than tools scattered across
+// the catalog.
+//
+// declaresListTool=true adds the "if you can't find a tool, call
+// agy_list_tools" cue + the anti-fallback rule.
+func buildMcpCatalogText(mcpTools []mcpToolHandle, aggregatorName string, fullCatalog bool, declaresListTool bool) string {
 	if len(mcpTools) == 0 {
 		return ""
 	}
 	if aggregatorName == "" {
 		aggregatorName = defaultMcpAggregatorName
 	}
+
+	// Group by server, alphabetized within.
+	byServer := map[string][]mcpToolHandle{}
+	for _, h := range mcpTools {
+		server, _ := splitMcpFullName(h.FullName)
+		byServer[server] = append(byServer[server], h)
+	}
+	serverNames := make([]string, 0, len(byServer))
+	for s := range byServer {
+		serverNames = append(serverNames, s)
+	}
+	sort.Strings(serverNames)
+
 	var b strings.Builder
 	b.WriteString(mcpCatalogStartMarker)
 	b.WriteByte('\n')
+
+	// Preamble — HOW TO INVOKE + anti-fallback + anti-Python-eval.
 	b.WriteString("HOW TO INVOKE: emit a TOP-LEVEL functionCall to `")
 	b.WriteString(aggregatorName)
-	b.WriteString("`\nwith EXACTLY the (ServerName, ToolName) pair from one of the\n")
-	b.WriteString("entries below. Do NOT paraphrase names — the aggregator matches\n")
-	b.WriteString("them literally. Do NOT invoke MCP tools via `eval`/Python; do NOT\n")
-	b.WriteString("call `tool.")
+	b.WriteString("` with EXACTLY the (ServerName, ToolName) pair listed below.\n")
+	b.WriteString("Do NOT paraphrase names. Do NOT invoke MCP tools via `eval`/Python\n")
+	b.WriteString("and NEVER as `tool.")
 	b.WriteString(aggregatorName)
-	b.WriteString("(...)` inside Python code (that path is\n")
-	b.WriteString("not supported and will hang). `")
-	b.WriteString(aggregatorName)
-	b.WriteString("` is the ONLY way to\n")
-	b.WriteString("reach an MCP server — there are no individual mcp__* tools in the\n")
-	b.WriteString("function declarations.\n\n")
+	b.WriteString("(...)` inside a Python eval cell\n")
+	b.WriteString("(that path is not wired and will hang).\n\n")
+
+	if declaresListTool {
+		b.WriteString("DISCOVERY: a separate top-level tool `agy_list_tools` is declared.\n")
+		b.WriteString("Call `agy_list_tools(server=\"<name>\")` whenever you need to verify\n")
+		b.WriteString("a tool exists or to inspect its argument schema — this catalog may\n")
+		b.WriteString("be truncated or summarized. The agy_list_tools response is\n")
+		b.WriteString("authoritative.\n\n")
+	}
+
+	b.WriteString("ANTI-FALLBACK RULE: when a server is listed below, NEVER fall back\n")
+	b.WriteString("to client-side `eval`/Python/paramiko/bash/subprocess to talk to\n")
+	b.WriteString("that service. If you have already opened or used a server (e.g.\n")
+	b.WriteString("opened an electerm bookmark), assume it has additional tools\n")
+	b.WriteString("(command execution, terminal output, file ops) — ")
+	if declaresListTool {
+		b.WriteString("call `agy_list_tools(server=\"<name>\")` to enumerate them.\n\n")
+	} else {
+		b.WriteString("scan this catalog\nthoroughly before assuming the capability is missing.\n\n")
+	}
+
 	b.WriteString("EXAMPLE: to list electerm bookmarks, emit\n")
-	b.WriteString("  functionCall{\n")
-	b.WriteString("    name: \"")
+	b.WriteString("  functionCall{ name: \"")
 	b.WriteString(aggregatorName)
-	b.WriteString("\",\n")
-	b.WriteString("    args: {\n")
-	b.WriteString("      ServerName: \"electerm\",\n")
-	b.WriteString("      ToolName: \"list_electerm_bookmarks\",\n")
-	b.WriteString("      Arguments: {}\n")
-	b.WriteString("    }\n")
-	b.WriteString("  }\n")
-	b.WriteString("DO this on your VERY FIRST turn when the user asks for an MCP\n")
-	b.WriteString("action — don't waste turns reading config files or probing\n")
-	b.WriteString("filesystem to figure out what's available; the catalog below\n")
-	b.WriteString("is the authoritative list.\n\n")
+	b.WriteString("\", args: { ServerName: \"electerm\",\n")
+	b.WriteString("    ToolName: \"list_electerm_bookmarks\", Arguments: {} } }\n\n")
+
+	if !fullCatalog {
+		// Minimal mode: just server names + counts, no per-tool details.
+		b.WriteString("AVAILABLE SERVERS (call agy_list_tools(server=X) for full tool list + schemas):\n")
+		for _, s := range serverNames {
+			fmt.Fprintf(&b, "  - %s (%d tools)\n", s, len(byServer[s]))
+		}
+		b.WriteString("\n")
+		b.WriteString(mcpCatalogEndMarker)
+		return b.String()
+	}
+
+	// Full mode: grouped per-server, schemas included until budget.
 	written := b.Len()
-	for _, h := range mcpTools {
-		server, tool := splitMcpFullName(h.FullName)
-		desc, _ := h.Decl["description"].(string)
-		desc = strings.TrimSpace(desc)
-		if len(desc) > 240 {
-			desc = desc[:237] + "..."
-		}
-		// Schema: prefer parametersJsonSchema (original omp shape, more
-		// expressive than the trimmed Gemini Schema we emit on the wire).
-		schema := h.Decl["parametersJsonSchema"]
-		if schema == nil {
-			schema = h.Decl["parameters"]
-		}
-		schemaBytes, _ := json.Marshal(schema)
-		// Compact one-line header that shows BOTH the wire-style name
-		// (mcp__server_tool, which the model will see in conversation
-		// history after the first turn) AND the explicit (ServerName,
-		// ToolName) pair the model must use with call_mcp_tool. The
-		// duplication is intentional — emphasizes the exact tool name
-		// to reduce paraphrase hallucinations (observed e.g.
-		// list_electerm_bookmarks → get_electerm_bookmarks).
-		entry := "- " + h.FullName + "\n"
-		entry += "  call as: call_mcp_tool(ServerName=\"" + server + "\", ToolName=\"" + tool + "\", Arguments={...})\n"
-		if desc != "" {
-			entry += "  description: " + desc + "\n"
-		}
-		if len(schemaBytes) > 0 && string(schemaBytes) != "null" {
-			s := string(schemaBytes)
-			if len(s) > 800 {
-				s = s[:797] + "..."
-			}
-			entry += "  args_schema: " + s + "\n"
-		}
-		// Stop adding entries once we've blown the budget. Real agy
-		// presents abbreviated entries when over budget — we just
-		// truncate so the model gets a fair sample of available tools.
-		if written+len(entry)+len(mcpCatalogEndMarker)+8 > mcpCatalogBudget {
-			b.WriteString("(...catalog truncated for token budget — only the above tools are guaranteed valid; call_mcp_tool with any plausible pair may also succeed if the upstream recognizes it)\n")
+	includeSchemas := true
+
+	for _, server := range serverNames {
+		// Per-server header.
+		header := "# " + server + "\n"
+		if written+len(header)+len(mcpCatalogEndMarker)+8 > mcpCatalogBudget {
+			b.WriteString("(...remaining servers omitted for token budget — call agy_list_tools to enumerate)\n")
 			break
 		}
-		b.WriteString(entry)
-		written += len(entry)
+		b.WriteString(header)
+		written += len(header)
+
+		tools := byServer[server]
+		sort.Slice(tools, func(i, j int) bool { return tools[i].FullName < tools[j].FullName })
+		for _, h := range tools {
+			_, tool := splitMcpFullName(h.FullName)
+			desc, _ := h.Decl["description"].(string)
+			desc = strings.TrimSpace(desc)
+			if len(desc) > 200 {
+				desc = desc[:197] + "..."
+			}
+			entry := "- " + h.FullName + "\n"
+			entry += "  call: " + aggregatorName + "(ServerName=\"" + server + "\", ToolName=\"" + tool + "\", Arguments={...})\n"
+			if desc != "" {
+				entry += "  description: " + desc + "\n"
+			}
+			// Schema (skip if we already exceeded the schema budget).
+			if includeSchemas {
+				schema := h.Decl["parametersJsonSchema"]
+				if schema == nil {
+					schema = h.Decl["parameters"]
+				}
+				schemaBytes, _ := json.Marshal(schema)
+				if len(schemaBytes) > 0 && string(schemaBytes) != "null" {
+					sstr := string(schemaBytes)
+					if len(sstr) > 600 {
+						sstr = sstr[:597] + "..."
+					}
+					entry += "  args_schema: " + sstr + "\n"
+				}
+			}
+			// If adding schema-bearing entry overflows, drop schemas for
+			// the rest (keep names visible — critical for discovery).
+			if includeSchemas && written+len(entry)+len(mcpCatalogEndMarker)+8 > mcpCatalogBudget {
+				includeSchemas = false
+				b.WriteString("(...schemas omitted for remaining entries — call agy_list_tools(server=X) for schema details)\n")
+				entry = "- " + h.FullName + "\n"
+				entry += "  call: " + aggregatorName + "(ServerName=\"" + server + "\", ToolName=\"" + tool + "\", Arguments={...})\n"
+			}
+			// If even names-only overflows, stop entirely.
+			if written+len(entry)+len(mcpCatalogEndMarker)+8 > mcpCatalogBudget {
+				b.WriteString("(...remaining tools omitted — call agy_list_tools to enumerate)\n")
+				goto done
+			}
+			b.WriteString(entry)
+			written += len(entry)
+		}
 	}
+done:
 	b.WriteString(mcpCatalogEndMarker)
 	return b.String()
 }

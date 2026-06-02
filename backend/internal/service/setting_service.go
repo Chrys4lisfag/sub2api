@@ -157,17 +157,36 @@ const openAIAllowCodexPluginCacheTTL = 60 * time.Second
 const openAIAllowCodexPluginErrorTTL = 5 * time.Second
 const openAIAllowCodexPluginDBTimeout = 5 * time.Second
 
-// cachedAntigravityNativeListTools — 60s TTL cache for the
-// agy_list_tools emulation toggle. Read on every antigravity_native
-// gateway request, so caching avoids per-request DB hits.
-type cachedAntigravityNativeListTools struct {
+// cachedAntigravityNativeMcpDiscoveryMode — 60s TTL cache for the
+// global MCP discovery mode enum. Read on every native gateway request.
+type cachedAntigravityNativeMcpDiscoveryMode struct {
+	value     string // "prompt" | "list_tool" | "both"
+	expiresAt int64
+}
+
+const antigravityNativeMcpDiscoveryModeCacheTTL = 60 * time.Second
+const antigravityNativeMcpDiscoveryModeErrorTTL = 5 * time.Second
+const antigravityNativeMcpDiscoveryModeDBTimeout = 5 * time.Second
+
+// cachedChatHistoryEnabled — 60s TTL cache for the chat-history global
+// enabled toggle. Hot-path check before building log entries.
+type cachedChatHistoryEnabled struct {
 	value     bool
 	expiresAt int64
 }
 
-const antigravityNativeListToolsCacheTTL = 60 * time.Second
-const antigravityNativeListToolsErrorTTL = 5 * time.Second
-const antigravityNativeListToolsDBTimeout = 5 * time.Second
+// cachedChatHistoryMaxBytes — 60s TTL cache for the size cap.
+type cachedChatHistoryMaxBytes struct {
+	value     int64
+	expiresAt int64
+}
+
+const chatHistoryCacheTTL = 60 * time.Second
+const chatHistoryErrorTTL = 5 * time.Second
+const chatHistoryDBTimeout = 5 * time.Second
+
+// chatHistoryDefaultMaxBytes is the default cap: 500 MiB total on-disk.
+const chatHistoryDefaultMaxBytes int64 = 524288000
 
 // cachedAntigravityNativeMcpAggregatorName — 60s TTL cache for the
 // global default MCP aggregator function name. Read by accountMcpAggregatorName
@@ -210,8 +229,12 @@ type SettingService struct {
 	openAICodexUACache          atomic.Value // *cachedOpenAICodexUserAgent
 	openAICodexUASF             singleflight.Group
 	openAIAllowCodexPluginCache atomic.Value // *cachedOpenAIAllowCodexPlugin
-	antigravityNativeListToolsCache atomic.Value // *cachedAntigravityNativeListTools
-	antigravityNativeListToolsSF    singleflight.Group
+	antigravityNativeMcpDiscoveryModeCache atomic.Value // *cachedAntigravityNativeMcpDiscoveryMode
+	antigravityNativeMcpDiscoveryModeSF    singleflight.Group
+	chatHistoryEnabledCache  atomic.Value // *cachedChatHistoryEnabled
+	chatHistoryEnabledSF     singleflight.Group
+	chatHistoryMaxBytesCache atomic.Value // *cachedChatHistoryMaxBytes
+	chatHistoryMaxBytesSF    singleflight.Group
 	openAIAllowCodexPluginSF    singleflight.Group
 
 	// openAIQuotaAutoPauseSettingsCache holds the most recently observed quota auto-pause
@@ -1125,51 +1148,181 @@ func (s *SettingService) IsOpenAIAllowClaudeCodeCodexPluginEnabled(ctx context.C
 	return false
 }
 
-// IsAntigravityNativeListToolsEmulationEnabled — 全局开关：是否启用
-// agy_list_tools 透明 MCP 发现工具。默认关闭。
-// 读取自 SettingKeyAntigravityNativeListToolsEmulation；每次 antigravity_native
-// 网关请求都会调用，所以使用 60s TTL atomic.Value 缓存避免 DB 热路径。
-func (s *SettingService) IsAntigravityNativeListToolsEmulationEnabled(ctx context.Context) bool {
-	if cached, ok := s.antigravityNativeListToolsCache.Load().(*cachedAntigravityNativeListTools); ok && cached != nil {
+// Mcp discovery mode constants.
+const (
+	McpDiscoveryModePrompt   = "prompt"
+	McpDiscoveryModeListTool = "list_tool"
+	McpDiscoveryModeBoth     = "both"
+)
+
+// GetAntigravityNativeMcpDiscoveryMode returns the effective discovery
+// mode. Resolution:
+//
+//  1. Read SettingKeyAntigravityNativeMcpDiscoveryMode. If present and
+//     a valid enum, return as-is.
+//  2. Otherwise read legacy SettingKeyAntigravityNativeListToolsEmulation.
+//     true → "both", false → "prompt". This is the one-time migration shim;
+//     callers do not need to know about it.
+//  3. If neither set, default to "both" (recommended setting).
+//
+// Cached with 60s TTL via atomic.Value + singleflight.
+func (s *SettingService) GetAntigravityNativeMcpDiscoveryMode(ctx context.Context) string {
+	const defaultMode = McpDiscoveryModeBoth
+	if cached, ok := s.antigravityNativeMcpDiscoveryModeCache.Load().(*cachedAntigravityNativeMcpDiscoveryMode); ok && cached != nil {
 		if time.Now().UnixNano() < cached.expiresAt {
 			return cached.value
 		}
 	}
-	result, _, _ := s.antigravityNativeListToolsSF.Do("antigravity_native_list_tools_emulation", func() (any, error) {
-		if cached, ok := s.antigravityNativeListToolsCache.Load().(*cachedAntigravityNativeListTools); ok && cached != nil {
+	result, _, _ := s.antigravityNativeMcpDiscoveryModeSF.Do("antigravity_native_mcp_discovery_mode", func() (any, error) {
+		if cached, ok := s.antigravityNativeMcpDiscoveryModeCache.Load().(*cachedAntigravityNativeMcpDiscoveryMode); ok && cached != nil {
 			if time.Now().UnixNano() < cached.expiresAt {
 				return cached.value, nil
 			}
 		}
-		dbCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), antigravityNativeListToolsDBTimeout)
+		dbCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), antigravityNativeMcpDiscoveryModeDBTimeout)
 		defer cancel()
-		value, err := s.settingRepo.GetValue(dbCtx, SettingKeyAntigravityNativeListToolsEmulation)
+		value, err := s.settingRepo.GetValue(dbCtx, SettingKeyAntigravityNativeMcpDiscoveryMode)
+		mode := normalizeMcpDiscoveryMode(value)
+		if err == nil && mode != "" {
+			s.antigravityNativeMcpDiscoveryModeCache.Store(&cachedAntigravityNativeMcpDiscoveryMode{
+				value:     mode,
+				expiresAt: time.Now().Add(antigravityNativeMcpDiscoveryModeCacheTTL).UnixNano(),
+			})
+			return mode, nil
+		}
+		// New key empty/missing/invalid → consult legacy bool key.
+		if err != nil && !errors.Is(err, ErrSettingNotFound) {
+			slog.Warn("failed to get antigravity_native_mcp_discovery_mode setting", "error", err)
+		}
+		legacyVal, legacyErr := s.settingRepo.GetValue(dbCtx, SettingKeyAntigravityNativeListToolsEmulation)
+		legacyMode := defaultMode
+		if legacyErr == nil {
+			if legacyVal == "true" {
+				legacyMode = McpDiscoveryModeBoth
+			} else if legacyVal == "false" {
+				legacyMode = McpDiscoveryModePrompt
+			}
+		}
+		s.antigravityNativeMcpDiscoveryModeCache.Store(&cachedAntigravityNativeMcpDiscoveryMode{
+			value:     legacyMode,
+			expiresAt: time.Now().Add(antigravityNativeMcpDiscoveryModeCacheTTL).UnixNano(),
+		})
+		return legacyMode, nil
+	})
+	if val, ok := result.(string); ok && val != "" {
+		return val
+	}
+	return defaultMode
+}
+
+// normalizeMcpDiscoveryMode validates + canonicalizes the enum value.
+// Returns "" when input is not a recognized mode (caller falls back).
+func normalizeMcpDiscoveryMode(v string) string {
+	switch strings.ToLower(strings.TrimSpace(v)) {
+	case McpDiscoveryModePrompt, "prompt_only", "prompt-only":
+		return McpDiscoveryModePrompt
+	case McpDiscoveryModeListTool, "list_tool_only", "list-tool", "list-tool-only":
+		return McpDiscoveryModeListTool
+	case McpDiscoveryModeBoth, "all", "full":
+		return McpDiscoveryModeBoth
+	}
+	return ""
+}
+
+// IsChatHistoryEnabled returns the global chat-history toggle.
+// Default true (recommended on for diagnostic value). Cached with 60s
+// TTL. Per-account opt-out via AccountAllowsChatHistory.
+func (s *SettingService) IsChatHistoryEnabled(ctx context.Context) bool {
+	if cached, ok := s.chatHistoryEnabledCache.Load().(*cachedChatHistoryEnabled); ok && cached != nil {
+		if time.Now().UnixNano() < cached.expiresAt {
+			return cached.value
+		}
+	}
+	result, _, _ := s.chatHistoryEnabledSF.Do("chat_history_enabled", func() (any, error) {
+		if cached, ok := s.chatHistoryEnabledCache.Load().(*cachedChatHistoryEnabled); ok && cached != nil {
+			if time.Now().UnixNano() < cached.expiresAt {
+				return cached.value, nil
+			}
+		}
+		dbCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), chatHistoryDBTimeout)
+		defer cancel()
+		value, err := s.settingRepo.GetValue(dbCtx, SettingKeyChatHistoryEnabled)
 		if err != nil {
 			if errors.Is(err, ErrSettingNotFound) {
-				s.antigravityNativeListToolsCache.Store(&cachedAntigravityNativeListTools{
-					value:     false,
-					expiresAt: time.Now().Add(antigravityNativeListToolsCacheTTL).UnixNano(),
+				s.chatHistoryEnabledCache.Store(&cachedChatHistoryEnabled{
+					value:     true, // default ON
+					expiresAt: time.Now().Add(chatHistoryCacheTTL).UnixNano(),
 				})
-				return false, nil
+				return true, nil
 			}
-			slog.Warn("failed to get antigravity_native_list_tools_emulation setting", "error", err)
-			s.antigravityNativeListToolsCache.Store(&cachedAntigravityNativeListTools{
-				value:     false,
-				expiresAt: time.Now().Add(antigravityNativeListToolsErrorTTL).UnixNano(),
+			slog.Warn("failed to get chat_history_enabled setting", "error", err)
+			s.chatHistoryEnabledCache.Store(&cachedChatHistoryEnabled{
+				value:     true,
+				expiresAt: time.Now().Add(chatHistoryErrorTTL).UnixNano(),
 			})
-			return false, nil
+			return true, nil
 		}
-		enabled := value == "true"
-		s.antigravityNativeListToolsCache.Store(&cachedAntigravityNativeListTools{
+		// Empty stored value → default ON.
+		v := strings.TrimSpace(value)
+		enabled := v == "" || v == "true"
+		s.chatHistoryEnabledCache.Store(&cachedChatHistoryEnabled{
 			value:     enabled,
-			expiresAt: time.Now().Add(antigravityNativeListToolsCacheTTL).UnixNano(),
+			expiresAt: time.Now().Add(chatHistoryCacheTTL).UnixNano(),
 		})
 		return enabled, nil
 	})
 	if val, ok := result.(bool); ok {
 		return val
 	}
-	return false
+	return true
+}
+
+// GetChatHistoryMaxBytes returns the global cap. Default
+// chatHistoryDefaultMaxBytes (500 MiB). Cached with 60s TTL.
+func (s *SettingService) GetChatHistoryMaxBytes(ctx context.Context) int64 {
+	if cached, ok := s.chatHistoryMaxBytesCache.Load().(*cachedChatHistoryMaxBytes); ok && cached != nil {
+		if time.Now().UnixNano() < cached.expiresAt {
+			return cached.value
+		}
+	}
+	result, _, _ := s.chatHistoryMaxBytesSF.Do("chat_history_max_bytes", func() (any, error) {
+		if cached, ok := s.chatHistoryMaxBytesCache.Load().(*cachedChatHistoryMaxBytes); ok && cached != nil {
+			if time.Now().UnixNano() < cached.expiresAt {
+				return cached.value, nil
+			}
+		}
+		dbCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), chatHistoryDBTimeout)
+		defer cancel()
+		value, err := s.settingRepo.GetValue(dbCtx, SettingKeyChatHistoryMaxBytes)
+		if err != nil {
+			if errors.Is(err, ErrSettingNotFound) {
+				s.chatHistoryMaxBytesCache.Store(&cachedChatHistoryMaxBytes{
+					value:     chatHistoryDefaultMaxBytes,
+					expiresAt: time.Now().Add(chatHistoryCacheTTL).UnixNano(),
+				})
+				return chatHistoryDefaultMaxBytes, nil
+			}
+			slog.Warn("failed to get chat_history_max_bytes setting", "error", err)
+			s.chatHistoryMaxBytesCache.Store(&cachedChatHistoryMaxBytes{
+				value:     chatHistoryDefaultMaxBytes,
+				expiresAt: time.Now().Add(chatHistoryErrorTTL).UnixNano(),
+			})
+			return chatHistoryDefaultMaxBytes, nil
+		}
+		parsed, perr := strconv.ParseInt(strings.TrimSpace(value), 10, 64)
+		if perr != nil || parsed <= 0 {
+			parsed = chatHistoryDefaultMaxBytes
+		}
+		s.chatHistoryMaxBytesCache.Store(&cachedChatHistoryMaxBytes{
+			value:     parsed,
+			expiresAt: time.Now().Add(chatHistoryCacheTTL).UnixNano(),
+		})
+		return parsed, nil
+	})
+	if val, ok := result.(int64); ok && val > 0 {
+		return val
+	}
+	return chatHistoryDefaultMaxBytes
 }
 
 // SetOnUpdateCallback sets a callback function to be called when settings are updated
@@ -2025,7 +2178,23 @@ func (s *SettingService) buildSystemSettingsUpdates(ctx context.Context, setting
 	updates[SettingKeyAntigravityUserAgentVersion] = antigravity.NormalizeUserAgentVersion(settings.AntigravityUserAgentVersion)
 	updates[SettingKeyOpenAICodexUserAgent] = strings.TrimSpace(settings.OpenAICodexUserAgent)
 	updates[SettingKeyOpenAIAllowClaudeCodeCodexPlugin] = strconv.FormatBool(settings.OpenAIAllowClaudeCodeCodexPlugin)
-	updates[SettingKeyAntigravityNativeListToolsEmulation] = strconv.FormatBool(settings.AntigravityNativeListToolsEmulation)
+	{
+		// Write the canonical discovery-mode enum; normalize to default
+		// when caller supplied an unrecognized string.
+		mode := normalizeMcpDiscoveryMode(settings.AntigravityNativeMcpDiscoveryMode)
+		if mode == "" {
+			mode = McpDiscoveryModeBoth
+		}
+		updates[SettingKeyAntigravityNativeMcpDiscoveryMode] = mode
+	}
+	updates[SettingKeyChatHistoryEnabled] = strconv.FormatBool(settings.ChatHistoryEnabled)
+	{
+		mb := settings.ChatHistoryMaxBytes
+		if mb <= 0 {
+			mb = chatHistoryDefaultMaxBytes
+		}
+		updates[SettingKeyChatHistoryMaxBytes] = strconv.FormatInt(mb, 10)
+	}
 	updates[SettingKeyAntigravityNativeMcpAggregatorName] = strings.TrimSpace(settings.AntigravityNativeMcpAggregatorName)
 	updates[SettingPaymentVisibleMethodAlipaySource] = settings.PaymentVisibleMethodAlipaySource
 	updates[SettingPaymentVisibleMethodWxpaySource] = settings.PaymentVisibleMethodWxpaySource
@@ -2195,11 +2364,33 @@ func (s *SettingService) refreshCachedSettings(settings *SystemSettings) {
 		value:     settings.OpenAIAllowClaudeCodeCodexPlugin,
 		expiresAt: time.Now().Add(openAIAllowCodexPluginCacheTTL).UnixNano(),
 	})
-	s.antigravityNativeListToolsSF.Forget("antigravity_native_list_tools_emulation")
-	s.antigravityNativeListToolsCache.Store(&cachedAntigravityNativeListTools{
-		value:     settings.AntigravityNativeListToolsEmulation,
-		expiresAt: time.Now().Add(antigravityNativeListToolsCacheTTL).UnixNano(),
+	s.antigravityNativeMcpDiscoveryModeSF.Forget("antigravity_native_mcp_discovery_mode")
+	{
+		mode := normalizeMcpDiscoveryMode(settings.AntigravityNativeMcpDiscoveryMode)
+		if mode == "" {
+			mode = McpDiscoveryModeBoth
+		}
+		s.antigravityNativeMcpDiscoveryModeCache.Store(&cachedAntigravityNativeMcpDiscoveryMode{
+			value:     mode,
+			expiresAt: time.Now().Add(antigravityNativeMcpDiscoveryModeCacheTTL).UnixNano(),
+		})
+	}
+	s.chatHistoryEnabledSF.Forget("chat_history_enabled")
+	s.chatHistoryEnabledCache.Store(&cachedChatHistoryEnabled{
+		value:     settings.ChatHistoryEnabled,
+		expiresAt: time.Now().Add(chatHistoryCacheTTL).UnixNano(),
 	})
+	s.chatHistoryMaxBytesSF.Forget("chat_history_max_bytes")
+	{
+		mb := settings.ChatHistoryMaxBytes
+		if mb <= 0 {
+			mb = chatHistoryDefaultMaxBytes
+		}
+		s.chatHistoryMaxBytesCache.Store(&cachedChatHistoryMaxBytes{
+			value:     mb,
+			expiresAt: time.Now().Add(chatHistoryCacheTTL).UnixNano(),
+		})
+	}
 	s.antigravityNativeMcpAggregatorNameSF.Forget("antigravity_native_mcp_aggregator_name")
 	{
 		v := strings.TrimSpace(settings.AntigravityNativeMcpAggregatorName)
@@ -2956,7 +3147,9 @@ func (s *SettingService) InitializeDefaultSettings(ctx context.Context) error {
 		SettingKeyRewriteMessageCacheControl:         strconv.FormatBool(s.defaultRewriteMessageCacheControl()),
 		SettingKeyAntigravityUserAgentVersion:        "",
 		SettingKeyOpenAICodexUserAgent:               "",
-		SettingKeyAntigravityNativeListToolsEmulation: "false",
+		SettingKeyAntigravityNativeMcpDiscoveryMode:  McpDiscoveryModeBoth,
+		SettingKeyChatHistoryEnabled:                 "true",
+		SettingKeyChatHistoryMaxBytes:                strconv.FormatInt(chatHistoryDefaultMaxBytes, 10),
 		SettingKeyAntigravityNativeMcpAggregatorName: "",
 		SettingPaymentVisibleMethodAlipaySource:      "",
 		SettingPaymentVisibleMethodWxpaySource:       "",
@@ -3479,7 +3672,38 @@ func (s *SettingService) parseSettings(settings map[string]string) *SystemSettin
 	result.AntigravityUserAgentVersion = antigravity.NormalizeUserAgentVersion(settings[SettingKeyAntigravityUserAgentVersion])
 	result.OpenAICodexUserAgent = strings.TrimSpace(settings[SettingKeyOpenAICodexUserAgent])
 	result.OpenAIAllowClaudeCodeCodexPlugin = settings[SettingKeyOpenAIAllowClaudeCodeCodexPlugin] == "true"
-	result.AntigravityNativeListToolsEmulation = settings[SettingKeyAntigravityNativeListToolsEmulation] == "true"
+	{
+		// Discovery mode: read new key, fall back to legacy bool, then default.
+		raw := strings.TrimSpace(settings[SettingKeyAntigravityNativeMcpDiscoveryMode])
+		mode := normalizeMcpDiscoveryMode(raw)
+		if mode == "" {
+			legacy, hasLegacy := settings[SettingKeyAntigravityNativeListToolsEmulation]
+			if hasLegacy {
+				if legacy == "true" {
+					mode = McpDiscoveryModeBoth
+				} else if legacy == "false" {
+					mode = McpDiscoveryModePrompt
+				}
+			}
+		}
+		if mode == "" {
+			mode = McpDiscoveryModeBoth
+		}
+		result.AntigravityNativeMcpDiscoveryMode = mode
+	}
+	{
+		raw := strings.TrimSpace(settings[SettingKeyChatHistoryEnabled])
+		// Empty stored value → default ON.
+		result.ChatHistoryEnabled = raw == "" || raw == "true"
+	}
+	{
+		raw := strings.TrimSpace(settings[SettingKeyChatHistoryMaxBytes])
+		parsed, perr := strconv.ParseInt(raw, 10, 64)
+		if perr != nil || parsed <= 0 {
+			parsed = chatHistoryDefaultMaxBytes
+		}
+		result.ChatHistoryMaxBytes = parsed
+	}
 	result.AntigravityNativeMcpAggregatorName = strings.TrimSpace(settings[SettingKeyAntigravityNativeMcpAggregatorName])
 
 	// Web search emulation: quick enabled check from the JSON config

@@ -185,6 +185,16 @@ func runMainServer() {
 	})
 	defer fpRefresher.Stop()
 
+	// Chat history logger — async writer with daily rotation + 500 MB
+	// total size cap. Captures upstream Gemini-format request/response
+	// pairs per native antigravity request for post-hoc diagnosis. Safe
+	// to start unconditionally; the service no-ops when global setting
+	// is disabled. Stop on shutdown to drain in-flight entries.
+	if app.ChatHistory != nil {
+		app.ChatHistory.Start(bgCtx)
+		defer app.ChatHistory.Stop()
+	}
+
 	// 启动服务器
 	go func() {
 		if err := app.Server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {

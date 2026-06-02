@@ -36,24 +36,24 @@ import (
 //
 // On JSON parse error: returns the original body unchanged + a zero
 // report. We never block a request on preprocessing failure.
-func preprocessNativeBody(body []byte, useAggregator bool, aggregatorName string) ([]byte, toolPrepReport, error) {
+func preprocessNativeBody(body []byte, useAggregator bool, aggregatorName string, discoveryMode string) ([]byte, toolPrepReport, error) {
 	if aggregatorName == "" {
 		aggregatorName = defaultMcpAggregatorName
 	}
+	if discoveryMode == "" {
+		discoveryMode = "both"
+	}
 	if len(body) == 0 {
-		return body, toolPrepReport{AggregatorOn: useAggregator, AggregatorName: aggregatorName}, nil
+		return body, toolPrepReport{AggregatorOn: useAggregator, AggregatorName: aggregatorName, DiscoveryMode: discoveryMode}, nil
 	}
 	var inner map[string]any
 	if err := json.Unmarshal(body, &inner); err != nil {
-		// Pass-through — don't fail the request, just skip preprocessing.
-		return body, toolPrepReport{AggregatorOn: useAggregator, AggregatorName: aggregatorName}, nil
+		return body, toolPrepReport{AggregatorOn: useAggregator, AggregatorName: aggregatorName, DiscoveryMode: discoveryMode}, nil
 	}
-	// Handle the double-wrap shape consistently with wrapNativeV1Internal:
-	// caller might have already nested as {"request": {...}}.
 	if r, ok := inner["request"].(map[string]any); ok && len(inner) == 1 {
 		inner = r
 	}
-	report := applyToolPreprocessing(inner, useAggregator, aggregatorName)
+	report := applyToolPreprocessing(inner, useAggregator, aggregatorName, discoveryMode)
 	out, err := json.Marshal(inner)
 	if err != nil {
 		return body, report, nil

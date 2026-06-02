@@ -52,6 +52,7 @@ func initializeApplication(buildInfo handler.BuildInfo) (*Application, error) {
 	groupRepository := repository.NewGroupRepository(client, db)
 	proxyRepository := repository.NewProxyRepository(client, db)
 	settingService := service.ProvideSettingService(settingRepository, groupRepository, proxyRepository, configConfig)
+	chatHistoryLogService := service.NewChatHistoryLogService("/var/lib/sub2api/chat-history", 524288000, true)
 	emailCache := repository.NewEmailCache(redisClient)
 	emailService := service.NewEmailService(settingRepository, emailCache)
 	turnstileVerifier := repository.NewTurnstileVerifier()
@@ -173,7 +174,7 @@ func initializeApplication(buildInfo handler.BuildInfo) (*Application, error) {
 	internal500CounterCache := repository.NewInternal500CounterCache(redisClient)
 	antigravityNativeOAuthService := service.NewAntigravityNativeOAuthService(proxyRepository)
 	antigravityGatewayService := service.NewAntigravityGatewayService(accountRepository, gatewayCache, schedulerSnapshotService, antigravityTokenProvider, rateLimitService, httpUpstream, settingService, internal500CounterCache)
-	antigravityNativeGatewayService := service.NewAntigravityNativeGatewayService(accountRepository, proxyRepository, antigravityNativeOAuthService, settingService)
+	antigravityNativeGatewayService := service.NewAntigravityNativeGatewayService(accountRepository, proxyRepository, antigravityNativeOAuthService, settingService, chatHistoryLogService)
 	// Inject the agymimic-backed native gateway as the quota fetcher
 	// for platform=antigravity_native. Keeps native dashboard refresh on
 	// the agymimic wire (token auto-refresh + agy.exe headers).
@@ -277,18 +278,16 @@ func initializeApplication(buildInfo handler.BuildInfo) (*Application, error) {
 	paymentOrderExpiryService := service.ProvidePaymentOrderExpiryService(paymentService)
 	channelMonitorRunner := service.ProvideChannelMonitorRunner(channelMonitorService, settingService)
 	v := provideCleanup(client, redisClient, opsMetricsCollector, opsAggregationService, opsAlertEvaluatorService, opsCleanupService, opsScheduledReportService, opsSystemLogSink, schedulerSnapshotService, tokenRefreshService, accountExpiryService, subscriptionExpiryService, usageCleanupService, idempotencyCleanupService, pricingService, emailQueueService, billingCacheService, usageRecordWorkerPool, subscriptionService, oAuthService, openAIOAuthService, geminiOAuthService, antigravityOAuthService, openAIGatewayService, scheduledTestRunnerService, backupService, paymentOrderExpiryService, channelMonitorRunner)
-	application := &Application{
-		Server:  httpServer,
-		Cleanup: v,
-	}
+	application := &Application{Server: httpServer, Cleanup: v, ChatHistory: chatHistoryLogService}
 	return application, nil
 }
 
 // wire.go:
 
 type Application struct {
-	Server  *http.Server
-	Cleanup func()
+	Server       *http.Server
+	Cleanup      func()
+	ChatHistory  *service.ChatHistoryLogService
 }
 
 func providePrivacyClientFactory() service.PrivacyClientFactory {

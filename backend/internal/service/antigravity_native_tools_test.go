@@ -90,7 +90,7 @@ func TestPreprocess_NoMcp_NoAggregator(t *testing.T) {
 		{"name":"find","parametersJsonSchema":{"type":"object","properties":{"paths":{"type":"array","items":{"type":"string"}}},"required":["paths"]}},
 		{"name":"read","parametersJsonSchema":{"type":"object","properties":{"path":{"type":"string"}},"required":["path"]}}
 	]}]}`)
-	out, report, err := preprocessNativeBody(body, false, "")
+	out, report, err := preprocessNativeBody(body, false, "", "both")
 	if err != nil {
 		t.Fatalf("unexpected err: %v", err)
 	}
@@ -125,7 +125,7 @@ func TestPreprocess_McpAggregator(t *testing.T) {
 		{"name":"mcp__github_official_create_issue","description":"New issue","parametersJsonSchema":{"type":"object","properties":{"owner":{"type":"string"},"repo":{"type":"string"},"title":{"type":"string"}}}},
 		{"name":"mcp__ida_orchestrator_read_memory","description":"Read mem","parametersJsonSchema":{"type":"object","properties":{"regions":{"type":"array"}}}}
 	]}]}`)
-	out, report, err := preprocessNativeBody(body, true, "")
+	out, report, err := preprocessNativeBody(body, true, "", "both")
 	if err != nil {
 		t.Fatalf("unexpected err: %v", err)
 	}
@@ -174,8 +174,8 @@ func TestInjectMcpCatalog_Idempotent(t *testing.T) {
 	tools := []mcpToolHandle{
 		{FullName: "mcp__server_one_tool_a", Decl: map[string]any{"description": "first tool"}},
 	}
-	injectMcpCatalogIntoSystemInstruction(inner, tools, "")
-	injectMcpCatalogIntoSystemInstruction(inner, tools, "")
+	injectMcpCatalogIntoSystemInstruction(inner, tools, "", "both", true, true)
+	injectMcpCatalogIntoSystemInstruction(inner, tools, "", "both", true, true)
 	text := inner["systemInstruction"].(map[string]any)["parts"].([]any)[0].(map[string]any)["text"].(string)
 	if strings.Count(text, mcpCatalogStartMarker) != 1 {
 		t.Errorf("catalog marker count != 1 after double-inject: %d in %q", strings.Count(text, mcpCatalogStartMarker), text)
@@ -416,7 +416,7 @@ func TestPreprocess_CustomAggregatorName(t *testing.T) {
 	body := []byte(`{"contents":[],"tools":[{"functionDeclarations":[
 		{"name":"mcp__github_official_get_pull_request","description":"Get PR","parametersJsonSchema":{"type":"object","properties":{"owner":{"type":"string"}}}}
 	]}]}`)
-	out, report, err := preprocessNativeBody(body, true, "agy_call_mcp_tool")
+	out, report, err := preprocessNativeBody(body, true, "agy_call_mcp_tool", "both")
 	if err != nil {
 		t.Fatalf("unexpected err: %v", err)
 	}
