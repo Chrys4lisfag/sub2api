@@ -454,3 +454,48 @@ func TestRewrite_CustomAggregatorName(t *testing.T) {
 		t.Errorf("custom aggregator name leaked back to omp side: %s", out)
 	}
 }
+
+// TestRewriteAggregatedFunctionCalls_PeelsAgymimicWrapper regression-locks
+// the third occurrence of "expected unwrapped, got wrapped" — the agy_list_tools
+// loop hands wrapped responses to rewriteAggregatedFunctionCalls BEFORE
+// flushBufferedNativeResponse runs its unwrap step. Without peeling here,
+// call_mcp_tool was never rewritten, and omp errored with
+// "Tool call_mcp_tool not found".
+func TestRewriteAggregatedFunctionCalls_PeelsAgymimicWrapper(t *testing.T) {
+	report := toolPrepReport{
+		AggregatorOn:   true,
+		AggregatorName: "call_mcp_tool",
+		McpTools: []mcpToolHandle{
+			{FullName: "mcp__electerm_list_electerm_bookmarks", Decl: map[string]any{}},
+		},
+	}
+	wrapped := []byte(`{
+		"response": {
+			"candidates": [{
+				"content": {
+					"parts": [{
+						"functionCall": {
+							"name": "call_mcp_tool",
+							"args": {
+								"ServerName": "electerm",
+								"ToolName": "list_electerm_bookmarks",
+								"Arguments": {}
+							}
+						}
+					}]
+				}
+			}]
+		},
+		"usageMetadata": {"promptTokenCount": 100},
+		"modelVersion": "gemini-3.5-flash",
+		"responseId": "abc"
+	}`)
+	out := rewriteAggregatedFunctionCalls(wrapped, report)
+	s := string(out)
+	if !strings.Contains(s, `"name":"mcp__electerm_list_electerm_bookmarks"`) {
+		t.Fatalf("rewriter must rewrite call_mcp_tool inside wrapped response: %s", s)
+	}
+	if strings.Contains(s, `"name":"call_mcp_tool"`) {
+		t.Errorf("call_mcp_tool name should be replaced: %s", s)
+	}
+}

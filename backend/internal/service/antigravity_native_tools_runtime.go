@@ -158,8 +158,18 @@ func rewriteAggregatedFunctionCalls(payload []byte, report toolPrepReport) []byt
 	if err := json.Unmarshal(payload, &root); err != nil {
 		return payload
 	}
+	// agymimic wraps non-streaming responses as {response:{candidates,...}, ...}.
+	// Peel BEFORE walking candidates or the rewriter is a no-op on the
+	// wrapped shape (which is what the agy_list_tools loop hands us
+	// before flushBufferedNativeResponse runs its unwrap step).
+	target := root
+	if r, ok := root["response"].(map[string]any); ok {
+		if _, hasCands := r["candidates"]; hasCands {
+			target = r
+		}
+	}
 
-	cands, ok := root["candidates"].([]any)
+	cands, ok := target["candidates"].([]any)
 	if !ok || len(cands) == 0 {
 		return payload
 	}
