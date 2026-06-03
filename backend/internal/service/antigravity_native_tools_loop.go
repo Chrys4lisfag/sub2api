@@ -158,8 +158,17 @@ func extractAgyListToolsCall(respBody []byte) (*agyListToolsCallInfo, bool) {
 	if err := json.Unmarshal(respBody, &root); err != nil {
 		return nil, false
 	}
-	if r, ok := root["response"].(map[string]any); ok && len(root) <= 2 {
-		root = r
+	// agymimic wraps upstream responses as {response: {candidates,...},
+	// usageMetadata: ..., modelVersion: ..., ...} with 3+ top-level keys.
+	// Peel whenever `response` carries `candidates` (regardless of how
+	// many sibling fields exist at the outer level). Previous guard
+	// `len(root) <= 2` was too restrictive — real upstream responses
+	// have 3+ outer fields, peel didn't fire, candidates lookup at the
+	// outer level failed, and agy_list_tools calls leaked to the client.
+	if r, ok := root["response"].(map[string]any); ok {
+		if _, hasCands := r["candidates"]; hasCands {
+			root = r
+		}
 	}
 	cands, ok := root["candidates"].([]any)
 	if !ok || len(cands) == 0 {
@@ -231,8 +240,11 @@ func stripAgyListToolsFromResponse(respBody []byte) []byte {
 		return respBody
 	}
 	target := root
-	if r, ok := root["response"].(map[string]any); ok && len(root) <= 2 {
-		target = r
+	// Same peel logic as extractAgyListToolsCall.
+	if r, ok := root["response"].(map[string]any); ok {
+		if _, hasCands := r["candidates"]; hasCands {
+			target = r
+		}
 	}
 	cands, _ := target["candidates"].([]any)
 	changed := false

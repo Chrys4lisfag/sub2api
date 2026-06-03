@@ -334,3 +334,70 @@ func TestAgyListToolsSSEEvent_HandlesInvalidJSONDefensively(t *testing.T) {
 		t.Fatalf("fallback path must also strip newlines: %q", payload)
 	}
 }
+
+// TestExtractAgyListToolsCall_RealUpstreamShape regression-locks the
+// real wire shape captured from chat-history when omp showed "Tool
+// agy_list_tools not found". The previous extractor refused to peel
+// because the agymimic wrapper had >2 top-level keys (response,
+// usageMetadata, modelVersion, responseId, ...). Result: candidates
+// were searched at the WRONG level and the call leaked to the client.
+func TestExtractAgyListToolsCall_RealUpstreamShape(t *testing.T) {
+	body := []byte(`{
+		"response": {
+			"candidates": [{
+				"content": {
+					"parts": [
+						{"text": "**My Current Inventory of MCP Tools**\nuser wants list...", "thought": true},
+						{
+							"functionCall": {"args": {}, "id": "2v9et4by", "name": "agy_list_tools"},
+							"thoughtSignature": "EuYNCuMNAQw"
+						}
+					],
+					"role": "model"
+				}
+			}],
+			"usageMetadata": {"promptTokenCount": 1000, "candidatesTokenCount": 50},
+			"modelVersion": "gemini-3.5-flash-extra-low",
+			"responseId": "abc123"
+		},
+		"someOtherField": "value"
+	}`)
+	info, ok := extractAgyListToolsCall(body)
+	if !ok {
+		t.Fatal("MUST intercept real upstream agymimic-wrapped response (regression: previous len(root) <= 2 guard prevented peel)")
+	}
+	if info.HasOtherFunctionCall {
+		t.Error("thought-text + agy_list_tools is not 'other function call'")
+	}
+	if info.CallArgs == nil {
+		t.Error("CallArgs should be the empty args object, not nil")
+	}
+	if len(info.AssistantParts) != 2 {
+		t.Errorf("expected 2 assistant parts (thought-text + functionCall), got %d", len(info.AssistantParts))
+	}
+}
+
+// TestStripAgyListToolsFromResponse_RealUpstreamShape mirrors the
+// extractor regression test for the strip path.
+func TestStripAgyListToolsFromResponse_RealUpstreamShape(t *testing.T) {
+	body := []byte(`{
+		"response": {
+			"candidates": [{
+				"content": {
+					"parts": [
+						{"functionCall": {"args": {}, "name": "agy_list_tools"}},
+						{"functionCall": {"args": {"ServerName": "electerm", "ToolName": "list_electerm_bookmarks", "Arguments": {}}, "name": "call_mcp_tool"}}
+					]
+				}
+			}]
+		},
+		"usageMetadata": {"promptTokenCount": 100}
+	}`)
+	out := stripAgyListToolsFromResponse(body)
+	if strings.Contains(string(out), "agy_list_tools") {
+		t.Errorf("agy_list_tools should be stripped even when wrapped in agymimic envelope: %s", out)
+	}
+	if !strings.Contains(string(out), "call_mcp_tool") {
+		t.Errorf("call_mcp_tool should remain: %s", out)
+	}
+}
