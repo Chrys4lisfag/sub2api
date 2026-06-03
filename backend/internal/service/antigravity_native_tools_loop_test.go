@@ -123,12 +123,15 @@ func TestExtractAgyListToolsCall_BasicMatch(t *testing.T) {
 	body := []byte(`{"candidates":[{"content":{"parts":[
 		{"functionCall":{"name":"agy_list_tools","args":{"server":"electerm"}}}
 	]}}]}`)
-	args, ok := extractAgyListToolsCall(body)
+	info, ok := extractAgyListToolsCall(body)
 	if !ok {
 		t.Fatal("expected match")
 	}
-	if args["server"] != "electerm" {
-		t.Errorf("expected server=electerm, got %v", args)
+	if info.CallArgs["server"] != "electerm" {
+		t.Errorf("expected server=electerm, got %v", info.CallArgs)
+	}
+	if info.HasOtherFunctionCall {
+		t.Error("no other function call present")
 	}
 }
 
@@ -136,12 +139,12 @@ func TestExtractAgyListToolsCall_NoArgs(t *testing.T) {
 	body := []byte(`{"candidates":[{"content":{"parts":[
 		{"functionCall":{"name":"agy_list_tools"}}
 	]}}]}`)
-	args, ok := extractAgyListToolsCall(body)
+	info, ok := extractAgyListToolsCall(body)
 	if !ok {
 		t.Fatal("expected match even without args")
 	}
-	if args == nil {
-		t.Error("args should be non-nil empty map")
+	if info.CallArgs == nil {
+		t.Error("CallArgs should be non-nil empty map")
 	}
 }
 
@@ -150,35 +153,47 @@ func TestExtractAgyListToolsCall_NotAgy(t *testing.T) {
 		{"functionCall":{"name":"call_mcp_tool","args":{}}}
 	]}}]}`)
 	if _, ok := extractAgyListToolsCall(body); ok {
-		t.Fatal("call_mcp_tool should NOT match")
+		t.Fatal("call_mcp_tool alone should NOT match (no agy_list_tools present)")
 	}
 }
 
-func TestExtractAgyListToolsCall_MixedContent_NoIntercept(t *testing.T) {
-	// Model emitted text + agy_list_tools → we should NOT intercept
-	// because there's real model output to preserve.
+// TestExtractAgyListToolsCall_TextPlusAgyListTools_DoesIntercept covers
+// the regression that broke omp: reasoning models emit explanatory text
+// + the discovery call together. Prior version refused to intercept
+// because of a "mixed content" guard; the discovery call then leaked
+// to the client which errored with "Tool agy_list_tools not found".
+func TestExtractAgyListToolsCall_TextPlusAgyListTools_DoesIntercept(t *testing.T) {
 	body := []byte(`{"candidates":[{"content":{"parts":[
 		{"text":"Let me check what's available..."},
 		{"functionCall":{"name":"agy_list_tools","args":{}}}
 	]}}]}`)
-	if _, ok := extractAgyListToolsCall(body); ok {
-		t.Fatal("mixed text+agy_list_tools should NOT intercept")
+	info, ok := extractAgyListToolsCall(body)
+	if !ok {
+		t.Fatal("text + agy_list_tools MUST intercept (text-only mixed content is fine)")
+	}
+	if info.HasOtherFunctionCall {
+		t.Error("text is not a function call — HasOtherFunctionCall should be false")
+	}
+	if len(info.AssistantParts) != 2 {
+		t.Errorf("AssistantParts should preserve all 2 parts, got %d", len(info.AssistantParts))
 	}
 }
 
-func TestExtractAgyListToolsCall_MixedOtherCall_NoIntercept(t *testing.T) {
-	// Model emitted call_mcp_tool + agy_list_tools → don't intercept.
+func TestExtractAgyListToolsCall_MixedWithOtherCall_StripPath(t *testing.T) {
 	body := []byte(`{"candidates":[{"content":{"parts":[
 		{"functionCall":{"name":"agy_list_tools","args":{}}},
 		{"functionCall":{"name":"call_mcp_tool","args":{"ServerName":"x","ToolName":"y","Arguments":{}}}}
 	]}}]}`)
-	if _, ok := extractAgyListToolsCall(body); ok {
-		t.Fatal("mixed agy_list_tools+call_mcp_tool should NOT intercept")
+	info, ok := extractAgyListToolsCall(body)
+	if !ok {
+		t.Fatal("agy_list_tools+call_mcp_tool: should report match with HasOtherFunctionCall=true")
+	}
+	if !info.HasOtherFunctionCall {
+		t.Error("HasOtherFunctionCall must be true when other functionCall present")
 	}
 }
 
 func TestExtractAgyListToolsCall_AgymimicWrapper(t *testing.T) {
-	// agymimic wraps as {response: {...}} — extractor should peel it.
 	body := []byte(`{"response":{"candidates":[{"content":{"parts":[
 		{"functionCall":{"name":"agy_list_tools","args":{}}}
 	]}}]}}`)
@@ -187,11 +202,40 @@ func TestExtractAgyListToolsCall_AgymimicWrapper(t *testing.T) {
 	}
 }
 
-func TestAppendAssistantCallAndUserResponse_AddsTwoTurns(t *testing.T) {
+func TestStripAgyListToolsFromResponse_RemovesOnlyDiscoveryCall(t *testing.T) {
+	body := []byte(`{"candidates":[{"content":{"parts":[
+		{"text":"hi"},
+		{"functionCall":{"name":"agy_list_tools","args":{}}},
+		{"functionCall":{"name":"call_mcp_tool","args":{"ServerName":"x","ToolName":"y","Arguments":{}}}}
+	]}}]}`)
+	out := stripAgyListToolsFromResponse(body)
+	if strings.Contains(string(out), "agy_list_tools") {
+		t.Errorf("agy_list_tools should be stripped: %s", out)
+	}
+	if !strings.Contains(string(out), "call_mcp_tool") {
+		t.Errorf("call_mcp_tool should remain: %s", out)
+	}
+	if !strings.Contains(string(out), `"text":"hi"`) {
+		t.Errorf("text should remain: %s", out)
+	}
+}
+
+func TestStripAgyListToolsFromResponse_NoOpWhenAbsent(t *testing.T) {
+	body := []byte(`{"candidates":[{"content":{"parts":[{"text":"hi"}]}}]}`)
+	out := stripAgyListToolsFromResponse(body)
+	if string(out) != string(body) {
+		t.Errorf("no-op expected when no agy_list_tools present: %s -> %s", body, out)
+	}
+}
+
+func TestAppendAssistantTurnAndUserResponse_PreservesText(t *testing.T) {
 	body := []byte(`{"contents":[{"role":"user","parts":[{"text":"hello"}]}]}`)
-	callArgs := map[string]any{"server": "electerm"}
+	assistantParts := []any{
+		map[string]any{"text": "Let me check"},
+		map[string]any{"functionCall": map[string]any{"name": "agy_list_tools", "args": map[string]any{"server": "electerm"}}},
+	}
 	resp := map[string]any{"servers": map[string]any{"electerm": []any{}}}
-	out, err := appendAssistantCallAndUserResponse(body, callArgs, resp)
+	out, err := appendAssistantTurnAndUserResponse(body, assistantParts, resp)
 	if err != nil {
 		t.Fatalf("unexpected err: %v", err)
 	}
@@ -201,33 +245,32 @@ func TestAppendAssistantCallAndUserResponse_AddsTwoTurns(t *testing.T) {
 	}
 	contents := parsed["contents"].([]any)
 	if len(contents) != 3 {
-		t.Fatalf("expected 3 turns (original + assistant.call + user.response), got %d", len(contents))
+		t.Fatalf("expected 3 turns, got %d", len(contents))
 	}
-	// 2nd turn should be assistant.functionCall(agy_list_tools)
 	t2 := contents[1].(map[string]any)
 	if t2["role"] != "model" {
 		t.Errorf("turn 2 role should be model: %v", t2["role"])
 	}
 	t2parts := t2["parts"].([]any)
-	if fc, ok := t2parts[0].(map[string]any)["functionCall"].(map[string]any); !ok || fc["name"] != "agy_list_tools" {
-		t.Errorf("turn 2 should be functionCall(agy_list_tools): %v", t2parts)
+	if len(t2parts) != 2 {
+		t.Fatalf("assistant turn should preserve both text + call parts, got %d", len(t2parts))
 	}
-	// 3rd turn should be user.functionResponse
+	if _, ok := t2parts[0].(map[string]any)["text"]; !ok {
+		t.Errorf("first part should be text: %v", t2parts[0])
+	}
+	if fc, ok := t2parts[1].(map[string]any)["functionCall"].(map[string]any); !ok || fc["name"] != "agy_list_tools" {
+		t.Errorf("second part should be functionCall(agy_list_tools): %v", t2parts[1])
+	}
 	t3 := contents[2].(map[string]any)
 	if t3["role"] != "user" {
 		t.Errorf("turn 3 role should be user: %v", t3["role"])
 	}
-	t3parts := t3["parts"].([]any)
-	fr, ok := t3parts[0].(map[string]any)["functionResponse"].(map[string]any)
-	if !ok || fr["name"] != "agy_list_tools" {
-		t.Errorf("turn 3 should be functionResponse(agy_list_tools): %v", t3parts)
-	}
 }
 
-func TestAppendAssistantCallAndUserResponse_HandlesWrappedRequest(t *testing.T) {
-	// Body might be wrapped as {request: {contents: ...}}.
+func TestAppendAssistantTurnAndUserResponse_HandlesWrappedRequest(t *testing.T) {
 	body := []byte(`{"request":{"contents":[{"role":"user","parts":[{"text":"hi"}]}]}}`)
-	out, err := appendAssistantCallAndUserResponse(body, map[string]any{}, map[string]any{})
+	parts := []any{map[string]any{"functionCall": map[string]any{"name": "agy_list_tools"}}}
+	out, err := appendAssistantTurnAndUserResponse(body, parts, map[string]any{})
 	if err != nil {
 		t.Fatalf("unexpected err: %v", err)
 	}
@@ -235,7 +278,6 @@ func TestAppendAssistantCallAndUserResponse_HandlesWrappedRequest(t *testing.T) 
 	if err := json.Unmarshal(out, &parsed); err != nil {
 		t.Fatalf("output not valid JSON: %v", err)
 	}
-	// Should preserve wrap.
 	inner, ok := parsed["request"].(map[string]any)
 	if !ok {
 		t.Fatalf("wrap should be preserved: %v", parsed)

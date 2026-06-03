@@ -355,6 +355,12 @@ func (s *AntigravityNativeGatewayService) ForwardGemini(
 				slog.Int64("account_id", account.ID),
 				slog.String("mode", discoveryMode),
 				slog.Int("iterations", iters))
+			// Defense-in-depth: strip any lingering agy_list_tools call
+			// from the final response before back-translation. The loop
+			// already handles this in normal flow, but a budget-exhausted
+			// final iteration could still contain it if the model ignored
+			// the budget-exhausted hint.
+			finalResp = stripAgyListToolsFromResponse(finalResp)
 			finalResp = rewriteAggregatedFunctionCalls(finalResp, toolReport)
 			return s.flushBufferedNativeResponse(ctx, c, account, body, finalResp, startTime, originalModel, wireModel, toolReport, stream, iters)
 		}

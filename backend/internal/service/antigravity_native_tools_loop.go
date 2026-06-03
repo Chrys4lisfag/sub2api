@@ -109,20 +109,48 @@ func injectAgyListToolsIntoInner(inner map[string]any) bool {
 	return true
 }
 
+// agyListToolsCallInfo carries everything the loop needs to decide
+// whether to intercept the model's response and how to reconstruct the
+// assistant turn for the next upstream request.
+type agyListToolsCallInfo struct {
+	// CallArgs is the args object of the first agy_list_tools functionCall
+	// the model emitted (typically {"server": "..."} or empty).
+	CallArgs map[string]any
+	// AssistantParts is the EXACT parts array the model emitted in this
+	// turn — preserved verbatim so we can include text/thinking/etc. in
+	// the assistant turn when re-issuing. May contain non-agy_list_tools
+	// content (text, thoughtSignature). We use this as-is when only the
+	// agy_list_tools call is present (alongside text/thinking is OK).
+	AssistantParts []any
+	// HasOtherFunctionCall is true when the response also contains a
+	// functionCall whose name is NOT agy_list_tools (e.g. call_mcp_tool
+	// or a direct mcp__* call). In this case we DON'T intercept; we
+	// strip the agy_list_tools call from the response and let the
+	// other call(s) flow through to the client normally.
+	HasOtherFunctionCall bool
+	// AgyListToolsPartIndex is the index of the agy_list_tools part in
+	// AssistantParts (so the stripper knows what to remove).
+	AgyListToolsPartIndex int
+}
+
 // extractAgyListToolsCall scans a non-streaming Gemini response body for
-// the first `functionCall{name: "agy_list_tools"}` in candidates[0].
+// an agy_list_tools functionCall in candidates[0].
 //
-// Returns (callArgs, true) on match. callArgs is the args object the
-// model supplied (may contain {"server": "..."}).
+// Returns (info, true) when agy_list_tools is found. The caller inspects
+// info.HasOtherFunctionCall to decide:
+//   - false → intercept (re-issue with synthetic response)
+//   - true  → strip agy_list_tools and pass remaining response to client
 //
-// Returns (nil, false) when:
-//   - body unparseable
-//   - no candidates / no parts / no functionCall
-//   - functionCall name != defaultListToolsName
-//   - the response contains OTHER content alongside (text, other tool
-//     calls) — we only loop on PURE discovery turns to avoid swallowing
-//     legitimate model output
-func extractAgyListToolsCall(respBody []byte) (map[string]any, bool) {
+// Returns (nil, false) when no agy_list_tools functionCall exists in the
+// response (caller passes through to client unchanged).
+//
+// Critical behavior change vs the original: we DO intercept when the
+// model emits text+agy_list_tools in the same turn (the common case for
+// reasoning models). Prior version's "mixed content" guard caused
+// agy_list_tools to leak to the client, which then errored with
+// "Tool agy_list_tools not found" since the discovery tool is
+// server-only by design.
+func extractAgyListToolsCall(respBody []byte) (*agyListToolsCallInfo, bool) {
 	if len(respBody) == 0 {
 		return nil, false
 	}
@@ -130,8 +158,6 @@ func extractAgyListToolsCall(respBody []byte) (map[string]any, bool) {
 	if err := json.Unmarshal(respBody, &root); err != nil {
 		return nil, false
 	}
-	// agymimic wraps non-streaming responses in {response: {candidates, ...}}.
-	// Peel one wrap if present.
 	if r, ok := root["response"].(map[string]any); ok && len(root) <= 2 {
 		root = r
 	}
@@ -151,78 +177,132 @@ func extractAgyListToolsCall(respBody []byte) (map[string]any, bool) {
 	if !ok || len(parts) == 0 {
 		return nil, false
 	}
-	// Walk parts to find agy_list_tools, AND verify nothing else of
-	// substance is present. If model also emitted text or another tool
-	// call, we don't loop — let the caller's normal flow handle it.
-	var found map[string]any
-	otherSubstance := false
-	for _, partAny := range parts {
+	info := &agyListToolsCallInfo{
+		AssistantParts:        parts,
+		AgyListToolsPartIndex: -1,
+	}
+	for i, partAny := range parts {
 		part, ok := partAny.(map[string]any)
 		if !ok {
 			continue
 		}
-		if fc, ok := part["functionCall"].(map[string]any); ok {
-			name, _ := fc["name"].(string)
-			if name == defaultListToolsName {
+		fc, hasFC := part["functionCall"].(map[string]any)
+		if !hasFC {
+			continue
+		}
+		name, _ := fc["name"].(string)
+		if name == defaultListToolsName {
+			if info.AgyListToolsPartIndex < 0 {
 				args, _ := fc["args"].(map[string]any)
 				if args == nil {
 					args = map[string]any{}
 				}
-				if found == nil {
-					found = args
-				}
-				// Multiple agy_list_tools in one turn — only honor first.
-				continue
+				info.CallArgs = args
+				info.AgyListToolsPartIndex = i
 			}
-			// Another tool call → don't intercept.
-			otherSubstance = true
+			continue
 		}
-		if t, ok := part["text"].(string); ok && t != "" {
-			// Substantive text alongside the discovery call → don't
-			// intercept (model gave a real reply, possibly preamble).
-			// Empty text or thoughtSignature-only is fine.
-			otherSubstance = true
-		}
+		// Any other functionCall (call_mcp_tool, mcp__*, builtin tool)
+		// means we should NOT intercept — let the client dispatch the
+		// real work and strip our discovery call.
+		info.HasOtherFunctionCall = true
 	}
-	if found == nil || otherSubstance {
+	if info.AgyListToolsPartIndex < 0 {
 		return nil, false
 	}
-	return found, true
+	return info, true
 }
 
-// appendAssistantCallAndUserResponse mutates the body JSON, appending
-// two new contents[] turns:
+// stripAgyListToolsFromResponse removes any agy_list_tools functionCall
+// part from candidates[0].content.parts. Used to sanitize responses
+// before forwarding to the client when we decided NOT to intercept
+// (e.g. model emitted agy_list_tools alongside a real call_mcp_tool —
+// the agy_list_tools must not reach the client because no client has
+// that tool registered).
 //
-//  1. assistant turn carrying the model's agy_list_tools functionCall
-//     (so upstream sees its own prior output in the next request)
-//  2. user turn carrying the synthesized functionResponse
+// Returns the rewritten bytes; on parse error returns the input
+// unchanged (defensive — never break a working response).
+func stripAgyListToolsFromResponse(respBody []byte) []byte {
+	if len(respBody) == 0 {
+		return respBody
+	}
+	var root map[string]any
+	if err := json.Unmarshal(respBody, &root); err != nil {
+		return respBody
+	}
+	target := root
+	if r, ok := root["response"].(map[string]any); ok && len(root) <= 2 {
+		target = r
+	}
+	cands, _ := target["candidates"].([]any)
+	changed := false
+	for _, candAny := range cands {
+		cand, _ := candAny.(map[string]any)
+		if cand == nil {
+			continue
+		}
+		content, _ := cand["content"].(map[string]any)
+		if content == nil {
+			continue
+		}
+		parts, _ := content["parts"].([]any)
+		if len(parts) == 0 {
+			continue
+		}
+		kept := make([]any, 0, len(parts))
+		for _, p := range parts {
+			pm, _ := p.(map[string]any)
+			if pm != nil {
+				if fc, ok := pm["functionCall"].(map[string]any); ok {
+					if name, _ := fc["name"].(string); name == defaultListToolsName {
+						changed = true
+						continue
+					}
+				}
+			}
+			kept = append(kept, p)
+		}
+		if changed {
+			content["parts"] = kept
+		}
+	}
+	if !changed {
+		return respBody
+	}
+	out, err := json.Marshal(root)
+	if err != nil {
+		return respBody
+	}
+	return out
+}
+
+// appendAssistantTurnAndUserResponse appends the model's full assistant
+// turn (preserving text, thinking, and the agy_list_tools call) plus a
+// user turn carrying the synthesized functionResponse.
 //
-// This is the standard Gemini tool-call → tool-result pattern.
-func appendAssistantCallAndUserResponse(body []byte, callArgs, response map[string]any) ([]byte, error) {
+// Why we preserve the full assistant content: reasoning models routinely
+// emit explanatory text + a tool call in the same turn. If we replaced
+// the assistant turn with a synthetic functionCall-only message, upstream
+// would see history loss and may behave unpredictably (re-explain itself,
+// hallucinate prior context, etc.). Including the original parts verbatim
+// makes the re-issue indistinguishable from a normal client-driven
+// tool-call cycle.
+func appendAssistantTurnAndUserResponse(body []byte, assistantParts []any, response map[string]any) ([]byte, error) {
 	var inner map[string]any
 	if err := json.Unmarshal(body, &inner); err != nil {
 		return nil, fmt.Errorf("decode body: %w", err)
 	}
 	target := inner
-	wrapped := false
 	if r, ok := inner["request"].(map[string]any); ok && len(inner) == 1 {
 		target = r
-		wrapped = true
 	}
 	contents, _ := target["contents"].([]any)
-	// Append assistant.functionCall turn.
+	// Assistant turn: use the model's verbatim parts (text + agy_list_tools call).
 	contents = append(contents, map[string]any{
-		"role": "model",
-		"parts": []any{
-			map[string]any{
-				"functionCall": map[string]any{
-					"name": defaultListToolsName,
-					"args": callArgs,
-				},
-			},
-		},
+		"role":  "model",
+		"parts": assistantParts,
 	})
-	// Append user.functionResponse turn.
+	// User turn: functionResponse for agy_list_tools.
 	contents = append(contents, map[string]any{
 		"role": "user",
 		"parts": []any{
@@ -235,14 +315,6 @@ func appendAssistantCallAndUserResponse(body []byte, callArgs, response map[stri
 		},
 	})
 	target["contents"] = contents
-	if wrapped {
-		// Re-wrap.
-		out, err := json.Marshal(inner)
-		if err != nil {
-			return nil, fmt.Errorf("encode body: %w", err)
-		}
-		return out, nil
-	}
 	out, err := json.Marshal(inner)
 	if err != nil {
 		return nil, fmt.Errorf("encode body: %w", err)
@@ -306,10 +378,23 @@ func (s *AntigravityNativeGatewayService) resolveAgyListToolsLoop(
 		lastResp = raw
 		iterations++
 
-		callArgs, found := extractAgyListToolsCall(raw)
+		info, found := extractAgyListToolsCall(raw)
 		if !found {
-			// Done — model emitted real output (text or call_mcp_tool).
+			// No agy_list_tools in this response — model emitted real
+			// output (text and/or call_mcp_tool). Pass through.
 			return raw, iterations - 1, nil
+		}
+		if info.HasOtherFunctionCall {
+			// Model emitted agy_list_tools alongside a real call
+			// (call_mcp_tool, mcp__*, builtin). Don't intercept the
+			// loop — strip the discovery call so the client never sees
+			// it, then forward the rest. The other call(s) get
+			// dispatched by the client normally; the model's catalog
+			// already gives it enough info to know what was discovered.
+			cleaned := stripAgyListToolsFromResponse(raw)
+			slog.InfoContext(ctx, "native: agy_list_tools call mixed with real call — stripped + passed through",
+				slog.Int("iterations", iterations))
+			return cleaned, iterations - 1, nil
 		}
 		// Budget guard: if this was the last allowed iteration, return a
 		// budget-exhausted synthetic response that tells the model to
@@ -322,12 +407,10 @@ func (s *AntigravityNativeGatewayService) resolveAgyListToolsLoop(
 				"error": "list_tools_budget_exhausted",
 				"hint":  "You have called agy_list_tools too many times. Use call_mcp_tool with one of the literal (ServerName, ToolName) pairs from the catalog already provided in the system instructions. Do not call agy_list_tools again this turn.",
 			}
-			body, err = appendAssistantCallAndUserResponse(body, callArgs, budgetResp)
+			body, err = appendAssistantTurnAndUserResponse(body, info.AssistantParts, budgetResp)
 			if err != nil {
 				return raw, iterations, fmt.Errorf("list-tools loop: append budget-exhausted: %w", err)
 			}
-			// Re-issue one final time so the model can respond with
-			// call_mcp_tool given the budget-exhausted hint.
 			envelope, err = wrapNativeV1Internal(cli.ProjectID(), wireModel, body)
 			if err != nil {
 				return nil, iterations, fmt.Errorf("list-tools loop: final envelope: %w", err)
@@ -338,13 +421,16 @@ func (s *AntigravityNativeGatewayService) resolveAgyListToolsLoop(
 			}
 			raw, _ := io.ReadAll(resp.Body)
 			_ = resp.Body.Close()
-			return raw, iterations, nil
+			// Final response could STILL contain agy_list_tools (model
+			// ignored the budget hint). Strip defensively.
+			return stripAgyListToolsFromResponse(raw), iterations, nil
 		}
 
-		// Synthesize response for THIS iteration's call.
-		serverFilter, _ := callArgs["server"].(string)
+		// Synthesize response for THIS iteration's call and re-issue
+		// with the model's full assistant turn (text + call) preserved.
+		serverFilter, _ := info.CallArgs["server"].(string)
 		response := synthesizeListToolsResponse(toolReport.McpTools, serverFilter)
-		body, err = appendAssistantCallAndUserResponse(body, callArgs, response)
+		body, err = appendAssistantTurnAndUserResponse(body, info.AssistantParts, response)
 		if err != nil {
 			return raw, iterations, fmt.Errorf("list-tools loop: append turns: %w", err)
 		}
