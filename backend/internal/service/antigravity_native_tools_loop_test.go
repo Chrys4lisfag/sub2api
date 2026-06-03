@@ -257,3 +257,38 @@ func TestAgyListToolsSSEEvent_FormatValid(t *testing.T) {
 		t.Errorf("missing trailing \\n\\n: %q", s)
 	}
 }
+
+// TestAgyListToolsSSEEvent_CompactsPrettyJSON verifies the regression
+// fix for an omp "Expected '}'" parse error. Gemini non-streaming
+// responses can be pretty-printed with literal newlines + indentation;
+// SSE uses newlines to terminate events, so the JSON MUST be compacted
+// before emission or the client sees a truncated payload.
+func TestAgyListToolsSSEEvent_CompactsPrettyJSON(t *testing.T) {
+	pretty := []byte("{\n  \"candidates\": [\n    {\n      \"content\": {\n        \"parts\": []\n      }\n    }\n  ]\n}")
+	out := agyListToolsSSEEvent(pretty)
+	s := string(out)
+	if !strings.HasPrefix(s, "data: ") {
+		t.Fatalf("missing data: prefix: %q", s)
+	}
+	if !strings.HasSuffix(s, "\n\n") {
+		t.Fatalf("missing trailing \\n\\n: %q", s)
+	}
+	payload := s[len("data: ") : len(s)-2]
+	if strings.ContainsAny(payload, "\n\r") {
+		t.Fatalf("payload contains literal newline/CR — would split SSE event: %q", payload)
+	}
+	var parsed map[string]any
+	if err := json.Unmarshal([]byte(payload), &parsed); err != nil {
+		t.Fatalf("payload not valid JSON after compaction: %v\n%s", err, payload)
+	}
+}
+
+func TestAgyListToolsSSEEvent_HandlesInvalidJSONDefensively(t *testing.T) {
+	junk := []byte("not\njson\n{}")
+	out := agyListToolsSSEEvent(junk)
+	s := string(out)
+	payload := s[len("data: ") : len(s)-2]
+	if strings.ContainsAny(payload, "\n\r") {
+		t.Fatalf("fallback path must also strip newlines: %q", payload)
+	}
+}

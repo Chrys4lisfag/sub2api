@@ -23,6 +23,7 @@
 package service
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -354,13 +355,36 @@ func (s *AntigravityNativeGatewayService) resolveAgyListToolsLoop(
 
 // agyListToolsSSEEvent wraps a non-streaming JSON response as a single
 // SSE `data:` event so clients that requested streaming still receive a
-// valid SSE stream (with one event followed by stream end).
+// agyListToolsSSEEvent wraps a non-streaming JSON response as a single
+// SSE `data:` event so clients that requested streaming still receive a
+// valid SSE stream.
 //
-// Gemini SSE format: `data: {...json...}\n\n`.
+// Critical: the JSON MUST be compacted (no literal newlines) before
+// emission. SSE uses newlines to terminate events — a literal `\n` in
+// the payload would split the event and the client would see a
+// truncated JSON object ("Expected '}'" parse error). Gemini's
+// non-streaming generateContent response is often pretty-printed with
+// indentation, so we re-marshal through json.Compact to strip all
+// whitespace.
+//
+// Gemini SSE format: `data: {compacted_json}\n\n`.
 func agyListToolsSSEEvent(respBody []byte) []byte {
-	out := make([]byte, 0, len(respBody)+10)
+	var compact bytes.Buffer
+	if err := json.Compact(&compact, respBody); err != nil {
+		// Fall back to raw if compaction fails (unlikely — but never
+		// silently produce a broken SSE event). Strip embedded newlines
+		// as a best-effort defensive measure.
+		safe := bytes.ReplaceAll(respBody, []byte{'\n'}, []byte{' '})
+		safe = bytes.ReplaceAll(safe, []byte{'\r'}, []byte{' '})
+		out := make([]byte, 0, len(safe)+10)
+		out = append(out, []byte("data: ")...)
+		out = append(out, safe...)
+		out = append(out, '\n', '\n')
+		return out
+	}
+	out := make([]byte, 0, compact.Len()+10)
 	out = append(out, []byte("data: ")...)
-	out = append(out, respBody...)
+	out = append(out, compact.Bytes()...)
 	out = append(out, '\n', '\n')
 	return out
 }
