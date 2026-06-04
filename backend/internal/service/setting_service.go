@@ -157,6 +157,7 @@ const openAIAllowCodexPluginCacheTTL = 60 * time.Second
 const openAIAllowCodexPluginErrorTTL = 5 * time.Second
 const openAIAllowCodexPluginDBTimeout = 5 * time.Second
 
+<<<<<<< HEAD
 // cachedAntigravityNativeMcpDiscoveryMode — 60s TTL cache for the
 // global MCP discovery mode enum. Read on every native gateway request.
 type cachedAntigravityNativeMcpDiscoveryMode struct {
@@ -200,6 +201,8 @@ const antigravityNativeMcpAggregatorNameCacheTTL = 60 * time.Second
 const antigravityNativeMcpAggregatorNameErrorTTL = 5 * time.Second
 const antigravityNativeMcpAggregatorNameDBTimeout = 5 * time.Second
 
+=======
+>>>>>>> upstream/main
 const openAIQuotaAutoPauseSettingsCacheTTL = 60 * time.Second
 const openAIQuotaAutoPauseSettingsErrorTTL = 5 * time.Second
 const openAIQuotaAutoPauseSettingsDBTimeout = 5 * time.Second
@@ -245,9 +248,12 @@ type SettingService struct {
 	// instance owns its own cache, no shared package-level state.
 	openAIQuotaAutoPauseSettingsCache atomic.Value // *cachedOpenAIQuotaAutoPauseSettings
 	openAIQuotaAutoPauseSettingsSF    singleflight.Group
+<<<<<<< HEAD
 
 	antigravityNativeMcpAggregatorNameCache atomic.Value // *cachedAntigravityNativeMcpAggregatorName
 	antigravityNativeMcpAggregatorNameSF    singleflight.Group
+=======
+>>>>>>> upstream/main
 }
 
 // DefaultPlatformQuotaSetting 单 platform 三档限额（nil = 沿用上层；0 = 显式禁用；>0 = 上限）
