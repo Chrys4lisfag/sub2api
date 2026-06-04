@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"net/http"
 	"regexp"
 	"strconv"
@@ -477,6 +478,16 @@ func (h *GatewayHandler) GeminiV1BetaModels(c *gin.Context) {
 		if fs.SwitchCount > 0 {
 			requestCtx = service.WithAccountSwitchCount(requestCtx, fs.SwitchCount, h.metadataBridgeEnabled())
 		}
+		// Per-request dispatch trace. Helps diagnose which forwarding
+		// path was taken when MCP tool calls misbehave — log before the
+		// dispatch so we capture intent even if downstream is slow / hangs.
+		slog.InfoContext(requestCtx, "v1beta dispatch",
+			slog.Int64("account_id", account.ID),
+			slog.String("platform", string(account.Platform)),
+			slog.String("account_type", string(account.Type)),
+			slog.String("model", modelName),
+			slog.String("action", action),
+			slog.Bool("stream", stream))
 		switch {
 		case account.Platform == service.PlatformAntigravity && account.Type != service.AccountTypeAPIKey:
 			result, err = h.antigravityGatewayService.ForwardGemini(requestCtx, c, account, modelName, action, stream, body, hasBoundSession)
