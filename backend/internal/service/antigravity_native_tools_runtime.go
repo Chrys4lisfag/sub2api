@@ -23,6 +23,8 @@ package service
 
 import (
 	"encoding/json"
+	"log/slog"
+	"sort"
 	"strings"
 )
 
@@ -158,10 +160,9 @@ func rewriteAggregatedFunctionCalls(payload []byte, report toolPrepReport) []byt
 	if err := json.Unmarshal(payload, &root); err != nil {
 		return payload
 	}
-	// agymimic wraps non-streaming responses as {response:{candidates,...}, ...}.
-	// Peel BEFORE walking candidates or the rewriter is a no-op on the
-	// wrapped shape (which is what the agy_list_tools loop hands us
-	// before flushBufferedNativeResponse runs its unwrap step).
+	// Peel agymimic envelope when present so the loop's wrapped payloads
+	// are walked correctly. Mutation continues in-place on the shared
+	// map; json.Marshal(root) at the end preserves any outer fields.
 	target := root
 	if r, ok := root["response"].(map[string]any); ok {
 		if _, hasCands := r["candidates"]; hasCands {
@@ -206,6 +207,8 @@ func rewriteAggregatedFunctionCalls(payload []byte, report toolPrepReport) []byt
 			}
 			args, _ := fc["args"].(map[string]any)
 			if args == nil {
+				slog.Warn("native: call_mcp_tool with nil args — leaving as-is",
+					"name", name)
 				continue
 			}
 			server, _ := args["ServerName"].(string)
@@ -213,10 +216,23 @@ func rewriteAggregatedFunctionCalls(payload []byte, report toolPrepReport) []byt
 			inner, _ := args["Arguments"].(map[string]any)
 			handle, found := report.resolveMcpHandle(server, tool)
 			if !found {
-				// Leave as-is — omp will surface "unknown tool" error to
-				// the user / model. Better than silently dropping the call.
+				// Log with nearest candidates so we can diagnose without
+				// asking the user for screenshots. The candidates list
+				// helps spot whether the requested tool genuinely doesn't
+				// exist or the model paraphrased a name we should have
+				// caught.
+				slog.Warn("native: call_mcp_tool failed to resolve — leaving as-is for omp to report",
+					"server_requested", server,
+					"tool_requested", tool,
+					"available_servers", report.availableServerNames(),
+					"nearest_candidates", report.nearestMcpHandles(server, tool, 5),
+					"total_mcp_tools_in_request", len(report.McpTools))
 				continue
 			}
+			slog.Info("native: call_mcp_tool rewritten",
+				"server_requested", server,
+				"tool_requested", tool,
+				"resolved_to", handle.FullName)
 			fc["name"] = handle.FullName
 			// Replace args with the inner Arguments object the model
 			// supplied. If inner is nil / non-object, fall back to empty
@@ -323,4 +339,58 @@ outer:
 		return i
 	}
 	return -1
+}
+
+// availableServerNames returns the sorted, deduplicated list of MCP
+// server names present in this report. Used for diagnostic logging
+// when a call_mcp_tool resolution fails — caller (or future you
+// reading the logs) immediately sees which servers actually were
+// available so they can spot model paraphrases / typos.
+func (r toolPrepReport) availableServerNames() []string {
+	seen := map[string]struct{}{}
+	for _, h := range r.McpTools {
+		server, _ := splitMcpFullName(h.FullName)
+		if server != "" {
+			seen[server] = struct{}{}
+		}
+	}
+	out := make([]string, 0, len(seen))
+	for s := range seen {
+		out = append(out, s)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// nearestMcpHandles returns up to `n` MCP tool FullNames sorted by
+// Levenshtein distance against `mcp__<server>_<tool>` (dash-normalized).
+// Used purely for diagnostic logging: when call_mcp_tool resolution
+// fails we want the nearest candidates in the log line so we can spot
+// whether the resolver missed something it should have caught, vs the
+// model truly hallucinating a non-existent tool.
+func (r toolPrepReport) nearestMcpHandles(server, tool string, n int) []string {
+	if n <= 0 || len(r.McpTools) == 0 {
+		return nil
+	}
+	serverNorm := strings.ReplaceAll(server, "-", "_")
+	toolNorm := strings.ReplaceAll(tool, "-", "_")
+	want := "mcp__" + serverNorm + "_" + toolNorm
+
+	type scored struct {
+		name string
+		dist int
+	}
+	scoredList := make([]scored, 0, len(r.McpTools))
+	for _, h := range r.McpTools {
+		scoredList = append(scoredList, scored{name: h.FullName, dist: levenshtein(want, h.FullName)})
+	}
+	sort.Slice(scoredList, func(i, j int) bool { return scoredList[i].dist < scoredList[j].dist })
+	if n > len(scoredList) {
+		n = len(scoredList)
+	}
+	out := make([]string, 0, n)
+	for _, s := range scoredList[:n] {
+		out = append(out, s.name)
+	}
+	return out
 }

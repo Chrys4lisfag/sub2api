@@ -499,3 +499,54 @@ func TestRewriteAggregatedFunctionCalls_PeelsAgymimicWrapper(t *testing.T) {
 		t.Errorf("call_mcp_tool name should be replaced: %s", s)
 	}
 }
+
+func TestAvailableServerNames(t *testing.T) {
+	r := toolPrepReport{
+		McpTools: []mcpToolHandle{
+			{FullName: "mcp__electerm_list_electerm_bookmarks"},
+			{FullName: "mcp__electerm_send_electerm_terminal_command"},
+			{FullName: "mcp__github_official_get_pr"},
+			{FullName: "mcp__ida_orchestrator_get_instances"},
+		},
+	}
+	got := r.availableServerNames()
+	// Expected sorted, deduplicated.
+	want := []string{"electerm", "github", "ida"}
+	if len(got) != len(want) {
+		t.Fatalf("availableServerNames len mismatch: got %v want %v", got, want)
+	}
+	for i, w := range want {
+		if got[i] != w {
+			t.Errorf("availableServerNames[%d] = %q, want %q", i, got[i], w)
+		}
+	}
+}
+
+func TestNearestMcpHandles_RanksByDistance(t *testing.T) {
+	r := toolPrepReport{
+		McpTools: []mcpToolHandle{
+			{FullName: "mcp__ida_orchestrator_get_instances"},
+			{FullName: "mcp__ida_orchestrator_decompile"},
+			{FullName: "mcp__electerm_list_electerm_bookmarks"},
+			{FullName: "mcp__github_official_get_pr"},
+		},
+	}
+	// Model paraphrased "ida" / "get_instances" instead of the real
+	// "ida_orchestrator" / "get_instances". The closest handle should
+	// be the orchestrator's get_instances; the further apart names
+	// (electerm, github) should appear later in the ranking.
+	got := r.nearestMcpHandles("ida", "get_instances", 3)
+	if len(got) != 3 {
+		t.Fatalf("expected 3 candidates, got %d: %v", len(got), got)
+	}
+	if got[0] != "mcp__ida_orchestrator_get_instances" {
+		t.Errorf("closest should be mcp__ida_orchestrator_get_instances, got %q", got[0])
+	}
+}
+
+func TestNearestMcpHandles_EmptyOnEmptyReport(t *testing.T) {
+	r := toolPrepReport{}
+	if got := r.nearestMcpHandles("ida", "x", 5); got != nil {
+		t.Errorf("empty report should return nil, got %v", got)
+	}
+}

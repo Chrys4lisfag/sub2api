@@ -342,6 +342,21 @@ func (s *AntigravityNativeGatewayService) ForwardGemini(
 		return nil, fmt.Errorf("native gemini: tool preprocess: %w", err)
 	}
 
+	// One-line per-request summary so any later failure can be
+	// correlated by account_id + model. Keep this at INFO so it lands
+	// in docker logs sub2api without bumping global log level.
+	slog.InfoContext(ctx, "native: request preprocessed",
+		slog.Int64("account_id", account.ID),
+		slog.String("model", originalModel),
+		slog.String("wire_model", wireModel),
+		slog.Bool("stream", stream),
+		slog.String("discovery_mode", discoveryMode),
+		slog.String("aggregator_name", aggregatorName),
+		slog.Bool("aggregator_on", toolReport.AggregatorOn),
+		slog.Int("mcp_tools_count", len(toolReport.McpTools)),
+		slog.Int("builtin_tools_count", len(toolReport.BuiltinTools)),
+		slog.Int("schemas_normalized", toolReport.Normalized))
+
 	// agy_list_tools transparent discovery loop. Runs only when the mode
 	// declares the discovery tool AND the aggregator is on AND there's
 	// at least one mcp__* tool. The decl itself is already present in
