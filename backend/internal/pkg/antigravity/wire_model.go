@@ -78,20 +78,46 @@ func AntigravityWireModel(modelName string) string {
 // (`request.generationConfig...`); both are checked.
 func ResolveWireFromBody(publicName string, body []byte) string {
 	normalized := strings.ToLower(strings.TrimSpace(strings.TrimPrefix(publicName, "models/")))
-	if normalized != "gemini-3.5-flash" {
-		return AntigravityWireModel(publicName)
-	}
-	if len(body) == 0 || !gjson.ValidBytes(body) {
-		return AntigravityWireModel(publicName)
-	}
-	level := extractThinkingLevel(body)
-	switch level {
-	case "high":
-		return "gemini-3-flash-agent"
-	case "minimal", "low":
-		return "gemini-3.5-flash-extra-low"
-	case "medium", "":
-		return "gemini-3.5-flash-low"
+	switch normalized {
+	case "gemini-3.5-flash":
+		if len(body) == 0 || !gjson.ValidBytes(body) {
+			return AntigravityWireModel(publicName)
+		}
+		switch extractThinkingLevel(body) {
+		case "high":
+			return "gemini-3-flash-agent"
+		case "minimal", "low":
+			return "gemini-3.5-flash-extra-low"
+		case "medium", "":
+			return "gemini-3.5-flash-low"
+		default:
+			return AntigravityWireModel(publicName)
+		}
+	case "gemini-3.1-pro":
+		// Pro tier only ships two flavors on agy: low + agent (high).
+		// Mirror Flash's slider-driven dispatch so omp can ship a single
+		// `gemini-3.1-pro` picker entry and the body's
+		// thinkingConfig.thinkingLevel picks the wire variant.
+		//
+		//   slider=low    → wire gemini-3.1-pro-low  (passthrough)
+		//   slider=med    → wire gemini-pro-agent    (no separate medium
+		//                                             tier exists; round up
+		//                                             to high)
+		//   slider=high   → wire gemini-pro-agent    (3.1 Pro High)
+		//
+		// No body / no level: default to High (matches agy's IDE default
+		// for the Pro picker).
+		if len(body) == 0 || !gjson.ValidBytes(body) {
+			return "gemini-pro-agent"
+		}
+		switch extractThinkingLevel(body) {
+		case "minimal", "low":
+			return "gemini-3.1-pro-low"
+		case "medium", "high", "":
+			return "gemini-pro-agent"
+		default:
+			return AntigravityWireModel(publicName)
+		}
 	default:
 		return AntigravityWireModel(publicName)
 	}

@@ -247,3 +247,74 @@ func TestApplyWireModelToBody_BaseFlashRoutesByThinkingLevel(t *testing.T) {
 		t.Errorf("explicit thinkingLevel was clobbered: %s", out)
 	}
 }
+
+// TestResolveWireFromBody_ProSlider locks the Gemini 3.1 Pro slider
+// dispatch: a single suffixless picker entry whose body level picks
+// between the two real agy Pro variants.
+func TestResolveWireFromBody_ProSlider(t *testing.T) {
+	cases := []struct {
+		name     string
+		body     string
+		wantWire string
+	}{
+		{
+			name:     "low → gemini-3.1-pro-low",
+			body:     `{"model":"gemini-3.1-pro","generationConfig":{"thinkingConfig":{"thinkingLevel":"low"}}}`,
+			wantWire: "gemini-3.1-pro-low",
+		},
+		{
+			name:     "minimal → gemini-3.1-pro-low",
+			body:     `{"model":"gemini-3.1-pro","generationConfig":{"thinkingConfig":{"thinkingLevel":"minimal"}}}`,
+			wantWire: "gemini-3.1-pro-low",
+		},
+		{
+			name:     "medium → gemini-pro-agent (rounds up; agy has no medium pro)",
+			body:     `{"model":"gemini-3.1-pro","generationConfig":{"thinkingConfig":{"thinkingLevel":"medium"}}}`,
+			wantWire: "gemini-pro-agent",
+		},
+		{
+			name:     "high → gemini-pro-agent",
+			body:     `{"model":"gemini-3.1-pro","generationConfig":{"thinkingConfig":{"thinkingLevel":"high"}}}`,
+			wantWire: "gemini-pro-agent",
+		},
+		{
+			name:     "empty level → default High (gemini-pro-agent)",
+			body:     `{"model":"gemini-3.1-pro"}`,
+			wantWire: "gemini-pro-agent",
+		},
+		{
+			name:     "no body → default High",
+			body:     ``,
+			wantWire: "gemini-pro-agent",
+		},
+		{
+			name:     "wrapped form (request.generationConfig)",
+			body:     `{"request":{"model":"gemini-3.1-pro","generationConfig":{"thinkingConfig":{"thinkingLevel":"low"}}}}`,
+			wantWire: "gemini-3.1-pro-low",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := ResolveWireFromBody("gemini-3.1-pro", []byte(tc.body))
+			if got != tc.wantWire {
+				t.Errorf("got %q want %q", got, tc.wantWire)
+			}
+		})
+	}
+}
+
+// TestResolveWireFromBody_ProSuffixedVariantsIgnoreBodyLevel — suffixed
+// picker entries (existing back-compat path) should still resolve via
+// their suffix, ignoring any body level.
+func TestResolveWireFromBody_ProSuffixedVariantsIgnoreBodyLevel(t *testing.T) {
+	// -high suffix wins regardless of body level.
+	body := []byte(`{"model":"gemini-3.1-pro-high","generationConfig":{"thinkingConfig":{"thinkingLevel":"low"}}}`)
+	if got := ResolveWireFromBody("gemini-3.1-pro-high", body); got != "gemini-pro-agent" {
+		t.Errorf("suffix should win: got %q want gemini-pro-agent", got)
+	}
+	// -low suffix is direct passthrough.
+	body = []byte(`{"model":"gemini-3.1-pro-low","generationConfig":{"thinkingConfig":{"thinkingLevel":"high"}}}`)
+	if got := ResolveWireFromBody("gemini-3.1-pro-low", body); got != "gemini-3.1-pro-low" {
+		t.Errorf("suffix should win: got %q want gemini-3.1-pro-low", got)
+	}
+}

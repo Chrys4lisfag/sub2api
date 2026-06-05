@@ -167,6 +167,11 @@ var geminiModels = []modelDef{
 	{ID: "gemini-2.5-flash-lite", DisplayName: "Gemini 2.5 Flash Lite", CreatedAt: "2025-01-01T00:00:00Z"},
 	{ID: "gemini-2.5-flash-thinking", DisplayName: "Gemini 2.5 Flash Thinking", CreatedAt: "2025-01-01T00:00:00Z"},
 	{ID: "gemini-3-flash", DisplayName: "Gemini 3 Flash", CreatedAt: "2025-06-01T00:00:00Z"},
+	// Suffixless picker entry — body's thinkingConfig.thinkingLevel picks
+	// the wire variant (low → gemini-3.1-pro-low, high → gemini-pro-agent).
+	// Lets omp ship a single picker entry whose slider chooses the tier,
+	// mirroring the Gemini 3.5 Flash slider pattern.
+	{ID: "gemini-3.1-pro", DisplayName: "Gemini 3.1 Pro", CreatedAt: "2026-02-19T00:00:00Z"},
 	{ID: "gemini-3.1-pro-low", DisplayName: "Gemini 3.1 Pro Low", CreatedAt: "2026-02-19T00:00:00Z"},
 	{ID: "gemini-3.1-pro-high", DisplayName: "Gemini 3.1 Pro High", CreatedAt: "2026-02-19T00:00:00Z"},
 	{ID: "gemini-3.1-flash-image", DisplayName: "Gemini 3.1 Flash Image", CreatedAt: "2026-02-19T00:00:00Z"},
