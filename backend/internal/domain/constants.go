@@ -114,7 +114,12 @@ var DefaultAntigravityModelMapping = map[string]string{
 	// 不再在白名单中暴露；管理员配置中保留的旧名称会原样转发并触发上游错误。
 	// Gemini 3 preview 映射 → 已合并入 3.1 Pro
 	"gemini-3-flash-preview": "gemini-3-flash",
-	// Gemini 3.1 白名单
+	// Gemini 3.1 白名单 — base name + suffixed variants. The base name lets
+	// upstream clients (omp etc) ship a single picker entry whose thinking
+	// slider drives the wire model via pkg/antigravity/wire_model.go::
+	// ResolveWireFromBody (body.thinkingLevel → wire variant). Suffixed
+	// variants stay so callers that pin a tier still work.
+	"gemini-3.1-pro":      "gemini-3.1-pro",
 	"gemini-3.1-pro-high": "gemini-3.1-pro-high",
 	"gemini-3.1-pro-low":  "gemini-3.1-pro-low",
 	// Gemini 3.1 preview 映射
