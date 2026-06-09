@@ -562,6 +562,7 @@ export interface SystemSettings {
   openai_codex_user_agent: string;
   openai_allow_claude_code_codex_plugin: boolean;
   antigravity_native_mcp_discovery_mode: "prompt" | "list_tool" | "both";
+  antigravity_native_tool_call_mode: "single_name" | "agy_mimic";
   antigravity_native_mcp_aggregator_name: string;
   chat_history_enabled: boolean;
   chat_history_max_bytes: number;
@@ -802,6 +803,7 @@ export interface UpdateSettingsRequest {
   openai_codex_user_agent?: string;
   openai_allow_claude_code_codex_plugin?: boolean;
   antigravity_native_mcp_discovery_mode?: "prompt" | "list_tool" | "both";
+  antigravity_native_tool_call_mode?: "single_name" | "agy_mimic";
   antigravity_native_mcp_aggregator_name?: string;
   chat_history_enabled?: boolean;
   chat_history_max_bytes?: number;

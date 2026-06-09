@@ -143,6 +143,16 @@ func (s *AntigravityNativeGatewayService) resolveMcpDiscoveryMode(ctx context.Co
 	return s.settingService.GetAntigravityNativeMcpDiscoveryMode(ctx)
 }
 
+// resolveToolCallMode returns the GLOBAL tool-call mode for this
+// request ("single_name" default / "agy_mimic"). Global-only setting.
+// Resolution: cached setting → default "single_name".
+func (s *AntigravityNativeGatewayService) resolveToolCallMode(ctx context.Context) string {
+	if s.settingService == nil {
+		return ToolCallModeSingleName
+	}
+	return s.settingService.GetAntigravityNativeToolCallMode(ctx)
+}
+
 // modeDeclaresListTool reports whether the given discovery mode causes
 // agy_list_tools to be declared upstream + loop-detected.
 func modeDeclaresListTool(mode string) bool {
@@ -337,7 +347,8 @@ func (s *AntigravityNativeGatewayService) ForwardGemini(
 	useAggregator := accountToolAggregatorEnabled(account)
 	aggregatorName := s.resolveMcpAggregatorName(ctx, account)
 	discoveryMode := s.resolveMcpDiscoveryMode(ctx)
-	body, toolReport, err := preprocessNativeBody(body, useAggregator, aggregatorName, discoveryMode)
+	toolCallMode := s.resolveToolCallMode(ctx)
+	body, toolReport, err := preprocessNativeBody(body, useAggregator, aggregatorName, discoveryMode, toolCallMode)
 	if err != nil {
 		return nil, fmt.Errorf("native gemini: tool preprocess: %w", err)
 	}
@@ -350,6 +361,7 @@ func (s *AntigravityNativeGatewayService) ForwardGemini(
 		slog.String("model", originalModel),
 		slog.String("wire_model", wireModel),
 		slog.Bool("stream", stream),
+		slog.String("tool_call_mode", toolCallMode),
 		slog.String("discovery_mode", discoveryMode),
 		slog.String("aggregator_name", aggregatorName),
 		slog.Bool("aggregator_on", toolReport.AggregatorOn),

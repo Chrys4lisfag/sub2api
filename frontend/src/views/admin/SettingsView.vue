@@ -3980,6 +3980,32 @@
                 </p>
               </div>
 
+              <!-- Antigravity Native: MCP tool-call mode (single_name vs agy_mimic) -->
+              <div>
+                <label class="block text-sm font-medium text-gray-700 dark:text-gray-300">
+                  Antigravity Native: MCP tool-call mode
+                </label>
+                <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">
+                  Controls whether <code class="rounded bg-gray-100 px-1 dark:bg-dark-700">mcp__&lt;server&gt;_&lt;tool&gt;</code> declarations pass through to upstream verbatim or are hidden behind the <code class="rounded bg-gray-100 px-1 dark:bg-dark-700">call_mcp_tool</code> aggregator. Default <code class="rounded bg-gray-100 px-1 dark:bg-dark-700">single_name</code> (recommended). The <code class="rounded bg-gray-100 px-1 dark:bg-dark-700">call_mcp_tool</code> + <code class="rounded bg-gray-100 px-1 dark:bg-dark-700">agy_list_tools</code> server-side bridges work in BOTH modes.
+                </p>
+                <div class="mt-3 space-y-2">
+                  <label class="flex cursor-pointer items-start gap-3 rounded-lg border border-gray-200 p-3 hover:bg-gray-50 dark:border-dark-600 dark:hover:bg-dark-700">
+                    <input type="radio" v-model="form.antigravity_native_tool_call_mode" value="single_name" class="mt-1" />
+                    <div>
+                      <div class="text-sm font-medium text-gray-900 dark:text-white">Single name (recommended)</div>
+                      <div class="text-xs text-gray-500 dark:text-gray-400">mcp__&lt;server&gt;_&lt;tool&gt; declarations stay in upstream tools list (schema-normalized) so the model emits direct calls. call_mcp_tool + agy_list_tools are ALSO declared as fallback aggregators. Eliminates split-paraphrase failures. Short instruction block injected in systemInstruction.</div>
+                    </div>
+                  </label>
+                  <label class="flex cursor-pointer items-start gap-3 rounded-lg border border-gray-200 p-3 hover:bg-gray-50 dark:border-dark-600 dark:hover:bg-dark-700">
+                    <input type="radio" v-model="form.antigravity_native_tool_call_mode" value="agy_mimic" class="mt-1" />
+                    <div>
+                      <div class="text-sm font-medium text-gray-900 dark:text-white">Agy mimic (legacy)</div>
+                      <div class="text-xs text-gray-500 dark:text-gray-400">Strip mcp__* from declarations; only call_mcp_tool + agy_list_tools exposed. Full per-server catalog enumeration injected in systemInstruction. Matches real agy.exe wire format. Use when fingerprint parity matters or your MCP tool count is small enough that split aggregation works reliably.</div>
+                    </div>
+                  </label>
+                </div>
+              </div>
+
               <!-- Antigravity Native: MCP discovery mode (replaces old agy_list_tools toggle) -->
               <div>
                 <label class="block text-sm font-medium text-gray-700 dark:text-gray-300">
@@ -7286,6 +7312,7 @@ const form = reactive<SettingsForm>({
   openai_codex_user_agent: "",
   openai_allow_claude_code_codex_plugin: false,
   antigravity_native_mcp_discovery_mode: "both" as "prompt" | "list_tool" | "both",
+  antigravity_native_tool_call_mode: "single_name" as "single_name" | "agy_mimic",
   antigravity_native_mcp_aggregator_name: "",
   chat_history_enabled: true,
   chat_history_max_bytes: 524288000,
@@ -8398,6 +8425,7 @@ async function saveSettings() {
         form.openai_codex_user_agent?.trim() || "",
       openai_allow_claude_code_codex_plugin: form.openai_allow_claude_code_codex_plugin,
       antigravity_native_mcp_discovery_mode: form.antigravity_native_mcp_discovery_mode,
+      antigravity_native_tool_call_mode: form.antigravity_native_tool_call_mode,
       antigravity_native_mcp_aggregator_name:
         form.antigravity_native_mcp_aggregator_name?.trim() || "",
       chat_history_enabled: form.chat_history_enabled,

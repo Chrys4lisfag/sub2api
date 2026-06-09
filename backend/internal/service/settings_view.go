@@ -197,6 +197,7 @@ type SystemSettings struct {
 	OpenAICodexUserAgent               string // OpenAI Codex 上游完整 User-Agent；空值使用内置默认
 	OpenAIAllowClaudeCodeCodexPlugin   bool   // 全局开关：是否额外放行 Claude Code 的 Codex 插件（默认 false）
 	AntigravityNativeMcpDiscoveryMode  string // 全局：MCP 发现策略；"prompt"|"list_tool"|"both"；默认 "both"
+	AntigravityNativeToolCallMode      string // 全局：MCP 调用模式；"single_name"|"agy_mimic"；默认 "single_name"
 	AntigravityNativeMcpAggregatorName string // 全局默认 MCP 聚合器函数名；空值 → "call_mcp_tool"（agy 真机默认）
 	ChatHistoryEnabled                 bool   // 全局开关：是否记录 chat history（默认 true）
 	ChatHistoryMaxBytes                int64  // chat history 目录总字节上限（默认 524288000 = 500 MiB）

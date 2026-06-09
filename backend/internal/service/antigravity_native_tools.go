@@ -23,20 +23,39 @@ import (
 	"strings"
 )
 
-// applyToolPreprocessing runs both the schema normalizer and (if enabled
-// for this account) the MCP aggregator. Mutates `inner` in place.
+// applyToolPreprocessing runs the schema normalizer + the tool-call-mode-
+// driven preprocessing pipeline. Mutates `inner` in place.
+//
+// Modes:
+//
+//   "single_name" — mcp__<server>_<tool> declarations stay in the tools
+//                   list (schema-normalized). call_mcp_tool +
+//                   agy_list_tools are ALSO declared alongside so the
+//                   model has the three valid call paths. A short
+//                   single-name-mode instruction block is injected into
+//                   systemInstruction. No full catalog enumeration —
+//                   the declarations already carry tool names + schemas.
+//
+//   "agy_mimic"   — mcp__* stripped from declarations; only call_mcp_tool
+//                   (and agy_list_tools when discovery_mode allows) is
+//                   exposed. Full per-server catalog enumeration injected
+//                   in systemInstruction. Matches real agy.exe wire.
 //
 // `aggregatorName` is the function name model emits to reach the
-// aggregator. Defaults to "call_mcp_tool" (agy parity) when empty.
+// call_mcp_tool aggregator. Defaults to "call_mcp_tool" (agy parity).
 //
-// Returns a small report describing what was changed, useful for logging
-// and for the back-translation step in the response stream.
-func applyToolPreprocessing(inner map[string]any, useAggregator bool, aggregatorName string, discoveryMode string) toolPrepReport {
+// `discoveryMode` ("prompt" / "list_tool" / "both") controls whether
+// agy_list_tools is declared and the agy_mimic catalog form. Works in
+// both tool-call modes.
+func applyToolPreprocessing(inner map[string]any, useAggregator bool, aggregatorName, discoveryMode, toolCallMode string) toolPrepReport {
 	if aggregatorName == "" {
 		aggregatorName = defaultMcpAggregatorName
 	}
 	if discoveryMode == "" {
 		discoveryMode = "both"
+	}
+	if toolCallMode == "" {
+		toolCallMode = "single_name"
 	}
 	report := toolPrepReport{
 		Normalized:     0,
@@ -45,6 +64,7 @@ func applyToolPreprocessing(inner map[string]any, useAggregator bool, aggregator
 		AggregatorOn:   useAggregator,
 		AggregatorName: aggregatorName,
 		DiscoveryMode:  discoveryMode,
+		ToolCallMode:   toolCallMode,
 	}
 	if inner == nil {
 		return report
@@ -53,10 +73,10 @@ func applyToolPreprocessing(inner map[string]any, useAggregator bool, aggregator
 	if !ok || len(toolsAny) == 0 {
 		return report
 	}
-	// Mode flags (matches gateway helpers; duplicated here to avoid an
-	// import cycle between tool-prep and gateway packages).
+	// Mode flags (duplicated here to avoid an import cycle).
 	declaresListTool := discoveryMode == "list_tool" || discoveryMode == "both"
 	injectsCatalog := discoveryMode == "prompt" || discoveryMode == "both"
+	stripMcp := toolCallMode == "agy_mimic"
 
 	for _, t := range toolsAny {
 		tool, ok := t.(map[string]any)
@@ -76,10 +96,24 @@ func applyToolPreprocessing(inner map[string]any, useAggregator bool, aggregator
 			}
 			name, _ := fd["name"].(string)
 			if useAggregator && strings.HasPrefix(name, "mcp__") {
+				// Always record in report — rewriter + resolver need this
+				// list in BOTH modes (to translate any call_mcp_tool the
+				// model emits and to validate direct mcp__* calls).
 				report.McpTools = append(report.McpTools, mcpToolHandle{
 					FullName: name,
 					Decl:     fd,
 				})
+				if stripMcp {
+					// agy_mimic — hide mcp__* from upstream model so the
+					// only path to MCP is through call_mcp_tool.
+					continue
+				}
+				// single_name — schema-normalize and keep in declarations
+				// so the model can emit `mcp__<server>_<tool>` directly.
+				if convertFunctionDeclarationSchema(fd) {
+					report.Normalized++
+				}
+				kept = append(kept, fd)
 				continue
 			}
 			report.BuiltinTools = append(report.BuiltinTools, name)
@@ -89,12 +123,10 @@ func applyToolPreprocessing(inner map[string]any, useAggregator bool, aggregator
 			kept = append(kept, fd)
 		}
 		if useAggregator && len(report.McpTools) > 0 {
+			// call_mcp_tool aggregator: declared in BOTH modes so the
+			// model has a fallback when it can't recall an exact mcp__*
+			// name (single_name) or as the only path (agy_mimic).
 			kept = append(kept, buildCallMcpToolDecl(aggregatorName))
-			// Declare agy_list_tools upfront so the model sees it on the
-			// VERY FIRST turn and can choose to call it for discovery.
-			// Prior versions injected this only inside the running loop,
-			// creating a chicken-and-egg where the model never knew the
-			// tool existed and therefore never called it.
 			if declaresListTool {
 				kept = append(kept, buildAgyListToolsDecl())
 			}
@@ -102,7 +134,16 @@ func applyToolPreprocessing(inner map[string]any, useAggregator bool, aggregator
 		tool["functionDeclarations"] = kept
 	}
 	if useAggregator && len(report.McpTools) > 0 {
-		injectMcpCatalogIntoSystemInstruction(inner, report.McpTools, aggregatorName, discoveryMode, injectsCatalog, declaresListTool)
+		if stripMcp {
+			// agy_mimic — full per-server catalog enumeration because
+			// the model has no other way to discover what's available.
+			injectMcpCatalogIntoSystemInstruction(inner, report.McpTools, aggregatorName, discoveryMode, injectsCatalog, declaresListTool)
+		} else {
+			// single_name — short instruction block. Tools self-describe
+			// in declarations; we only need to tell the model HOW to
+			// reach them and remind it of the fallback paths.
+			injectSingleNameInstructionsIntoSystemInstruction(inner, aggregatorName, declaresListTool)
+		}
 	}
 	return report
 }
@@ -118,6 +159,7 @@ type toolPrepReport struct {
 	AggregatorOn   bool
 	AggregatorName string // function name model uses to invoke aggregator (default "call_mcp_tool")
 	DiscoveryMode  string // "prompt" | "list_tool" | "both"
+	ToolCallMode   string // "single_name" | "agy_mimic"
 }
 
 // mcpToolHandle remembers an MCP tool's original name + declaration so
@@ -817,6 +859,129 @@ func injectMcpCatalogIntoSystemInstruction(inner map[string]any, mcpTools []mcpT
 	first["text"] = catalog + "\n\n" + existingText
 	parts[0] = first
 	sys["parts"] = parts
+}
+
+// ---------------------------------------------------------------------------
+// single_name mode — short instruction block
+// ---------------------------------------------------------------------------
+
+const (
+	singleNameInstructionsStartMarker = "## MCP TOOLS ##"
+	singleNameInstructionsEndMarker   = "## END MCP TOOLS ##"
+)
+
+// injectSingleNameInstructionsIntoSystemInstruction prepends a SHORT
+// instruction block to systemInstruction explaining the three valid
+// MCP call paths in single_name mode:
+//
+//  1. Direct emission of mcp__<server>_<tool> functionCall (preferred —
+//     these tools are visible in the declarations already)
+//  2. call_mcp_tool({ServerName, ToolName, Arguments}) — fallback when
+//     the model is uncertain about the exact name
+//  3. agy_list_tools(server?) — discovery / verification
+//
+// No full catalog enumeration because the model already sees every
+// mcp__* tool in its declarations. The instructions exist purely to
+// remind the model of the fallback aggregators + anti-fallback rules
+// (no Python eval, no paramiko, no bash for MCP-served services).
+//
+// Idempotent: re-injection on the same systemInstruction is a no-op
+// (we check for the start marker before prepending).
+func injectSingleNameInstructionsIntoSystemInstruction(inner map[string]any, aggregatorName string, declaresListTool bool) {
+	if inner == nil {
+		return
+	}
+	if aggregatorName == "" {
+		aggregatorName = defaultMcpAggregatorName
+	}
+	text := buildSingleNameInstructions(aggregatorName, declaresListTool)
+	if text == "" {
+		return
+	}
+
+	sysAny, has := inner["systemInstruction"]
+	if !has {
+		inner["systemInstruction"] = map[string]any{
+			"role":  "user",
+			"parts": []any{map[string]any{"text": text}},
+		}
+		return
+	}
+	sys, ok := sysAny.(map[string]any)
+	if !ok {
+		inner["systemInstruction"] = map[string]any{
+			"role":  "user",
+			"parts": []any{map[string]any{"text": text}},
+		}
+		return
+	}
+	parts, _ := sys["parts"].([]any)
+	if len(parts) == 0 {
+		sys["parts"] = []any{map[string]any{"text": text}}
+		return
+	}
+	first, _ := parts[0].(map[string]any)
+	if first == nil {
+		parts[0] = map[string]any{"text": text}
+		sys["parts"] = parts
+		return
+	}
+	existingText, _ := first["text"].(string)
+	if strings.Contains(existingText, singleNameInstructionsStartMarker) {
+		return
+	}
+	first["text"] = text + "\n\n" + existingText
+	parts[0] = first
+	sys["parts"] = parts
+}
+
+// buildSingleNameInstructions composes the short single_name-mode
+// instruction block. Always smaller than ~1 KB regardless of MCP tool
+// count (tools self-describe in declarations; this text only points
+// the model at the right paths).
+func buildSingleNameInstructions(aggregatorName string, declaresListTool bool) string {
+	if aggregatorName == "" {
+		aggregatorName = defaultMcpAggregatorName
+	}
+	var b strings.Builder
+	b.WriteString(singleNameInstructionsStartMarker)
+	b.WriteByte('\n')
+	b.WriteString("You have direct access to MCP (Model Context Protocol) tools as\n")
+	b.WriteString("`mcp__<server>_<tool>` function declarations in your toolset.\n")
+	b.WriteString("PREFER calling them directly by name — this is the canonical path.\n\n")
+
+	b.WriteString("Server-side fallback aggregators are also declared:\n\n")
+	b.WriteString("1. `")
+	b.WriteString(aggregatorName)
+	b.WriteString("(ServerName, ToolName, Arguments)` — emit when you cannot\n")
+	b.WriteString("   confidently recall the exact mcp__ name. The server translates\n")
+	b.WriteString("   the split form to the corresponding mcp__<server>_<tool> call\n")
+	b.WriteString("   before dispatching, with fuzzy resolution for paraphrased\n")
+	b.WriteString("   server / tool names.\n\n")
+
+	if declaresListTool {
+		b.WriteString("2. `agy_list_tools(server?)` — emit to verify a tool exists or to\n")
+		b.WriteString("   inspect its argument schema. Returns the authoritative\n")
+		b.WriteString("   server-side catalog as a functionResponse. Pass an optional\n")
+		b.WriteString("   `server` argument to scope to one server's tools.\n\n")
+	}
+
+	b.WriteString("INVOCATION RULES:\n")
+	b.WriteString("- All three paths MUST be invoked as TOP-LEVEL functionCalls.\n")
+	b.WriteString("- NEVER call `tool.")
+	b.WriteString(aggregatorName)
+	b.WriteString("(...)` or `tool.agy_list_tools(...)`\n")
+	b.WriteString("  inside `eval`/Python code cells — that path is not wired and\n")
+	b.WriteString("  will hang or return tool-not-found.\n\n")
+
+	b.WriteString("ANTI-FALLBACK RULE: never use `eval`/Python/paramiko/bash/subprocess\n")
+	b.WriteString("to talk to services that have MCP servers registered. If you have\n")
+	b.WriteString("opened or used a server, assume it has additional tools (command\n")
+	b.WriteString("execution, terminal output, file ops, ...) and prefer those over\n")
+	b.WriteString("a client-side workaround.\n\n")
+
+	b.WriteString(singleNameInstructionsEndMarker)
+	return b.String()
 }
 
 const (

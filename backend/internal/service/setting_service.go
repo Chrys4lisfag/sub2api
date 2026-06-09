@@ -168,6 +168,19 @@ const antigravityNativeMcpDiscoveryModeCacheTTL = 60 * time.Second
 const antigravityNativeMcpDiscoveryModeErrorTTL = 5 * time.Second
 const antigravityNativeMcpDiscoveryModeDBTimeout = 5 * time.Second
 
+// cachedAntigravityNativeToolCallMode — 60s TTL cache for the
+// global MCP tool-call mode enum. Read on every native gateway request
+// to decide whether mcp__* declarations pass through (single_name) or
+// get stripped + replaced with the call_mcp_tool aggregator (agy_mimic).
+type cachedAntigravityNativeToolCallMode struct {
+	value     string // "single_name" | "agy_mimic"
+	expiresAt int64
+}
+
+const antigravityNativeToolCallModeCacheTTL = 60 * time.Second
+const antigravityNativeToolCallModeErrorTTL = 5 * time.Second
+const antigravityNativeToolCallModeDBTimeout = 5 * time.Second
+
 // cachedChatHistoryEnabled — 60s TTL cache for the chat-history global
 // enabled toggle. Hot-path check before building log entries.
 type cachedChatHistoryEnabled struct {
@@ -230,6 +243,8 @@ type SettingService struct {
 	openAIAllowCodexPluginCache atomic.Value // *cachedOpenAIAllowCodexPlugin
 	antigravityNativeMcpDiscoveryModeCache atomic.Value // *cachedAntigravityNativeMcpDiscoveryMode
 	antigravityNativeMcpDiscoveryModeSF    singleflight.Group
+	antigravityNativeToolCallModeCache atomic.Value // *cachedAntigravityNativeToolCallMode
+	antigravityNativeToolCallModeSF    singleflight.Group
 	chatHistoryEnabledCache  atomic.Value // *cachedChatHistoryEnabled
 	chatHistoryEnabledSF     singleflight.Group
 	chatHistoryMaxBytesCache atomic.Value // *cachedChatHistoryMaxBytes
@@ -1242,6 +1257,72 @@ func normalizeMcpDiscoveryMode(v string) string {
 	return ""
 }
 
+// Tool call mode constants.
+const (
+	ToolCallModeSingleName = "single_name"
+	ToolCallModeAgyMimic   = "agy_mimic"
+)
+
+// GetAntigravityNativeToolCallMode returns the effective tool-call mode
+// for upstream MCP routing. Default "single_name" (recommended) —
+// passes mcp__<server>_<tool> declarations through to upstream and lets
+// the model emit direct calls. "agy_mimic" matches real agy.exe wire
+// format (strip mcp__*, force-route through call_mcp_tool aggregator).
+//
+// Cached with 60s TTL via atomic.Value + singleflight. Invalid stored
+// values silently fall back to the default so admin typos can't break
+// the gateway.
+func (s *SettingService) GetAntigravityNativeToolCallMode(ctx context.Context) string {
+	const defaultMode = ToolCallModeSingleName
+	if cached, ok := s.antigravityNativeToolCallModeCache.Load().(*cachedAntigravityNativeToolCallMode); ok && cached != nil {
+		if time.Now().UnixNano() < cached.expiresAt {
+			return cached.value
+		}
+	}
+	result, _, _ := s.antigravityNativeToolCallModeSF.Do("antigravity_native_tool_call_mode", func() (any, error) {
+		if cached, ok := s.antigravityNativeToolCallModeCache.Load().(*cachedAntigravityNativeToolCallMode); ok && cached != nil {
+			if time.Now().UnixNano() < cached.expiresAt {
+				return cached.value, nil
+			}
+		}
+		dbCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), antigravityNativeToolCallModeDBTimeout)
+		defer cancel()
+		value, err := s.settingRepo.GetValue(dbCtx, SettingKeyAntigravityNativeToolCallMode)
+		mode := normalizeToolCallMode(value)
+		if err == nil && mode != "" {
+			s.antigravityNativeToolCallModeCache.Store(&cachedAntigravityNativeToolCallMode{
+				value:     mode,
+				expiresAt: time.Now().Add(antigravityNativeToolCallModeCacheTTL).UnixNano(),
+			})
+			return mode, nil
+		}
+		if err != nil && !errors.Is(err, ErrSettingNotFound) {
+			slog.Warn("failed to get antigravity_native_tool_call_mode setting", "error", err)
+		}
+		s.antigravityNativeToolCallModeCache.Store(&cachedAntigravityNativeToolCallMode{
+			value:     defaultMode,
+			expiresAt: time.Now().Add(antigravityNativeToolCallModeCacheTTL).UnixNano(),
+		})
+		return defaultMode, nil
+	})
+	if val, ok := result.(string); ok && val != "" {
+		return val
+	}
+	return defaultMode
+}
+
+// normalizeToolCallMode validates + canonicalizes the enum value.
+// Returns "" when input is not a recognized mode (caller falls back).
+func normalizeToolCallMode(v string) string {
+	switch strings.ToLower(strings.TrimSpace(v)) {
+	case ToolCallModeSingleName, "single-name", "passthrough", "direct":
+		return ToolCallModeSingleName
+	case ToolCallModeAgyMimic, "agy-mimic", "agy", "mimic", "aggregator":
+		return ToolCallModeAgyMimic
+	}
+	return ""
+}
+
 // IsChatHistoryEnabled returns the global chat-history toggle.
 // Default true (recommended on for diagnostic value). Cached with 60s
 // TTL. Per-account opt-out via AccountAllowsChatHistory.
@@ -2202,6 +2283,15 @@ func (s *SettingService) buildSystemSettingsUpdates(ctx context.Context, setting
 		}
 		updates[SettingKeyAntigravityNativeMcpDiscoveryMode] = mode
 	}
+	{
+		// Write the canonical tool-call-mode enum; normalize to default
+		// (single_name) when caller supplied an unrecognized string.
+		mode := normalizeToolCallMode(settings.AntigravityNativeToolCallMode)
+		if mode == "" {
+			mode = ToolCallModeSingleName
+		}
+		updates[SettingKeyAntigravityNativeToolCallMode] = mode
+	}
 	updates[SettingKeyChatHistoryEnabled] = strconv.FormatBool(settings.ChatHistoryEnabled)
 	{
 		mb := settings.ChatHistoryMaxBytes
@@ -2390,6 +2480,17 @@ func (s *SettingService) refreshCachedSettings(settings *SystemSettings) {
 		s.antigravityNativeMcpDiscoveryModeCache.Store(&cachedAntigravityNativeMcpDiscoveryMode{
 			value:     mode,
 			expiresAt: time.Now().Add(antigravityNativeMcpDiscoveryModeCacheTTL).UnixNano(),
+		})
+	}
+	s.antigravityNativeToolCallModeSF.Forget("antigravity_native_tool_call_mode")
+	{
+		mode := normalizeToolCallMode(settings.AntigravityNativeToolCallMode)
+		if mode == "" {
+			mode = ToolCallModeSingleName
+		}
+		s.antigravityNativeToolCallModeCache.Store(&cachedAntigravityNativeToolCallMode{
+			value:     mode,
+			expiresAt: time.Now().Add(antigravityNativeToolCallModeCacheTTL).UnixNano(),
 		})
 	}
 	s.chatHistoryEnabledSF.Forget("chat_history_enabled")
@@ -3165,6 +3266,7 @@ func (s *SettingService) InitializeDefaultSettings(ctx context.Context) error {
 		SettingKeyAntigravityUserAgentVersion:        "",
 		SettingKeyOpenAICodexUserAgent:               "",
 		SettingKeyAntigravityNativeMcpDiscoveryMode:  McpDiscoveryModeBoth,
+		SettingKeyAntigravityNativeToolCallMode:      ToolCallModeSingleName,
 		SettingKeyChatHistoryEnabled:                 "true",
 		SettingKeyChatHistoryMaxBytes:                strconv.FormatInt(chatHistoryDefaultMaxBytes, 10),
 		SettingKeyAntigravityNativeMcpAggregatorName: "",
@@ -3709,6 +3811,14 @@ func (s *SettingService) parseSettings(settings map[string]string) *SystemSettin
 			mode = McpDiscoveryModeBoth
 		}
 		result.AntigravityNativeMcpDiscoveryMode = mode
+	}
+	{
+		raw := strings.TrimSpace(settings[SettingKeyAntigravityNativeToolCallMode])
+		mode := normalizeToolCallMode(raw)
+		if mode == "" {
+			mode = ToolCallModeSingleName
+		}
+		result.AntigravityNativeToolCallMode = mode
 	}
 	{
 		raw := strings.TrimSpace(settings[SettingKeyChatHistoryEnabled])

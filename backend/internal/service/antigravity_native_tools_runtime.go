@@ -38,24 +38,37 @@ import (
 //
 // On JSON parse error: returns the original body unchanged + a zero
 // report. We never block a request on preprocessing failure.
-func preprocessNativeBody(body []byte, useAggregator bool, aggregatorName string, discoveryMode string) ([]byte, toolPrepReport, error) {
+func preprocessNativeBody(body []byte, useAggregator bool, aggregatorName, discoveryMode, toolCallMode string) ([]byte, toolPrepReport, error) {
 	if aggregatorName == "" {
 		aggregatorName = defaultMcpAggregatorName
 	}
 	if discoveryMode == "" {
 		discoveryMode = "both"
 	}
+	if toolCallMode == "" {
+		toolCallMode = "single_name"
+	}
 	if len(body) == 0 {
-		return body, toolPrepReport{AggregatorOn: useAggregator, AggregatorName: aggregatorName, DiscoveryMode: discoveryMode}, nil
+		return body, toolPrepReport{
+			AggregatorOn:   useAggregator,
+			AggregatorName: aggregatorName,
+			DiscoveryMode:  discoveryMode,
+			ToolCallMode:   toolCallMode,
+		}, nil
 	}
 	var inner map[string]any
 	if err := json.Unmarshal(body, &inner); err != nil {
-		return body, toolPrepReport{AggregatorOn: useAggregator, AggregatorName: aggregatorName, DiscoveryMode: discoveryMode}, nil
+		return body, toolPrepReport{
+			AggregatorOn:   useAggregator,
+			AggregatorName: aggregatorName,
+			DiscoveryMode:  discoveryMode,
+			ToolCallMode:   toolCallMode,
+		}, nil
 	}
 	if r, ok := inner["request"].(map[string]any); ok && len(inner) == 1 {
 		inner = r
 	}
-	report := applyToolPreprocessing(inner, useAggregator, aggregatorName, discoveryMode)
+	report := applyToolPreprocessing(inner, useAggregator, aggregatorName, discoveryMode, toolCallMode)
 	out, err := json.Marshal(inner)
 	if err != nil {
 		return body, report, nil

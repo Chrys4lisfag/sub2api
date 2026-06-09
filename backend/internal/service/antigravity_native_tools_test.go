@@ -90,7 +90,7 @@ func TestPreprocess_NoMcp_NoAggregator(t *testing.T) {
 		{"name":"find","parametersJsonSchema":{"type":"object","properties":{"paths":{"type":"array","items":{"type":"string"}}},"required":["paths"]}},
 		{"name":"read","parametersJsonSchema":{"type":"object","properties":{"path":{"type":"string"}},"required":["path"]}}
 	]}]}`)
-	out, report, err := preprocessNativeBody(body, false, "", "both")
+	out, report, err := preprocessNativeBody(body, false, "", "both", "single_name")
 	if err != nil {
 		t.Fatalf("unexpected err: %v", err)
 	}
@@ -125,7 +125,7 @@ func TestPreprocess_McpAggregator(t *testing.T) {
 		{"name":"mcp__github_official_create_issue","description":"New issue","parametersJsonSchema":{"type":"object","properties":{"owner":{"type":"string"},"repo":{"type":"string"},"title":{"type":"string"}}}},
 		{"name":"mcp__ida_orchestrator_read_memory","description":"Read mem","parametersJsonSchema":{"type":"object","properties":{"regions":{"type":"array"}}}}
 	]}]}`)
-	out, report, err := preprocessNativeBody(body, true, "", "both")
+	out, report, err := preprocessNativeBody(body, true, "", "both", "agy_mimic")
 	if err != nil {
 		t.Fatalf("unexpected err: %v", err)
 	}
@@ -416,7 +416,7 @@ func TestPreprocess_CustomAggregatorName(t *testing.T) {
 	body := []byte(`{"contents":[],"tools":[{"functionDeclarations":[
 		{"name":"mcp__github_official_get_pull_request","description":"Get PR","parametersJsonSchema":{"type":"object","properties":{"owner":{"type":"string"}}}}
 	]}]}`)
-	out, report, err := preprocessNativeBody(body, true, "agy_call_mcp_tool", "both")
+	out, report, err := preprocessNativeBody(body, true, "agy_call_mcp_tool", "both", "agy_mimic")
 	if err != nil {
 		t.Fatalf("unexpected err: %v", err)
 	}
@@ -548,5 +548,148 @@ func TestNearestMcpHandles_EmptyOnEmptyReport(t *testing.T) {
 	r := toolPrepReport{}
 	if got := r.nearestMcpHandles("ida", "x", 5); got != nil {
 		t.Errorf("empty report should return nil, got %v", got)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// single_name mode (default) — mcp__* declarations pass through alongside
+// call_mcp_tool + agy_list_tools fallback aggregators
+// ---------------------------------------------------------------------------
+
+// TestPreprocess_SingleNameKeepsMcpDeclarations verifies the new default
+// mode: mcp__* tools stay in declarations (schema-normalized) so the
+// model can emit them directly, with call_mcp_tool + agy_list_tools
+// declared alongside as fallback aggregators.
+func TestPreprocess_SingleNameKeepsMcpDeclarations(t *testing.T) {
+	body := []byte(`{"contents":[],"tools":[{"functionDeclarations":[
+		{"name":"find","parametersJsonSchema":{"type":"object","properties":{"paths":{"type":"array","items":{"type":"string"}}}}},
+		{"name":"mcp__github_official_get_pull_request","description":"Get PR","parametersJsonSchema":{"type":"object","properties":{"owner":{"type":"string"}}}},
+		{"name":"mcp__electerm_list_electerm_bookmarks","description":"list","parametersJsonSchema":{"type":"object","properties":{}}}
+	]}]}`)
+	out, report, err := preprocessNativeBody(body, true, "", "both", "single_name")
+	if err != nil {
+		t.Fatalf("unexpected err: %v", err)
+	}
+	if report.ToolCallMode != "single_name" {
+		t.Errorf("expected report.ToolCallMode=single_name, got %q", report.ToolCallMode)
+	}
+	if len(report.McpTools) != 2 {
+		t.Errorf("expected 2 mcp tools recorded, got %d", len(report.McpTools))
+	}
+	outStr := string(out)
+	// mcp__* declarations MUST remain in the outbound body.
+	for _, want := range []string{
+		`"name":"mcp__github_official_get_pull_request"`,
+		`"name":"mcp__electerm_list_electerm_bookmarks"`,
+	} {
+		if !strings.Contains(outStr, want) {
+			t.Errorf("missing direct decl %s in single_name mode", want)
+		}
+	}
+	// call_mcp_tool aggregator MUST also be present as fallback.
+	if !strings.Contains(outStr, `"name":"call_mcp_tool"`) {
+		t.Errorf("call_mcp_tool fallback missing: %s", outStr)
+	}
+	// agy_list_tools MUST also be present when discovery_mode allows.
+	if !strings.Contains(outStr, `"name":"agy_list_tools"`) {
+		t.Errorf("agy_list_tools fallback missing: %s", outStr)
+	}
+	// Schemas normalized — no parametersJsonSchema leak.
+	if strings.Contains(outStr, "parametersJsonSchema") {
+		t.Errorf("parametersJsonSchema should be normalized to parameters")
+	}
+	// Short instructions block injected, NOT the full catalog form.
+	if !strings.Contains(outStr, singleNameInstructionsStartMarker) {
+		t.Errorf("single_name instructions marker missing")
+	}
+	if strings.Contains(outStr, mcpCatalogStartMarker) {
+		t.Errorf("full agy_mimic catalog must NOT be injected in single_name mode")
+	}
+}
+
+// TestPreprocess_SingleNameNoListToolWhenDiscoveryPrompt verifies that
+// when discovery_mode is "prompt" (= no agy_list_tools), the discovery
+// tool is not declared even in single_name mode.
+func TestPreprocess_SingleNameNoListToolWhenDiscoveryPrompt(t *testing.T) {
+	body := []byte(`{"contents":[],"tools":[{"functionDeclarations":[
+		{"name":"mcp__electerm_list_electerm_bookmarks","description":"list","parametersJsonSchema":{"type":"object","properties":{}}}
+	]}]}`)
+	out, _, err := preprocessNativeBody(body, true, "", "prompt", "single_name")
+	if err != nil {
+		t.Fatalf("unexpected err: %v", err)
+	}
+	outStr := string(out)
+	if strings.Contains(outStr, `"name":"agy_list_tools"`) {
+		t.Errorf("agy_list_tools must NOT be declared when discovery_mode=prompt: %s", outStr)
+	}
+	if !strings.Contains(outStr, `"name":"call_mcp_tool"`) {
+		t.Errorf("call_mcp_tool fallback should still be present: %s", outStr)
+	}
+	if !strings.Contains(outStr, `"name":"mcp__electerm_list_electerm_bookmarks"`) {
+		t.Errorf("mcp__ decl should still be present: %s", outStr)
+	}
+}
+
+// TestNormalizeToolCallMode locks the enum canonicalization map.
+func TestNormalizeToolCallMode(t *testing.T) {
+	cases := map[string]string{
+		"single_name":  "single_name",
+		" SINGLE_NAME ": "single_name",
+		"single-name":  "single_name",
+		"passthrough":  "single_name",
+		"direct":       "single_name",
+		"agy_mimic":    "agy_mimic",
+		"agy-mimic":    "agy_mimic",
+		"agy":          "agy_mimic",
+		"mimic":        "agy_mimic",
+		"aggregator":   "agy_mimic",
+		"":             "",
+		"garbage":      "",
+	}
+	for in, want := range cases {
+		if got := normalizeToolCallMode(in); got != want {
+			t.Errorf("normalizeToolCallMode(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+// TestBuildSingleNameInstructions_BasicShape verifies the short
+// instruction block contains the canonical guidance.
+func TestBuildSingleNameInstructions_BasicShape(t *testing.T) {
+	out := buildSingleNameInstructions("call_mcp_tool", true)
+	for _, want := range []string{
+		"## MCP TOOLS ##",
+		"## END MCP TOOLS ##",
+		"mcp__<server>_<tool>",
+		"PREFER calling them directly",
+		"call_mcp_tool(ServerName, ToolName, Arguments)",
+		"agy_list_tools(server?)",
+		"ANTI-FALLBACK RULE",
+		"TOP-LEVEL functionCalls",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("missing %q in single_name instructions:\n%s", want, out)
+		}
+	}
+	// When agy_list_tools is NOT declared, the bullet about it should
+	// be omitted.
+	out2 := buildSingleNameInstructions("call_mcp_tool", false)
+	if strings.Contains(out2, "agy_list_tools(server?)") {
+		t.Errorf("agy_list_tools bullet should be absent when declaresListTool=false:\n%s", out2)
+	}
+}
+
+// TestBuildSingleNameInstructions_CustomAggregatorName threads the
+// configured aggregator name through the instructions.
+func TestBuildSingleNameInstructions_CustomAggregatorName(t *testing.T) {
+	out := buildSingleNameInstructions("agy_call_mcp_tool", true)
+	if !strings.Contains(out, "agy_call_mcp_tool(ServerName, ToolName, Arguments)") {
+		t.Errorf("custom aggregator name not threaded into instructions: %s", out)
+	}
+	// Bare "`call_mcp_tool(" (backtick-prefixed) appears only for the
+	// default name; the custom name appears as "`agy_call_mcp_tool(".
+	// Avoid substring traps where the custom contains the default.
+	if strings.Contains(out, "`call_mcp_tool(") {
+		t.Errorf("default name leaked into instructions when custom configured: %s", out)
 	}
 }

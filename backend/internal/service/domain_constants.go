@@ -450,6 +450,24 @@ const (
 	//   "both"      — 同时注入目录 + 声明 agy_list_tools 作为兜底发现工具（默认/推荐）
 	// 历史兼容：旧的 antigravity_native_list_tools_emulation=true → "both"，false → "prompt"。
 	SettingKeyAntigravityNativeMcpDiscoveryMode = "antigravity_native_mcp_discovery_mode"
+	// SettingKeyAntigravityNativeToolCallMode controls how MCP tool calls
+	// reach upstream:
+	//
+	//   "single_name" — mcp__<server>_<tool> declarations pass through to
+	//                   upstream verbatim (schema-normalized). call_mcp_tool
+	//                   and agy_list_tools are ALSO declared as fallback
+	//                   aggregators. Model can emit any of three paths.
+	//                   Default.
+	//
+	//   "agy_mimic"   — mcp__* stripped from declarations; only call_mcp_tool
+	//                   (and optionally agy_list_tools per discovery_mode)
+	//                   exposed. Full catalog injected in systemInstruction.
+	//                   Matches real agy.exe wire format.
+	//
+	// The aggregator + agy_list_tools server-side bridges work in BOTH
+	// modes; mode only controls whether mcp__* names are visible to the
+	// upstream model directly.
+	SettingKeyAntigravityNativeToolCallMode = "antigravity_native_tool_call_mode"
 	// SettingKeyAntigravityNativeListToolsEmulation 已弃用：仅用于向后兼容读取。
 	// 新写入路径只更新 SettingKeyAntigravityNativeMcpDiscoveryMode；旧值会在首次读取时迁移。
 	SettingKeyAntigravityNativeListToolsEmulation = "antigravity_native_list_tools_emulation"
