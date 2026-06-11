@@ -724,9 +724,13 @@ func (s *AntigravityNativeGatewayService) streamGeminiToClient(
 						slog.Int64("account_id", accountID),
 						slog.Bool("any_bytes_sent", !first))
 					fingerprint.ForceRefresh()
+					// Drain the rest of the body whether or not bytes
+					// were already sent — we can't unsend what's gone
+					// but we MUST stop polluting the stream with the
+					// rejection text. The user retrying on the same
+					// account will get the refreshed fingerprint.
+					_, _ = io.Copy(io.Discard, resp.Body)
 					if first {
-						// Drain remaining body so the connection can be reused.
-						_, _ = io.Copy(io.Discard, resp.Body)
 						return nil, &UpstreamFailoverError{
 							StatusCode:             http.StatusBadRequest,
 							ResponseBody:           out,
@@ -735,6 +739,16 @@ func (s *AntigravityNativeGatewayService) streamGeminiToClient(
 							RetryableOnSameAccount: true,
 						}
 					}
+					// Bytes already flushed — abort the stream cleanly.
+					// finalize what we have and let the client surface a
+					// truncated response; retrying yields the refreshed
+					// version. Better than writing the rejection text
+					// into the client's transcript.
+					// (We could add an UpstreamVersionRejection field to
+					// ForwardResult later if accounting wants to flag
+					// the request — for now the slog WARN above is the
+					// audit trail.)
+					return s.finalizeResult(result, startTime), nil
 				}
 
 				if _, wErr := c.Writer.Write(out); wErr != nil {

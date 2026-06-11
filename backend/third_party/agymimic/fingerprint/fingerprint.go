@@ -360,12 +360,23 @@ func Install(ctx context.Context, opts Options) *Refresher {
 	r := New(opts)
 	// Wire the force-refresh hook so gateway code that detects upstream
 	// "no longer supported" errors can trigger an out-of-cycle manifest
-	// pull without coupling to the refresher type directly.
+	// pull without coupling to the refresher type directly. Logs every
+	// dispatch + outcome (success-with-version-change, success-unchanged,
+	// failure) so operators can verify the refresh actually happened.
 	I.SetForceRefreshFingerprint(func() {
+		before := I.LatestAntigravityVersion()
+		opts.Logger("fingerprint: FORCE refresh dispatched (current version=%s)", before)
 		refreshCtx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 		defer cancel()
-		if _, err := r.Refresh(refreshCtx); err != nil {
-			opts.Logger("force refresh failed: %v", err)
+		s, err := r.Refresh(refreshCtx)
+		if err != nil {
+			opts.Logger("fingerprint: FORCE refresh FAILED (kept version=%s): %v", before, err)
+			return
+		}
+		if s.Version != before {
+			opts.Logger("fingerprint: FORCE refresh ok — version %s → %s sha512=%s...", before, s.Version, firstN(s.SHA512, 12))
+		} else {
+			opts.Logger("fingerprint: FORCE refresh ok — version unchanged at %s (manifest reports same)", s.Version)
 		}
 	})
 
