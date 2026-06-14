@@ -439,7 +439,7 @@ func (s *AntigravityNativeGatewayService) ForwardGemini(
 
 	if resp.StatusCode != http.StatusOK {
 		raw, _ := io.ReadAll(resp.Body)
-		logNativeUpstreamError(ctx, account.ID, originalModel, wireModel, action, stream, resp.StatusCode, resp.Header, raw)
+		logNativeUpstreamError(ctx, account.ID, originalModel, wireModel, action, stream, resp.StatusCode, resp.Header, raw, envelope)
 
 		// If upstream rejected our advertised Antigravity version, kick
 		// the fingerprint refresher out of its 6 h slumber so the NEXT
@@ -1251,6 +1251,7 @@ func logNativeUpstreamError(
 	status int,
 	headers http.Header,
 	body []byte,
+	outboundEnvelope []byte,
 ) {
 	const maxBody = 4 * 1024
 	preview := body
@@ -1265,6 +1266,20 @@ func logNativeUpstreamError(
 		retryAfter = headers.Get("Retry-After")
 		wwwAuth = headers.Get("WWW-Authenticate")
 	}
+	// Outbound envelope diagnostic: dump head + tail of what we POSTed
+	// so we can diff the actual wire body against known-good shapes
+	// without needing to add a separate request-mirror logger.
+	const outboundChunk = 1500
+	outboundHead, outboundTail := "", ""
+	outboundSize := len(outboundEnvelope)
+	if outboundSize > 0 {
+		if outboundSize <= 2*outboundChunk {
+			outboundHead = string(outboundEnvelope)
+		} else {
+			outboundHead = string(outboundEnvelope[:outboundChunk])
+			outboundTail = string(outboundEnvelope[outboundSize-outboundChunk:])
+		}
+	}
 	slog.WarnContext(ctx, "antigravity-native upstream error",
 		slog.Int64("account_id", accountID),
 		slog.String("model", originalModel),
@@ -1276,6 +1291,9 @@ func logNativeUpstreamError(
 		slog.String("www_authenticate", wwwAuth),
 		slog.Bool("body_truncated", truncated),
 		slog.String("body", string(preview)),
+		slog.Int("outbound_envelope_size", outboundSize),
+		slog.String("outbound_envelope_head", outboundHead),
+		slog.String("outbound_envelope_tail", outboundTail),
 	)
 }
 
