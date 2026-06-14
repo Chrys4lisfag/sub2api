@@ -347,6 +347,62 @@ func appendAssistantTurnAndUserResponse(body []byte, assistantParts []any, respo
 // `listToolsCallBudget`. On budget exhaustion, returns the last response
 // + a budget-exhausted note in the synthesized contents so the model can
 // give up gracefully.
+//
+// ---------------------------------------------------------------------------
+// TODO(streaming-aware-discovery, 2026-06-14): the current loop forces
+// the upstream call to be non-streaming so the response body can be
+// fully buffered + scanned. Caller (ForwardGemini) then emits the entire
+// response as a single SSE `data:` event via flushBufferedNativeResponse.
+// This kills token-by-token streaming and the "thinking trace" UX in
+// clients like omp. As of 2026-06-14 the loop is gated to agy_mimic
+// mode only (single_name skips it entirely because mcp__* are declared
+// directly; discovery is redundant there).
+//
+// To restore agy_list_tools discovery WITHOUT losing streaming in
+// single_name (or in agy_mimic), the loop needs a redesign. Sketch:
+//
+//   1. Switch upstream call to /v1internal:streamGenerateContent
+//      (streaming) instead of /v1internal:generateContent.
+//   2. Read SSE chunks as they arrive. Maintain a small peek buffer
+//      (~8 KiB or 3 chunks, whichever first) before flushing anything
+//      to the client.
+//   3. While peek buffer is filling:
+//      a. Parse each chunk's candidates[].content.parts. If any part
+//         has functionCall{name:"agy_list_tools"}: DISCARD buffer,
+//         abort upstream connection, synthesize functionResponse,
+//         append assistant.call + user.response to body, re-issue.
+//         Client never sees the buffered bytes.
+//      b. If peek-buffer fills WITHOUT detecting agy_list_tools:
+//         commit — flush buffered chunks to client + stream remainder
+//         through normally. The model's response includes text /
+//         call_mcp_tool / etc. as usual.
+//   4. Budget cap stays the same (max N iterations).
+//
+// Tricky bits to think through:
+//   - SSE chunks may split mid-functionCall. Need a partial-JSON
+//     parser that buffers across chunks until a complete part is
+//     reconstructible.
+//   - thoughtSignature parts (Gemini's reasoning stream) arrive
+//     before the functionCall part. Peek buffer must hold ≥ first
+//     few chunks to be sure we've seen any functionCall the model
+//     intends.
+//   - Mid-stream agy_list_tools detection AFTER bytes have been
+//     flushed (peek window passed). We can't undo a flush. Either
+//     accept that and strip the call from the stream (it'd reach
+//     client as text we filter), or harden the peek window to be
+//     large enough that this case is rare.
+//   - Re-issue: when we abort + re-issue, we need to pass the SAME
+//     ctx / cli / wireModel / body shape. Keep the wrapping helper
+//     factored so both paths use the same envelope builder.
+//
+// Alternative approach if streaming-buffer is too risky: speculative
+// double-call. Fire streaming + non-streaming in parallel; cancel one
+// once we know whether the model called agy_list_tools. Wastes one
+// upstream call per request but keeps streaming UX clean.
+//
+// Until either redesign lands, leave single_name mode without
+// discovery; users who explicitly want it switch to agy_mimic.
+// ---------------------------------------------------------------------------
 func (s *AntigravityNativeGatewayService) resolveAgyListToolsLoop(
 	ctx context.Context,
 	cli *api.Client,

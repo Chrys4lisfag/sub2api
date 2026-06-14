@@ -127,9 +127,25 @@ func applyToolPreprocessing(inner map[string]any, useAggregator bool, aggregator
 			// model has a fallback when it can't recall an exact mcp__*
 			// name (single_name) or as the only path (agy_mimic).
 			kept = append(kept, buildCallMcpToolDecl(aggregatorName))
-			if declaresListTool {
+			// TEMPORARY (2026-06-14): agy_list_tools is only declared in
+			// agy_mimic mode. In single_name mode the model sees every
+			// mcp__* tool directly in declarations so the discovery tool
+			// is redundant; AND the discovery loop in
+			// AntigravityNativeGatewayService.ForwardGemini forces non-
+			// streaming upstream calls + single-event SSE flush, killing
+			// token streaming UX for the client. Until streaming-aware
+			// discovery lands (see TODO in resolveAgyListToolsLoop), we
+			// keep the tool gated behind agy_mimic. The old behavior is
+			// preserved below in a commented block so the streaming-aware
+			// rework can be slotted in without re-deriving the gating.
+			if declaresListTool && stripMcp {
 				kept = append(kept, buildAgyListToolsDecl())
 			}
+			// Pre-2026-06-14 behavior — restore once streaming-aware
+			// discovery is implemented:
+			//   if declaresListTool {
+			//       kept = append(kept, buildAgyListToolsDecl())
+			//   }
 		}
 		tool["functionDeclarations"] = kept
 	}
@@ -142,7 +158,16 @@ func applyToolPreprocessing(inner map[string]any, useAggregator bool, aggregator
 			// single_name — short instruction block. Tools self-describe
 			// in declarations; we only need to tell the model HOW to
 			// reach them and remind it of the fallback paths.
-			injectSingleNameInstructionsIntoSystemInstruction(inner, aggregatorName, declaresListTool)
+			//
+			// TEMPORARY (2026-06-14): agy_list_tools is gated behind
+			// agy_mimic to preserve streaming UX (see decl-append block
+			// above + TODO in resolveAgyListToolsLoop). Since we don't
+			// declare it in single_name, we also don't mention it in
+			// the instructions. The third arg used to be `declaresListTool`;
+			// hard-pin to false until streaming-aware discovery lands.
+			injectSingleNameInstructionsIntoSystemInstruction(inner, aggregatorName, false)
+			// Pre-2026-06-14:
+			//   injectSingleNameInstructionsIntoSystemInstruction(inner, aggregatorName, declaresListTool)
 		}
 	}
 	return report

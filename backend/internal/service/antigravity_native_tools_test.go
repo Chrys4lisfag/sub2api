@@ -590,9 +590,11 @@ func TestPreprocess_SingleNameKeepsMcpDeclarations(t *testing.T) {
 	if !strings.Contains(outStr, `"name":"call_mcp_tool"`) {
 		t.Errorf("call_mcp_tool fallback missing: %s", outStr)
 	}
-	// agy_list_tools MUST also be present when discovery_mode allows.
-	if !strings.Contains(outStr, `"name":"agy_list_tools"`) {
-		t.Errorf("agy_list_tools fallback missing: %s", outStr)
+	// agy_list_tools is GATED behind agy_mimic mode (2026-06-14) to
+	// preserve streaming UX. In single_name mode it must NOT be in
+	// declarations. Pre-fix behaviour declared it always.
+	if strings.Contains(outStr, `"name":"agy_list_tools"`) {
+		t.Errorf("agy_list_tools must NOT be declared in single_name mode (streaming gate): %s", outStr)
 	}
 	// Schemas normalized — no parametersJsonSchema leak.
 	if strings.Contains(outStr, "parametersJsonSchema") {
@@ -691,5 +693,47 @@ func TestBuildSingleNameInstructions_CustomAggregatorName(t *testing.T) {
 	// Avoid substring traps where the custom contains the default.
 	if strings.Contains(out, "`call_mcp_tool(") {
 		t.Errorf("default name leaked into instructions when custom configured: %s", out)
+	}
+}
+
+// TestPreprocess_AgyMimicDeclaresListTool — counterpart to the
+// streaming gate. In agy_mimic mode the discovery loop is the only way
+// the model reaches MCP servers, so agy_list_tools MUST still be in
+// declarations when discovery_mode allows it.
+func TestPreprocess_AgyMimicDeclaresListTool(t *testing.T) {
+	body := []byte(`{"contents":[],"tools":[{"functionDeclarations":[
+		{"name":"mcp__electerm_list_electerm_bookmarks","description":"list","parametersJsonSchema":{"type":"object","properties":{}}}
+	]}]}`)
+	for _, dm := range []string{"both", "list_tool"} {
+		t.Run("discovery_mode="+dm, func(t *testing.T) {
+			out, _, err := preprocessNativeBody(body, true, "", dm, "agy_mimic")
+			if err != nil {
+				t.Fatalf("unexpected err: %v", err)
+			}
+			outStr := string(out)
+			if !strings.Contains(outStr, `"name":"agy_list_tools"`) {
+				t.Errorf("agy_list_tools should be declared in agy_mimic+discovery_mode=%s: %s", dm, outStr)
+			}
+			// mcp__* stripped in agy_mimic (catalog-via-aggregator only)
+			if strings.Contains(outStr, `"name":"mcp__electerm_list_electerm_bookmarks"`) {
+				t.Errorf("mcp__* should be stripped in agy_mimic: %s", outStr)
+			}
+		})
+	}
+}
+
+// TestPreprocess_AgyMimicPromptNoListTool — in agy_mimic with
+// discovery_mode=prompt, agy_list_tools is still NOT declared (gating
+// is governed by discovery_mode here, not tool_call_mode).
+func TestPreprocess_AgyMimicPromptNoListTool(t *testing.T) {
+	body := []byte(`{"contents":[],"tools":[{"functionDeclarations":[
+		{"name":"mcp__electerm_list_electerm_bookmarks","description":"list","parametersJsonSchema":{"type":"object","properties":{}}}
+	]}]}`)
+	out, _, err := preprocessNativeBody(body, true, "", "prompt", "agy_mimic")
+	if err != nil {
+		t.Fatalf("unexpected err: %v", err)
+	}
+	if strings.Contains(string(out), `"name":"agy_list_tools"`) {
+		t.Errorf("agy_list_tools should NOT be declared with discovery_mode=prompt: %s", out)
 	}
 }

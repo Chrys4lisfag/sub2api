@@ -369,12 +369,26 @@ func (s *AntigravityNativeGatewayService) ForwardGemini(
 		slog.Int("builtin_tools_count", len(toolReport.BuiltinTools)),
 		slog.Int("schemas_normalized", toolReport.Normalized))
 
-	// agy_list_tools transparent discovery loop. Runs only when the mode
-	// declares the discovery tool AND the aggregator is on AND there's
-	// at least one mcp__* tool. The decl itself is already present in
-	// the request body from preprocessing; the loop just intercepts the
-	// model's call, synthesizes a functionResponse, and re-issues.
-	if modeDeclaresListTool(discoveryMode) && toolReport.AggregatorOn && len(toolReport.McpTools) > 0 {
+	// agy_list_tools transparent discovery loop. Fires ONLY in agy_mimic
+	// mode where mcp__* tools are stripped from the upstream declarations
+	// and the only way the model can reach an MCP server is through the
+	// call_mcp_tool aggregator. In that world the discovery roundtrip
+	// (catalog-as-functionResponse) is genuinely useful.
+	//
+	// In single_name mode the model sees every mcp__<server>_<tool> tool
+	// directly in the declarations — discovery is redundant. Running the
+	// loop anyway would force every request through a buffered non-
+	// streaming upstream call (the loop uses /v1internal:generateContent)
+	// + a single-event SSE flush, killing token-by-token streaming for
+	// the client. We saw this break omp's "thinking stream" UX even on
+	// requests where the model never called agy_list_tools.
+	//
+	// Conditions to fire: agy_mimic mode AND discovery_mode declares the
+	// list-tool AND aggregator is on AND at least one mcp__* tool was
+	// hidden behind the aggregator. The decl itself is already present
+	// in the request body from preprocessing; the loop just intercepts
+	// the model's call, synthesizes a functionResponse, and re-issues.
+	if toolCallMode == ToolCallModeAgyMimic && modeDeclaresListTool(discoveryMode) && toolReport.AggregatorOn && len(toolReport.McpTools) > 0 {
 		startTime := time.Now()
 		finalResp, iters, loopErr := s.resolveAgyListToolsLoop(ctx, cli, wireModel, body, toolReport)
 		if loopErr == nil {
