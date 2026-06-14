@@ -24,6 +24,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -1295,6 +1296,12 @@ func logNativeUpstreamError(
 		slog.String("outbound_envelope_head", outboundHead),
 		slog.String("outbound_envelope_tail", outboundTail),
 	)
+	// Also dump full envelope to disk so we can diff the complete wire
+	// body. Path is per-PID-and-account so concurrent calls don't clobber.
+	if outboundSize > 0 {
+		path := fmt.Sprintf("/tmp/sub2api-envelope-%d-%d.json", os.Getpid(), accountID)
+		_ = os.WriteFile(path, outboundEnvelope, 0644)
+	}
 }
 
 // logNativeRequestAnomaly records a warn log when an HTTP 200 response
