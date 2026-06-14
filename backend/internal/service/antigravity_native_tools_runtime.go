@@ -68,6 +68,14 @@ func preprocessNativeBody(body []byte, useAggregator bool, aggregatorName, disco
 	if r, ok := inner["request"].(map[string]any); ok && len(inner) == 1 {
 		inner = r
 	}
+	// Normalize Google GenAI SDK shape ({model, contents, config:{...}})
+	// to Gemini REST API shape (top-level tools/systemInstruction/
+	// generationConfig). omp's @google/genai client serializes requests
+	// in the new SDK form; cloudcode-pa rejects the `config` field
+	// (verified 2026-06-14 via direct curl: HTTP 400 with `Invalid JSON
+	// payload received. Unknown name "config" at 'request': Cannot find
+	// field.`). No-op when the body is already REST-shaped.
+	normalizeOmpGeminiSDKShape(inner)
 	report := applyToolPreprocessing(inner, useAggregator, aggregatorName, discoveryMode, toolCallMode)
 	out, err := json.Marshal(inner)
 	if err != nil {
@@ -406,4 +414,154 @@ func (r toolPrepReport) nearestMcpHandles(server, tool string, n int) []string {
 		out = append(out, s.name)
 	}
 	return out
+}
+
+// ---------------------------------------------------------------------------
+// Google GenAI SDK config → Gemini REST API top-level shape normalizer
+// ---------------------------------------------------------------------------
+
+// sdkGenerationConfigKeys is the set of `config.*` keys that belong under
+// REST `generationConfig.*`. Everything else stays where it is (or gets
+// lifted by the explicit cases in normalizeOmpGeminiSDKShape).
+//
+// Reference: https://ai.google.dev/api/generate-content#generationconfig
+// — the GenerationConfig message fields. The SDK flattens these into
+// the top-level `config` bag alongside tools/systemInstruction; REST
+// wants them grouped under generationConfig.
+var sdkGenerationConfigKeys = []string{
+	"maxOutputTokens",
+	"thinkingConfig",
+	"temperature",
+	"topP",
+	"topK",
+	"candidateCount",
+	"stopSequences",
+	"responseMimeType",
+	"responseSchema",
+	"responseJsonSchema",
+	"responseModalities",
+	"speechConfig",
+	"mediaResolution",
+	"seed",
+	"audioTimestamp",
+	"presencePenalty",
+	"frequencyPenalty",
+	"responseLogprobs",
+	"logprobs",
+	"routingConfig",
+	"modelSelectionConfig",
+}
+
+// sdkTopLevelKeys is the set of `config.*` keys that belong AT the
+// REST request root, not nested. Lifted verbatim.
+var sdkTopLevelKeys = []string{
+	"tools",
+	"systemInstruction",
+	"toolConfig",
+	"safetySettings",
+	"cachedContent",
+	"labels",
+}
+
+// sdkDropKeys is the set of `config.*` keys that are SDK-side runtime
+// metadata with no upstream meaning. We drop them silently.
+var sdkDropKeys = []string{
+	"abortSignal",
+	"httpOptions",
+	"signal",
+}
+
+// normalizeOmpGeminiSDKShape lifts Google GenAI SDK `config` bag shape
+// to Gemini REST API top-level keys, removing `config` when done. omp's
+// @google/genai client serializes outbound requests as:
+//
+//	{
+//	  "model":    "gemini-3.1-pro",
+//	  "contents": [...],
+//	  "config":   {
+//	    "tools":             [...],
+//	    "systemInstruction": {...},
+//	    "thinkingConfig":    {...},
+//	    "maxOutputTokens":   65536,
+//	    "abortSignal":       {...},
+//	    ...
+//	  }
+//	}
+//
+// cloudcode-pa upstream rejects the `config` field with HTTP 400
+// "Invalid JSON payload received. Unknown name 'config' at 'request':
+// Cannot find field." (verified 2026-06-14 via direct curl against
+// gemini-3.1-pro:generateContent).
+//
+// We rewrite to the REST shape:
+//
+//	{
+//	  "contents":          [...],
+//	  "tools":             [...],
+//	  "systemInstruction": {...},
+//	  "generationConfig":  {
+//	    "thinkingConfig":  {...},
+//	    "maxOutputTokens": 65536
+//	  }
+//	}
+//
+// Conflict policy: when a key exists at BOTH top-level and inside
+// config, the top-level value wins (caller-supplied REST shape > SDK
+// shape). This makes the function idempotent and safe for callers that
+// already pre-normalized.
+//
+// Idempotent. No-op when `config` is absent.
+func normalizeOmpGeminiSDKShape(inner map[string]any) {
+	if inner == nil {
+		return
+	}
+	cfg, ok := inner["config"].(map[string]any)
+	if !ok {
+		return
+	}
+
+	// Step 1: lift top-level REST keys verbatim. Top-level wins on conflict.
+	for _, key := range sdkTopLevelKeys {
+		v, ok := cfg[key]
+		if !ok {
+			continue
+		}
+		if _, present := inner[key]; !present {
+			inner[key] = v
+		}
+	}
+
+	// Step 2: lift generationConfig sub-keys. Build a fresh map merging
+	// any pre-existing inner.generationConfig with the SDK-style keys
+	// from config. Existing inner.generationConfig values win on conflict.
+	gc, _ := inner["generationConfig"].(map[string]any)
+	if gc == nil {
+		gc = map[string]any{}
+	}
+	for _, key := range sdkGenerationConfigKeys {
+		v, ok := cfg[key]
+		if !ok {
+			continue
+		}
+		if _, present := gc[key]; !present {
+			gc[key] = v
+		}
+	}
+	if len(gc) > 0 {
+		inner["generationConfig"] = gc
+	}
+
+	// Step 3: drop `config` entirely. Any SDK-only metadata (abortSignal
+	// etc.) goes away with it. We don't need to enumerate sdkDropKeys
+	// explicitly because the whole `config` object is being removed —
+	// the list exists for documentation only.
+	_ = sdkDropKeys
+	delete(inner, "config")
+
+	// Step 4: drop the SDK's `model` field at top level. The REST API
+	// expects the model in the URL path, not in the request body; some
+	// upstream variants tolerate it but real agy never sends it inside
+	// the request body. wrapNativeV1Internal will set `envelope.model`
+	// from the URL-derived wireModel.
+	delete(inner, "model")
 }

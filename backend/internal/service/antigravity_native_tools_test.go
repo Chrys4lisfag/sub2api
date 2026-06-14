@@ -737,3 +737,177 @@ func TestPreprocess_AgyMimicPromptNoListTool(t *testing.T) {
 		t.Errorf("agy_list_tools should NOT be declared with discovery_mode=prompt: %s", out)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// normalizeOmpGeminiSDKShape — Gemini SDK config bag → REST API top-level
+// ---------------------------------------------------------------------------
+
+func TestNormalizeOmpGeminiSDKShape_FullSdkBag(t *testing.T) {
+	inner := map[string]any{
+		"model":    "gemini-3.1-pro",
+		"contents": []any{map[string]any{"role": "user", "parts": []any{map[string]any{"text": "hi"}}}},
+		"config": map[string]any{
+			"tools":             []any{map[string]any{"functionDeclarations": []any{}}},
+			"systemInstruction": map[string]any{"parts": []any{map[string]any{"text": "sys"}}},
+			"thinkingConfig":    map[string]any{"includeThoughts": true, "thinkingLevel": "HIGH"},
+			"maxOutputTokens":   float64(65536),
+			"abortSignal":       map[string]any{"aborted": false},
+		},
+	}
+	normalizeOmpGeminiSDKShape(inner)
+	if _, has := inner["config"]; has {
+		t.Error("config key should be removed")
+	}
+	if _, has := inner["model"]; has {
+		t.Error("model key should be removed (lives in URL not body)")
+	}
+	if _, has := inner["tools"]; !has {
+		t.Error("tools should be lifted to top level")
+	}
+	if _, has := inner["systemInstruction"]; !has {
+		t.Error("systemInstruction should be lifted to top level")
+	}
+	gc, ok := inner["generationConfig"].(map[string]any)
+	if !ok {
+		t.Fatal("generationConfig must be created when sdk config has gen-config keys")
+	}
+	if gc["maxOutputTokens"] != float64(65536) {
+		t.Errorf("maxOutputTokens not lifted under generationConfig: %v", gc)
+	}
+	if _, has := gc["thinkingConfig"]; !has {
+		t.Errorf("thinkingConfig not lifted under generationConfig: %v", gc)
+	}
+}
+
+func TestNormalizeOmpGeminiSDKShape_NoConfigIsNoop(t *testing.T) {
+	inner := map[string]any{
+		"contents":         []any{},
+		"tools":            []any{map[string]any{"functionDeclarations": []any{}}},
+		"generationConfig": map[string]any{"maxOutputTokens": float64(8192)},
+	}
+	before, _ := json.Marshal(inner)
+	normalizeOmpGeminiSDKShape(inner)
+	after, _ := json.Marshal(inner)
+	if string(before) != string(after) {
+		t.Errorf("REST-shaped body must be unchanged:\nbefore: %s\nafter:  %s", before, after)
+	}
+}
+
+func TestNormalizeOmpGeminiSDKShape_TopLevelWinsOnConflict(t *testing.T) {
+	// Caller already pre-normalized (or sent mixed shape). Existing
+	// top-level values must NOT be clobbered by SDK config bag values.
+	inner := map[string]any{
+		"contents": []any{},
+		"tools":    []any{map[string]any{"functionDeclarations": []any{map[string]any{"name": "REAL"}}}},
+		"config": map[string]any{
+			"tools": []any{map[string]any{"functionDeclarations": []any{map[string]any{"name": "SHOULD_BE_IGNORED"}}}},
+		},
+	}
+	normalizeOmpGeminiSDKShape(inner)
+	toolsAny, _ := inner["tools"].([]any)
+	t0, _ := toolsAny[0].(map[string]any)
+	fds, _ := t0["functionDeclarations"].([]any)
+	first, _ := fds[0].(map[string]any)
+	if first["name"] != "REAL" {
+		t.Errorf("top-level tools should win over config.tools: got %v", first["name"])
+	}
+}
+
+func TestNormalizeOmpGeminiSDKShape_GenConfigMerge(t *testing.T) {
+	// Existing top-level generationConfig values must survive; SDK
+	// config-bag keys fill the gaps only.
+	inner := map[string]any{
+		"generationConfig": map[string]any{"maxOutputTokens": float64(8192)},
+		"config": map[string]any{
+			"maxOutputTokens": float64(65536), // should NOT clobber
+			"thinkingConfig":  map[string]any{"includeThoughts": true},
+			"temperature":     float64(0.7),
+		},
+	}
+	normalizeOmpGeminiSDKShape(inner)
+	gc, _ := inner["generationConfig"].(map[string]any)
+	if gc["maxOutputTokens"] != float64(8192) {
+		t.Errorf("existing maxOutputTokens clobbered: %v", gc["maxOutputTokens"])
+	}
+	if gc["temperature"] != float64(0.7) {
+		t.Errorf("temperature not lifted: %v", gc)
+	}
+	if _, has := gc["thinkingConfig"]; !has {
+		t.Errorf("thinkingConfig not lifted: %v", gc)
+	}
+}
+
+func TestNormalizeOmpGeminiSDKShape_DropsRuntimeMetadata(t *testing.T) {
+	inner := map[string]any{
+		"contents": []any{},
+		"config": map[string]any{
+			"abortSignal":  map[string]any{"aborted": false},
+			"httpOptions":  map[string]any{"timeout": 30000},
+			"maxOutputTokens": float64(1024),
+		},
+	}
+	normalizeOmpGeminiSDKShape(inner)
+	// abortSignal / httpOptions should not appear anywhere in the result.
+	serialized, _ := json.Marshal(inner)
+	if strings.Contains(string(serialized), "abortSignal") {
+		t.Errorf("abortSignal must be dropped: %s", serialized)
+	}
+	if strings.Contains(string(serialized), "httpOptions") {
+		t.Errorf("httpOptions must be dropped: %s", serialized)
+	}
+}
+
+func TestNormalizeOmpGeminiSDKShape_Idempotent(t *testing.T) {
+	// Running twice must produce the same result as running once.
+	inner := map[string]any{
+		"model":    "gemini-3.1-pro",
+		"contents": []any{},
+		"config": map[string]any{
+			"tools":           []any{},
+			"thinkingConfig":  map[string]any{"thinkingLevel": "HIGH"},
+			"maxOutputTokens": float64(2048),
+		},
+	}
+	normalizeOmpGeminiSDKShape(inner)
+	once, _ := json.Marshal(inner)
+	normalizeOmpGeminiSDKShape(inner)
+	twice, _ := json.Marshal(inner)
+	if string(once) != string(twice) {
+		t.Errorf("not idempotent:\nonce:  %s\ntwice: %s", once, twice)
+	}
+}
+
+// TestPreprocess_LiftsOmpSdkShape — integration check that the normalizer
+// runs inside preprocessNativeBody so tool preprocessing sees lifted
+// tools at the top level (the original bug — mcp__* tools nested under
+// config went undiscovered).
+func TestPreprocess_LiftsOmpSdkShape(t *testing.T) {
+	body := []byte(`{
+		"model": "gemini-3.1-pro",
+		"contents": [{"role":"user","parts":[{"text":"hi"}]}],
+		"config": {
+			"tools": [{"functionDeclarations": [
+				{"name": "mcp__electerm_list_electerm_bookmarks", "description": "list", "parametersJsonSchema": {"type":"object","properties":{}}}
+			]}],
+			"thinkingConfig": {"includeThoughts": true, "thinkingLevel": "HIGH"},
+			"maxOutputTokens": 65536
+		}
+	}`)
+	out, report, err := preprocessNativeBody(body, true, "", "both", "single_name")
+	if err != nil {
+		t.Fatalf("unexpected err: %v", err)
+	}
+	if len(report.McpTools) != 1 {
+		t.Errorf("preprocessing should discover 1 mcp tool after lift, got %d", len(report.McpTools))
+	}
+	outStr := string(out)
+	if strings.Contains(outStr, `"config"`) {
+		t.Errorf("config key should be stripped: %s", outStr)
+	}
+	if !strings.Contains(outStr, `"generationConfig"`) {
+		t.Errorf("generationConfig should be present: %s", outStr)
+	}
+	if !strings.Contains(outStr, `"name":"mcp__electerm_list_electerm_bookmarks"`) {
+		t.Errorf("mcp tool should still be in declarations after lift+single_name preprocessing: %s", outStr)
+	}
+}
