@@ -24,7 +24,6 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
-	"os"
 	"strings"
 	"sync"
 	"time"
@@ -620,6 +619,15 @@ func applyAgyDefaultsToInnerRequest(inner map[string]any, wireModel string) {
 	}
 	if _, present := gc["maxOutputTokens"]; !present {
 		gc["maxOutputTokens"] = 16384
+	} else {
+		// Clamp to the per-model upper bound. cloudcode-pa enforces
+		// hard caps that vary by wire model — exceeding them returns
+		// upstream 400 INVALID_ARGUMENT with no field detail. Verified
+		// 2026-06-14 via binary search against gemini-pro-agent:
+		// maxOutputTokens<=65535 → 200, 65536 → 400. The omp
+		// @google/genai SDK ships 65536 as its default which hits this
+		// off-by-one at the 2^16 boundary.
+		gc["maxOutputTokens"] = clampMaxOutputTokens(gc["maxOutputTokens"], wireModel)
 	}
 	tc, _ := gc["thinkingConfig"].(map[string]any)
 	if tc == nil {
@@ -659,6 +667,58 @@ func thinkingBudgetForModel(wire string) int {
 		return 8192
 	}
 	return -1
+}
+
+// maxOutputTokensCapForModel returns the per-model upper bound on the
+// outbound generationConfig.maxOutputTokens. cloudcode-pa enforces
+// these strictly — exceeding returns 400 INVALID_ARGUMENT with no
+// field detail in the streaming endpoint. Verified caps:
+//
+//	gemini-pro-agent (3.1 Pro High) — 65535 (off-by-one at 2^16)
+//	gemini-3.1-pro-low              — 65535 (assumed same; clamp safe)
+//	gemini-3-flash-agent (Flash High) — 65536 accepted (no clamp needed)
+//	gemini-3.5-flash-low / extra-low  — 65536 accepted
+//
+// Conservative default: 65535 for any non-flash wire model.
+func maxOutputTokensCapForModel(wire string) int {
+	w := strings.ToLower(strings.TrimSpace(wire))
+	if strings.Contains(w, "flash") {
+		return 65536
+	}
+	// Pro tier + unknown future models — clamp to 16-bit-1 boundary.
+	return 65535
+}
+
+// clampMaxOutputTokens normalizes the user-supplied maxOutputTokens
+// against the per-model cap. Accepts float64 (json.Unmarshal default),
+// int, int64, or json.Number; preserves type-shape on return for
+// downstream marshaling. Unknown / non-numeric inputs return as-is
+// (defensive).
+func clampMaxOutputTokens(v any, wireModel string) any {
+	cap := maxOutputTokensCapForModel(wireModel)
+	asInt := -1
+	switch x := v.(type) {
+	case float64:
+		asInt = int(x)
+	case int:
+		asInt = x
+	case int64:
+		asInt = int(x)
+	case json.Number:
+		n, err := x.Int64()
+		if err == nil {
+			asInt = int(n)
+		}
+	}
+	if asInt <= 0 || asInt <= cap {
+		return v
+	}
+	// Preserve float64 vs int shape so json.Marshal output stays
+	// stable across paths.
+	if _, isFloat := v.(float64); isFloat {
+		return float64(cap)
+	}
+	return cap
 }
 
 func chooseGeminiAction(action string, stream bool) string {
@@ -1267,20 +1327,6 @@ func logNativeUpstreamError(
 		retryAfter = headers.Get("Retry-After")
 		wwwAuth = headers.Get("WWW-Authenticate")
 	}
-	// Outbound envelope diagnostic: dump head + tail of what we POSTed
-	// so we can diff the actual wire body against known-good shapes
-	// without needing to add a separate request-mirror logger.
-	const outboundChunk = 1500
-	outboundHead, outboundTail := "", ""
-	outboundSize := len(outboundEnvelope)
-	if outboundSize > 0 {
-		if outboundSize <= 2*outboundChunk {
-			outboundHead = string(outboundEnvelope)
-		} else {
-			outboundHead = string(outboundEnvelope[:outboundChunk])
-			outboundTail = string(outboundEnvelope[outboundSize-outboundChunk:])
-		}
-	}
 	slog.WarnContext(ctx, "antigravity-native upstream error",
 		slog.Int64("account_id", accountID),
 		slog.String("model", originalModel),
@@ -1292,16 +1338,8 @@ func logNativeUpstreamError(
 		slog.String("www_authenticate", wwwAuth),
 		slog.Bool("body_truncated", truncated),
 		slog.String("body", string(preview)),
-		slog.Int("outbound_envelope_size", outboundSize),
-		slog.String("outbound_envelope_head", outboundHead),
-		slog.String("outbound_envelope_tail", outboundTail),
+		slog.Int("outbound_envelope_size", len(outboundEnvelope)),
 	)
-	// Also dump full envelope to disk so we can diff the complete wire
-	// body. Path is per-PID-and-account so concurrent calls don't clobber.
-	if outboundSize > 0 {
-		path := fmt.Sprintf("/tmp/sub2api-envelope-%d-%d.json", os.Getpid(), accountID)
-		_ = os.WriteFile(path, outboundEnvelope, 0644)
-	}
 }
 
 // logNativeRequestAnomaly records a warn log when an HTTP 200 response

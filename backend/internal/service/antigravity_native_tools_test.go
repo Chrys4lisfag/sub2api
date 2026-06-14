@@ -911,3 +911,50 @@ func TestPreprocess_LiftsOmpSdkShape(t *testing.T) {
 		t.Errorf("mcp tool should still be in declarations after lift+single_name preprocessing: %s", outStr)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// maxOutputTokens clamp — pro-tier wire models reject 65536 boundary
+// ---------------------------------------------------------------------------
+
+func TestMaxOutputTokensCapForModel(t *testing.T) {
+	cases := map[string]int{
+		"gemini-pro-agent":           65535,
+		"gemini-3.1-pro-low":         65535,
+		"unknown-future-model":       65535,
+		"gemini-3-flash-agent":       65536,
+		"gemini-3.5-flash-low":       65536,
+		"gemini-3.5-flash-extra-low": 65536,
+		"gemini-3-flash":             65536,
+	}
+	for wire, want := range cases {
+		if got := maxOutputTokensCapForModel(wire); got != want {
+			t.Errorf("cap for %q: got %d want %d", wire, got, want)
+		}
+	}
+}
+
+func TestClampMaxOutputTokens(t *testing.T) {
+	tests := []struct {
+		name  string
+		in    any
+		wire  string
+		want  any
+	}{
+		{"pro_65536_clamps", float64(65536), "gemini-pro-agent", float64(65535)},
+		{"pro_65535_keeps", float64(65535), "gemini-pro-agent", float64(65535)},
+		{"pro_under_keeps", float64(8192), "gemini-pro-agent", float64(8192)},
+		{"pro_int_clamps", 65536, "gemini-pro-agent", 65535},
+		{"flash_65536_keeps", float64(65536), "gemini-3-flash-agent", float64(65536)},
+		{"flash_huge_clamps_to_cap", float64(100000), "gemini-3-flash-agent", float64(65536)},
+		{"negative_passthrough", float64(-1), "gemini-pro-agent", float64(-1)},
+		{"zero_passthrough", float64(0), "gemini-pro-agent", float64(0)},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := clampMaxOutputTokens(tt.in, tt.wire)
+			if got != tt.want {
+				t.Errorf("clamp(%v, %q) = %v want %v", tt.in, tt.wire, got, tt.want)
+			}
+		})
+	}
+}
