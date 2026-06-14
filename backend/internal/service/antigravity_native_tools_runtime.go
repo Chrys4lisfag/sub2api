@@ -195,6 +195,8 @@ func rewriteAggregatedFunctionCalls(payload []byte, report toolPrepReport) []byt
 	if !ok || len(cands) == 0 {
 		return payload
 	}
+	rewriteCount := 0
+	resolveFailures := 0
 	changed := false
 	for _, candAny := range cands {
 		cand, ok := candAny.(map[string]any)
@@ -248,12 +250,15 @@ func rewriteAggregatedFunctionCalls(payload []byte, report toolPrepReport) []byt
 					"available_servers", report.availableServerNames(),
 					"nearest_candidates", report.nearestMcpHandles(server, tool, 5),
 					"total_mcp_tools_in_request", len(report.McpTools))
+				resolveFailures++
 				continue
 			}
+			rewriteCount++
 			slog.Info("native: call_mcp_tool rewritten",
 				"server_requested", server,
 				"tool_requested", tool,
-				"resolved_to", handle.FullName)
+				"resolved_to", handle.FullName,
+				"arg_keys", sortedMapKeys(inner))
 			fc["name"] = handle.FullName
 			// Replace args with the inner Arguments object the model
 			// supplied. If inner is nil / non-object, fall back to empty
@@ -265,6 +270,12 @@ func rewriteAggregatedFunctionCalls(payload []byte, report toolPrepReport) []byt
 			}
 			changed = true
 		}
+	}
+	if rewriteCount > 0 || resolveFailures > 0 {
+		slog.Info("native: call_mcp_tool rewrite summary",
+			"rewritten", rewriteCount,
+			"resolve_failures", resolveFailures,
+			"available_mcp_tools", len(report.McpTools))
 	}
 	if !changed {
 		return payload
@@ -564,4 +575,57 @@ func normalizeOmpGeminiSDKShape(inner map[string]any) {
 	// the request body. wrapNativeV1Internal will set `envelope.model`
 	// from the URL-derived wireModel.
 	delete(inner, "model")
+}
+
+// ---------------------------------------------------------------------------
+// Diagnostic helpers for slog calls in the native tool-aggregator pipeline.
+// Kept small and allocation-light so they can run on every request without
+// showing up in profiles.
+// ---------------------------------------------------------------------------
+
+// sortedMapKeys returns the keys of m sorted alphabetically, capped at 32
+// entries. Used to print which arg names the model passed inside a
+// call_mcp_tool invocation without dumping arbitrarily large blobs into
+// the log line.
+func sortedMapKeys(m map[string]any) []string {
+	if len(m) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	if len(out) > 32 {
+		out = out[:32]
+	}
+	return out
+}
+
+// sampleMcpHandleNames returns up to n FullName values from handles,
+// preserving order. Returns nil when handles is empty so the slog
+// attribute renders as a clean omitted field.
+func sampleMcpHandleNames(handles []mcpToolHandle, n int) []string {
+	if len(handles) == 0 || n <= 0 {
+		return nil
+	}
+	if n > len(handles) {
+		n = len(handles)
+	}
+	out := make([]string, n)
+	for i := 0; i < n; i++ {
+		out[i] = handles[i].FullName
+	}
+	return out
+}
+
+// sampleStrings returns up to n entries from in, preserving order.
+func sampleStrings(in []string, n int) []string {
+	if len(in) == 0 || n <= 0 {
+		return nil
+	}
+	if n > len(in) {
+		n = len(in)
+	}
+	return append([]string(nil), in[:n]...)
 }

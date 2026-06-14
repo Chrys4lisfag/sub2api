@@ -367,7 +367,13 @@ func (s *AntigravityNativeGatewayService) ForwardGemini(
 		slog.Bool("aggregator_on", toolReport.AggregatorOn),
 		slog.Int("mcp_tools_count", len(toolReport.McpTools)),
 		slog.Int("builtin_tools_count", len(toolReport.BuiltinTools)),
-		slog.Int("schemas_normalized", toolReport.Normalized))
+		slog.Int("schemas_normalized", toolReport.Normalized),
+		// Sample of mcp tool names actually hidden behind the
+		// aggregator (first 10). Lets `docker logs sub2api | grep
+		// 'native: request preprocessed'` answer "WHICH mcp tools
+		// got collapsed?" without re-running the request.
+		slog.Any("mcp_names_sample", sampleMcpHandleNames(toolReport.McpTools, 10)),
+		slog.Any("builtin_names_sample", sampleStrings(toolReport.BuiltinTools, 10)))
 
 	// agy_list_tools transparent discovery loop. Fires ONLY in agy_mimic
 	// mode where mcp__* tools are stripped from the upstream declarations
