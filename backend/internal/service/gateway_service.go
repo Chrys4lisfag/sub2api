@@ -6447,12 +6447,17 @@ func (s *GatewayService) buildUpstreamRequest(ctx context.Context, c *gin.Contex
 		setHeaderRaw(req.Header, "anthropic-beta", finalBetaHeader)
 	}
 
-	// 同步 X-Claude-Code-Session-Id 头：取 body 中已处理的 metadata.user_id 的 session_id 覆盖
-	if sessionHeader := getHeaderRaw(req.Header, "X-Claude-Code-Session-Id"); sessionHeader != "" {
-		if uid := gjson.GetBytes(body, "metadata.user_id").String(); uid != "" {
-			if parsed := ParseMetadataUserID(uid); parsed != nil {
-				setHeaderRaw(req.Header, "X-Claude-Code-Session-Id", parsed.SessionID)
-			}
+	// X-Claude-Code-Session-Id：CLI 2.1.181 抓包 (claude_new.har) 显示该 header
+	// 在 /v1/messages 路径上每次都发送，且值与 body metadata.user_id.session_id
+	// 严格一致。两种触发路径：
+	//   1) Mimic 路径（OAuth + claude-code 伪装）：mimic 跳过客户端 header 透传，
+	//      所以这里必须主动从 body 注入，否则上游收到的请求缺少该 header，
+	//      和真实 CLI 的指纹不符。
+	//   2) 真 Claude Code 客户端直连路径：客户端通常会自带该 header，但为安全起见
+	//      还是用 body 里 session_id 覆盖（避免客户端/网关 session_id 漂移）。
+	if uid := gjson.GetBytes(body, "metadata.user_id").String(); uid != "" {
+		if parsed := ParseMetadataUserID(uid); parsed != nil && parsed.SessionID != "" {
+			setHeaderRaw(req.Header, "X-Claude-Code-Session-Id", parsed.SessionID)
 		}
 	}
 
@@ -6704,7 +6709,9 @@ func (s *GatewayService) computeFinalAnthropicBeta(
 		if mimicClaudeCode {
 			// mimic 路径：原代码跳过白名单透传，incomingBeta 总是空字符串。
 			// 这里传空 string 以严格对齐原行为。
-			requiredBetas := []string{claude.BetaOAuth, claude.BetaInterleavedThinking}
+			// Beta 选择：haiku 走 6-token 子集，其它走完整 14-token 集合。
+			// 两个集合都严格对齐 claude_new.har (CLI 2.1.181) 抓包顺序。
+			requiredBetas := claude.HaikuClaudeCodeMimicryBetas()
 			if !strings.Contains(strings.ToLower(modelID), "haiku") {
 				requiredBetas = claude.FullClaudeCodeMimicryBetas()
 			}
@@ -7072,6 +7079,11 @@ func applyClaudeCodeMimicHeaders(req *http.Request, isStream bool) {
 	}
 	// Real Claude CLI uses Accept: application/json (even for streaming).
 	setHeaderRaw(req.Header, "Accept", "application/json")
+	// Real Claude CLI 2.1.181 抓包 (claude_new.har) 显示固定四值：
+	//   gzip, deflate, br, zstd
+	// Go net/http 默认只会自动协商 gzip，不主动声明 br/zstd；不覆盖会出现
+	// "Accept-Encoding: gzip" 单值，与真实 CLI 不一致，可能被指纹比对识别。
+	setHeaderRaw(req.Header, "Accept-Encoding", "gzip, deflate, br, zstd")
 	if isStream {
 		setHeaderRaw(req.Header, "x-stainless-helper-method", "stream")
 	}

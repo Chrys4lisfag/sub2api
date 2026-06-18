@@ -19,12 +19,17 @@ const (
 	BetaContext1M                = "context-1m-2025-08-07"
 	BetaFastMode                 = "fast-mode-2026-02-01"
 
-	// 新增（对齐官方 CLI 2.1.9x 以来的流量）
-	BetaPromptCachingScope = "prompt-caching-scope-2026-01-05"
-	BetaEffort             = "effort-2025-11-24"
-	BetaRedactThinking     = "redact-thinking-2026-02-12"
-	BetaContextManagement  = "context-management-2025-06-27"
-	BetaExtendedCacheTTL   = "extended-cache-ttl-2025-04-11"
+	// 新增（对齐官方 CLI 2.1.18x 抓包，2026-06）
+	BetaPromptCachingScope    = "prompt-caching-scope-2026-01-05"
+	BetaEffort                = "effort-2025-11-24"
+	BetaRedactThinking        = "redact-thinking-2026-02-12"
+	BetaContextManagement     = "context-management-2025-06-27"
+	BetaExtendedCacheTTL      = "extended-cache-ttl-2025-04-11"
+	BetaThinkingTokenCount    = "thinking-token-count-2026-05-13"
+	BetaMidConversationSystem = "mid-conversation-system-2026-04-07"
+	BetaAdvisorTool           = "advisor-tool-2026-03-01"
+	BetaAdvancedToolUse       = "advanced-tool-use-2025-11-20"
+	BetaCacheDiagnosis        = "cache-diagnosis-2026-04-07"
 )
 
 // DroppedBetas 是转发时需要从 anthropic-beta header 中移除的 beta token 列表。
@@ -68,23 +73,53 @@ const DefaultCacheControlTTL = "5m"
 const CLICurrentVersion = "2.1.161"
 
 // FullClaudeCodeMimicryBetas 返回最"像"真实 Claude Code CLI 的完整 beta 列表，
-// 用于 OAuth 账号伪装成 Claude Code 时使用。
-// 顺序与真实 CLI 抓包一致。
+// 用于 OAuth 账号伪装成 Claude Code 时使用（非 haiku 模型路径）。
+//
+// 顺序严格对齐真实 CLI 2.1.181 抓包（claude_new.har, 2026-06）。Anthropic 的
+// 第三方判定逻辑似乎会比对 beta 集合是否与官方 CLI 版本匹配，缺失 token 或
+// 顺序错乱都可能触发 `Third-party apps now draw from your extra usage...`。
 //
 // 使用建议：
-//   - OAuth 账号 + 非 haiku：追加这整份列表，再按需保留 client 带来的 beta。
-//   - OAuth 账号 + haiku：Anthropic 对 haiku 不做 third-party 判定，使用 HaikuBetaHeader 即可。
+//   - OAuth 账号 + 非 haiku：使用本函数返回值。
+//   - OAuth 账号 + haiku：使用 HaikuClaudeCodeMimicryBetas（6 token 的子集，
+//     不含 claude-code/effort/extended-cache-ttl/mid-conversation-system/
+//     advisor-tool/advanced-tool-use/cache-diagnosis/context-1m）。
 //   - API-key 账号：不要使用本函数，参见 APIKeyBetaHeader。
-//   - 不默认加入 redact-thinking，避免上游抹除 thinking 内容；客户端显式传入时由合并逻辑保留。
 func FullClaudeCodeMimicryBetas() []string {
 	return []string{
 		BetaClaudeCode,
 		BetaOAuth,
+		BetaContext1M,
 		BetaInterleavedThinking,
-		BetaPromptCachingScope,
-		BetaEffort,
+		BetaRedactThinking,
+		BetaThinkingTokenCount,
 		BetaContextManagement,
+		BetaPromptCachingScope,
+		BetaMidConversationSystem,
+		BetaAdvisorTool,
+		BetaAdvancedToolUse,
+		BetaEffort,
 		BetaExtendedCacheTTL,
+		BetaCacheDiagnosis,
+	}
+}
+
+// HaikuClaudeCodeMimicryBetas 返回 haiku 模型短探测请求（max_tokens=1 的
+// "quota" 探活）使用的 beta 列表。
+//
+// 真实 CLI 2.1.181 抓包：haiku 路径明显短于完整 agent 路径，省略所有需要
+// 高级能力的 beta（effort/extended-cache-ttl/mid-conversation-system/
+// advisor-tool/advanced-tool-use/cache-diagnosis/context-1m/claude-code）。
+//
+// 顺序严格对齐 claude_new.har / haiku probe。
+func HaikuClaudeCodeMimicryBetas() []string {
+	return []string{
+		BetaOAuth,
+		BetaInterleavedThinking,
+		BetaRedactThinking,
+		BetaThinkingTokenCount,
+		BetaContextManagement,
+		BetaPromptCachingScope,
 	}
 }
 

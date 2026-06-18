@@ -124,22 +124,70 @@ func TestMergeAnthropicBetaDropping_DroppedBetas(t *testing.T) {
 	require.Contains(t, got, "fast-mode-2026-02-01")
 }
 
-func TestFullClaudeCodeMimicryBetas_DoesNotDefaultRedactThinking(t *testing.T) {
-	required := claude.FullClaudeCodeMimicryBetas()
-
-	require.NotContains(t, required, claude.BetaRedactThinking)
-	require.Contains(t, required, claude.BetaClaudeCode)
-	require.Contains(t, required, claude.BetaOAuth)
-	require.Contains(t, required, claude.BetaInterleavedThinking)
+// TestFullClaudeCodeMimicryBetas_AlignsWithCLI2181 enforces the exact
+// 14-token order captured from real Claude CLI 2.1.181
+// (claude_new.har, 2026-06). Anthropic's third-party detection appears
+// to compare the beta set against what an authentic CLI of the mimicked
+// version sends — any missing token or reorder risks the request being
+// downgraded with "Third-party apps now draw from your extra usage...".
+func TestFullClaudeCodeMimicryBetas_AlignsWithCLI2181(t *testing.T) {
+	got := claude.FullClaudeCodeMimicryBetas()
+	want := []string{
+		claude.BetaClaudeCode,
+		claude.BetaOAuth,
+		claude.BetaContext1M,
+		claude.BetaInterleavedThinking,
+		claude.BetaRedactThinking,
+		claude.BetaThinkingTokenCount,
+		claude.BetaContextManagement,
+		claude.BetaPromptCachingScope,
+		claude.BetaMidConversationSystem,
+		claude.BetaAdvisorTool,
+		claude.BetaAdvancedToolUse,
+		claude.BetaEffort,
+		claude.BetaExtendedCacheTTL,
+		claude.BetaCacheDiagnosis,
+	}
+	require.Equal(t, want, got, "Full mimic beta order must mirror claude_new.har CLI 2.1.181 capture")
+	require.Len(t, got, 14)
 }
 
-func TestMergeAnthropicBetaDropping_PreservesIncomingRedactThinking(t *testing.T) {
+// TestHaikuClaudeCodeMimicryBetas_AlignsWithCLI2181 enforces the exact
+// 6-token order CLI 2.1.181 sends on haiku max_tokens=1 quota probes.
+// Haiku omits all the advanced-capability betas (effort, advisor-tool,
+// advanced-tool-use, mid-conversation-system, cache-diagnosis,
+// extended-cache-ttl, context-1m, claude-code) because the probe doesn't
+// use any of those features.
+func TestHaikuClaudeCodeMimicryBetas_AlignsWithCLI2181(t *testing.T) {
+	got := claude.HaikuClaudeCodeMimicryBetas()
+	want := []string{
+		claude.BetaOAuth,
+		claude.BetaInterleavedThinking,
+		claude.BetaRedactThinking,
+		claude.BetaThinkingTokenCount,
+		claude.BetaContextManagement,
+		claude.BetaPromptCachingScope,
+	}
+	require.Equal(t, want, got, "Haiku mimic beta order must mirror claude_new.har CLI 2.1.181 capture")
+	require.Len(t, got, 6)
+	// Haiku set MUST NOT include claude-code beta (third-party detection
+	// doesn't trigger on haiku, and real CLI omits it on these probes).
+	require.NotContains(t, got, claude.BetaClaudeCode)
+	require.NotContains(t, got, claude.BetaEffort)
+}
+
+// TestMergeAnthropicBetaDropping_PreservesIncomingFastMode covers the
+// "client supplied a beta we don't include by default" path. BetaFastMode
+// is not part of the 14-token Full set, so this is the right token to use
+// for the preserve-incoming test (the old test used redact-thinking,
+// which is now in the default set per CLI 2.1.181).
+func TestMergeAnthropicBetaDropping_PreservesIncomingFastMode(t *testing.T) {
 	required := claude.FullClaudeCodeMimicryBetas()
-	incoming := claude.BetaRedactThinking
+	incoming := claude.BetaFastMode
 
 	got := mergeAnthropicBetaDropping(required, incoming, droppedBetaSet())
 
-	require.Contains(t, got, claude.BetaRedactThinking)
+	require.Contains(t, got, claude.BetaFastMode)
 }
 
 func TestDroppedBetaSet(t *testing.T) {

@@ -1,6 +1,7 @@
 package service
 
 import (
+	"net/http"
 	"regexp"
 	"testing"
 
@@ -100,4 +101,37 @@ func TestBuildOAuthMetadataUserID_SessionIDStableAcrossTurns(t *testing.T) {
 		`{"role":"user","content":"a completely different opener"}]}`)
 	idOther := svc.buildOAuthMetadataUserID(other, account, fp)
 	require.NotEqual(t, id1, idOther, "不同首条消息应派生不同 session_id")
+}
+// TestApplyClaudeCodeMimicHeaders_PinsAcceptEncoding enforces that the
+// mimic path advertises gzip/deflate/br/zstd verbatim — matching real
+// CLI 2.1.181 capture (claude_new.har). Go net/http's default would
+// otherwise produce only "Accept-Encoding: gzip", which is detectable.
+func TestApplyClaudeCodeMimicHeaders_PinsAcceptEncoding(t *testing.T) {
+	req, err := http.NewRequest(http.MethodPost, "https://api.anthropic.com/v1/messages", nil)
+	require.NoError(t, err)
+
+	applyClaudeCodeMimicHeaders(req, true /* isStream */)
+
+	// getHeaderRaw, not req.Header.Get — setHeaderRaw bypasses canonical
+	// casing on purpose, so a normal Get lookup misses the lowercase key.
+	require.Equal(t, "gzip, deflate, br, zstd", getHeaderRaw(req.Header, "Accept-Encoding"),
+		"mimic path must advertise the four-encoding tuple CLI 2.1.181 sends")
+	require.Equal(t, "application/json", getHeaderRaw(req.Header, "Accept"))
+	require.Equal(t, "stream", getHeaderRaw(req.Header, "x-stainless-helper-method"),
+		"streaming requests must set x-stainless-helper-method")
+	require.NotEmpty(t, getHeaderRaw(req.Header, "x-client-request-id"),
+		"every mimic request must mint a fresh UUID for x-client-request-id")
+}
+
+// TestApplyClaudeCodeMimicHeaders_NoStreamingHelperMethodWhenNotStream
+// inverts the previous test — x-stainless-helper-method should NOT be
+// set on non-streaming requests (real CLI omits it on non-stream too).
+func TestApplyClaudeCodeMimicHeaders_NoStreamingHelperMethodWhenNotStream(t *testing.T) {
+	req, err := http.NewRequest(http.MethodPost, "https://api.anthropic.com/v1/messages/count_tokens", nil)
+	require.NoError(t, err)
+
+	applyClaudeCodeMimicHeaders(req, false /* isStream */)
+
+	require.Empty(t, getHeaderRaw(req.Header, "x-stainless-helper-method"),
+		"non-streaming requests must NOT carry x-stainless-helper-method")
 }
