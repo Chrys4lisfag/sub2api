@@ -315,7 +315,18 @@ func (s *AntigravityNativeGatewayService) ForwardGemini(
 
 	cli, err := s.getClient(ctx, account)
 	if err != nil {
-		return nil, err
+		// Pre-2026-06-18: returned the raw error here. The gateway
+		// handler's failover loop only engages on *UpstreamFailoverError,
+		// so a raw error caused the handler's "else" branch (no response
+		// written) → gin returned 200 + Content-Length: 0 to the client.
+		// Hindsight's google.genai SDK then materialised this as an
+		// all-empty GenerateContentResponse, indistinguishable from a
+		// safety block. Wrap as failover so either (a) we hop to another
+		// account in the same group, or (b) the exhaustion path writes
+		// a real error body. classifyNativeUpstreamErr decides the
+		// shape — OAuth refresh failures get 401 + verbatim body so
+		// admins see "invalid_grant"; everything else gets a 502.
+		return nil, classifyNativeUpstreamErr(err, "getClient")
 	}
 
 	// Best-effort: ensure the per-account Unleash organic-traffic mimic
@@ -433,7 +444,12 @@ func (s *AntigravityNativeGatewayService) ForwardGemini(
 	startTime := time.Now()
 	resp, err := cli.RawRequest(ctx, path, envelope)
 	if err != nil {
-		return nil, fmt.Errorf("native gemini: upstream: %w", err)
+		// Same rationale as the getClient wrap above. RawRequest's most
+		// common failure mode in practice is the agymimic client's
+		// internal token refresh returning `400 invalid_grant` — that
+		// must surface as 401 to the client (and NOT silently 200-empty)
+		// so the admin re-authenticates the account.
+		return nil, classifyNativeUpstreamErr(err, "upstream")
 	}
 	defer resp.Body.Close()
 
@@ -496,6 +512,70 @@ func (s *AntigravityNativeGatewayService) Forward(
 // ────────────────────────────────────────────────────────────────────────────
 // helpers
 // ────────────────────────────────────────────────────────────────────────────
+
+// classifyNativeUpstreamErr wraps a non-HTTP error from the agymimic
+// pipeline (getClient, RawRequest) as an *UpstreamFailoverError so the
+// gateway handler's failover loop and exhaustion path can produce a
+// real client response — never the silent 200/empty that the handler's
+// "ForwardNative already wrote the response" branch produces for naked
+// fmt.Errorf.
+//
+// Stage is "getClient" or "upstream" — included only in the error chain
+// (.Error() output) for diagnostics; the wire response uses StatusCode
+// + ResponseBody.
+//
+// Classification:
+//
+//   - "invalid_grant" anywhere in the error → 401 UNAUTHENTICATED with a
+//     Google-format body. The account's OAuth refresh_token is dead and
+//     no further request will succeed until an admin re-authenticates
+//     it. RetryableOnSameAccount=false so the failover loop hops to the
+//     next native account in the group instead of retrying this one.
+//   - everything else → 502 Bad Gateway, RetryableOnSameAccount=true so
+//     transient network / DNS / TLS hiccups get a retry on the same
+//     account before being demoted.
+//
+// PassthroughVerbatim is on for both so the exhaustion path forwards
+// the real diagnostic to the client (and to chat-history logging) rather
+// than masking it with a generic error.
+func classifyNativeUpstreamErr(err error, stage string) *UpstreamFailoverError {
+	msg := err.Error()
+	isInvalidGrant := strings.Contains(msg, "invalid_grant")
+	status := http.StatusBadGateway
+	body := fmt.Sprintf(
+		`{"error":{"code":502,"message":"Antigravity native upstream %s failed: %s","status":"UNAVAILABLE"}}`,
+		stage, jsonEscape(msg),
+	)
+	retryable := true
+	if isInvalidGrant {
+		status = http.StatusUnauthorized
+		body = fmt.Sprintf(
+			`{"error":{"code":401,"message":"Antigravity native OAuth refresh failed — account needs re-authentication: %s","status":"UNAUTHENTICATED"}}`,
+			jsonEscape(msg),
+		)
+		retryable = false
+	}
+	return &UpstreamFailoverError{
+		StatusCode:             status,
+		ResponseBody:           []byte(body),
+		ResponseHeaders:        http.Header{"Content-Type": []string{"application/json"}},
+		PassthroughVerbatim:    true,
+		RetryableOnSameAccount: retryable,
+	}
+}
+
+// jsonEscape returns s with the four characters that break a JSON string
+// literal (backslash, double-quote, CR, LF) escaped. Used only by
+// classifyNativeUpstreamErr's fmt.Sprintf'd error body — proper json.Marshal
+// would round-trip via a map[string]any which is overkill for a one-field
+// error envelope.
+func jsonEscape(s string) string {
+	s = strings.ReplaceAll(s, `\`, `\\`)
+	s = strings.ReplaceAll(s, `"`, `\"`)
+	s = strings.ReplaceAll(s, "\n", `\n`)
+	s = strings.ReplaceAll(s, "\r", `\r`)
+	return s
+}
 
 // wrapNativeV1Internal wraps a Gemini-format inner request body in the
 // envelope agy.exe sends to /v1internal:streamGenerateContent. Verified
@@ -982,6 +1062,35 @@ func (s *AntigravityNativeGatewayService) passNonStreamingGemini(
 	// Back-translate call_mcp_tool function calls if the aggregator was
 	// used for this request — keeps omp's tool dispatch transparent.
 	out = rewriteAggregatedFunctionCalls(out, toolReport)
+
+	// Defense-in-depth: cloudcode-pa has been observed returning 200 OK
+	// with Content-Length: 0 in rare edge cases (e.g. upstream-side
+	// transient internal error that doesn't materialise as a 5xx). Without
+	// this guard we'd write an empty 200 to the client, and SDKs that
+	// expect `{candidates: [...]}` (google.genai, omp's @google/genai)
+	// would construct a default-zero response object instead of raising,
+	// surfacing as "Gemini returned empty response" downstream. Treat
+	// an empty body as an upstream failure and let the failover loop
+	// hop to another account.
+	if len(bytes.TrimSpace(out)) == 0 {
+		slog.WarnContext(ctx, "native: upstream 200 with empty body",
+			slog.Int64("account_id", accountID),
+			slog.String("model", originalModel),
+			slog.String("wire_model", wireModel),
+			slog.Int("raw_bytes", len(raw)),
+		)
+		logNativeRequestAnomaly(ctx, accountID, originalModel, wireModel, false, raw, "empty_body", map[string]string{
+			"raw_bytes": fmt.Sprintf("%d", len(raw)),
+		})
+		return nil, &UpstreamFailoverError{
+			StatusCode:             http.StatusBadGateway,
+			ResponseBody:           []byte(`{"error":{"code":502,"message":"Antigravity native upstream returned 200 with empty body","status":"UNAVAILABLE"}}`),
+			ResponseHeaders:        http.Header{"Content-Type": []string{"application/json"}},
+			PassthroughVerbatim:    true,
+			RetryableOnSameAccount: true,
+		}
+	}
+
 
 	// Some upstream errors arrive as 200 OK with an `error` field or with
 	// the rejection text smuggled into candidates[].content.parts[].text.

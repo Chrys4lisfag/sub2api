@@ -162,8 +162,24 @@ func extractAPIKeyForGoogle(c *gin.Context) string {
 	return ""
 }
 
+// allowGoogleQueryKey reports whether the Gemini-style `?key=<API_KEY>`
+// query-parameter auth is honoured for the given request path.
+//
+// Why per-path: google.genai SDKs append `?key=` automatically whenever
+// the `api_key` field is set on a Client (Python/JS/Go SDKs all do this),
+// so on Gemini-native paths we accept it for parity. On non-Gemini routes
+// we deliberately don't, to avoid logging API keys into upstream proxy
+// access logs that nobody expected to see them in.
+//
+// `/antigravity-native/v1beta` was missing pre-2026-06-18 — a hindsight
+// container running google.genai with `Client(api_key=…)` would silently
+// 401 on this route while succeeding on `/v1beta` and `/antigravity/v1beta`.
+// Bearer/x-goog-api-key auth has always worked here; the gap was only
+// the query-param fallback.
 func allowGoogleQueryKey(path string) bool {
-	return strings.HasPrefix(path, "/v1beta") || strings.HasPrefix(path, "/antigravity/v1beta")
+	return strings.HasPrefix(path, "/v1beta") ||
+		strings.HasPrefix(path, "/antigravity/v1beta") ||
+		strings.HasPrefix(path, "/antigravity-native/v1beta")
 }
 
 func abortWithGoogleError(c *gin.Context, status int, message string) {
