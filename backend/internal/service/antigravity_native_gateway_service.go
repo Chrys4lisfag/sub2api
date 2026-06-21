@@ -822,10 +822,14 @@ func (s *AntigravityNativeGatewayService) streamGeminiToClient(
 	originalModel, wireModel string,
 	toolReport toolPrepReport,
 ) (*ForwardResult, error) {
+	// Headers are written lazily inside the loop on the first upstream
+	// byte. Pre-committing them here would block the failover loop from
+	// retrying when upstream returns 200 OK with an empty body — gin
+	// auto-writes status 200 on the first c.Writer.Write so we don't
+	// need an explicit WriteHeader call.
 	c.Header("Content-Type", "text/event-stream")
 	c.Header("Cache-Control", "no-cache")
 	c.Header("Connection", "keep-alive")
-	c.Writer.WriteHeader(http.StatusOK)
 	flusher, _ := c.Writer.(http.Flusher)
 
 	result := &ForwardResult{
@@ -971,6 +975,25 @@ func (s *AntigravityNativeGatewayService) streamGeminiToClient(
 						}
 					}
 				}
+				if first {
+					// Upstream returned 200 OK but the body was empty
+					// (zero bytes received before EOF). Headers were
+					// NOT yet committed because we deferred WriteHeader
+					// until the first upstream byte, so the failover
+					// loop is still free to retry on another account.
+					slog.WarnContext(ctx, "native: upstream 200 with empty stream body — failing over",
+						slog.Int64("account_id", accountID),
+						slog.String("model", originalModel),
+						slog.String("wire_model", wireModel),
+					)
+					return nil, &UpstreamFailoverError{
+						StatusCode:             http.StatusBadGateway,
+						ResponseBody:           []byte(`{"error":{"code":502,"message":"Antigravity native upstream returned 200 with empty stream body","status":"UNAVAILABLE"}}`),
+						ResponseHeaders:        http.Header{"Content-Type": []string{"application/json"}},
+						PassthroughVerbatim:    true,
+						RetryableOnSameAccount: true,
+					}
+				}
 				break
 			}
 			// Non-EOF read error mid-stream. Headers + SSE chunks are
@@ -1009,6 +1032,12 @@ func (s *AntigravityNativeGatewayService) streamGeminiToClient(
 			slog.Bool("saw_text", streamSawText),
 			slog.Bool("saw_function_call", streamSawFunctionCall),
 		)
+		// Lead with a blank line so the synthesized event is always
+		// separated from whatever raw bytes preceded it (the upstream
+		// stream may have ended mid-line, in which case our `data: {...}`
+		// would otherwise concatenate to the previous incomplete event
+		// and the SDK parser would treat them as one malformed payload).
+		_, _ = c.Writer.Write([]byte("\n\n"))
 		_, _ = c.Writer.Write(syntheticFinishReasonSSE("OTHER"))
 		if flusher != nil {
 			flusher.Flush()
