@@ -845,6 +845,7 @@ func (s *AntigravityNativeGatewayService) streamGeminiToClient(
 	// `stop_without_content` even on perfectly-fine completions.
 	streamSawText := false
 	streamSawFunctionCall := false
+	streamSawFinishReason := false
 	streamEmptyArgsFn := ""
 	for {
 		n, readErr := resp.Body.Read(chunkBuf)
@@ -932,6 +933,9 @@ func (s *AntigravityNativeGatewayService) streamGeminiToClient(
 					if emptyArgsFn != "" && streamEmptyArgsFn == "" {
 						streamEmptyArgsFn = emptyArgsFn
 					}
+					if payloadHasFinishReason(payload) {
+						streamSawFinishReason = true
+					}
 				}
 				if u := extractGeminiUsageFromSSELine(line); u != nil {
 					result.Usage.InputTokens = u.PromptTokens
@@ -962,11 +966,52 @@ func (s *AntigravityNativeGatewayService) streamGeminiToClient(
 						if emptyArgsFn != "" && streamEmptyArgsFn == "" {
 							streamEmptyArgsFn = emptyArgsFn
 						}
+						if payloadHasFinishReason(payload) {
+							streamSawFinishReason = true
+						}
 					}
 				}
 				break
 			}
-			return nil, readErr
+			// Non-EOF read error mid-stream. Headers + SSE chunks are
+			// already on the wire — we cannot fail over here (client
+			// state is committed). Returning an error sends the failover
+			// loop on a doomed retry whose response can't replace bytes
+			// already on the wire; the client ends up with a half-stream
+			// missing finishReason and raises
+			// "Google API stream ended without a finish reason".
+			// Log + fall through so the synthetic terminator below fires
+			// and the SDK closes cleanly.
+			slog.WarnContext(ctx, "native: upstream stream read error — synthesizing terminator",
+				slog.Int64("account_id", accountID),
+				slog.String("model", originalModel),
+				slog.String("wire_model", wireModel),
+				slog.String("error", readErr.Error()),
+				slog.Bool("any_bytes_sent", !first),
+				slog.Bool("saw_finish_reason", streamSawFinishReason),
+			)
+			break
+		}
+	}
+	// Synthetic finishReason terminator. omp / @google/genai treat a
+	// stream that ends without a candidates[].finishReason field as
+	// truncated and raise "Google API stream ended without a finish
+	// reason (connection dropped or response truncated)". Fires when:
+	//   - upstream stream ends EOF without a STOP chunk (cloudcode-pa
+	//     occasionally truncates under load), OR
+	//   - a non-EOF read error aborted the loop above.
+	// Either way, write one final synthetic event so the SDK closes.
+	if !first && !streamSawFinishReason {
+		slog.WarnContext(ctx, "native: stream ended without finishReason — synthesizing OTHER",
+			slog.Int64("account_id", accountID),
+			slog.String("model", originalModel),
+			slog.String("wire_model", wireModel),
+			slog.Bool("saw_text", streamSawText),
+			slog.Bool("saw_function_call", streamSawFunctionCall),
+		)
+		_, _ = c.Writer.Write(syntheticFinishReasonSSE("OTHER"))
+		if flusher != nil {
+			flusher.Flush()
 		}
 	}
 	// Anomaly classification — stream-wide so we don't fire on benign final
@@ -1040,6 +1085,68 @@ func extractDataPayload(line []byte) []byte {
 	}
 	return payload
 }
+// payloadHasFinishReason returns true when payload is a JSON object that
+// contains at least one candidates[].finishReason field with a non-empty
+// value. Used by streamGeminiToClient to decide whether to synthesize a
+// terminator before closing the SSE response.
+//
+// Tolerant parser: only the candidates[].finishReason path is checked,
+// anything else is ignored. Returns false on malformed JSON so the
+// caller still emits the synthetic terminator (safer default — adding
+// an extra finishReason event is harmless; missing one is a client UX
+// failure).
+func payloadHasFinishReason(payload []byte) bool {
+	if len(payload) == 0 {
+		return false
+	}
+	var env struct {
+		Candidates []struct {
+			FinishReason string `json:"finishReason"`
+		} `json:"candidates"`
+	}
+	if err := json.Unmarshal(payload, &env); err != nil {
+		return false
+	}
+	for _, c := range env.Candidates {
+		if strings.TrimSpace(c.FinishReason) != "" {
+			return true
+		}
+	}
+	return false
+}
+
+// syntheticFinishReasonSSE returns a fully formed SSE event
+//
+//	data: {"candidates":[{"finishReason":"<reason>","content":{"role":"model","parts":[{"text":""}]}}]}\n\n
+//
+// suitable for terminating a stream that the upstream cut short.
+// Includes the trailing blank line so the SDK's event parser fires
+// the final-event callback immediately.
+func syntheticFinishReasonSSE(reason string) []byte {
+	if reason == "" {
+		reason = "OTHER"
+	}
+	body := map[string]any{
+		"candidates": []any{map[string]any{
+			"finishReason": reason,
+			"content": map[string]any{
+				"role":  "model",
+				"parts": []any{map[string]any{"text": ""}},
+			},
+		}},
+	}
+	js, err := json.Marshal(body)
+	if err != nil {
+		// Hand-rolled fallback so the function is unconditionally safe.
+		return []byte("data: {\"candidates\":[{\"finishReason\":\"" + reason + "\",\"content\":{\"role\":\"model\",\"parts\":[{\"text\":\"\"}]}}]}\n\n")
+	}
+	out := make([]byte, 0, len(js)+10)
+	out = append(out, "data: "...)
+	out = append(out, js...)
+	out = append(out, '\n', '\n')
+	return out
+}
+
 
 func (s *AntigravityNativeGatewayService) passNonStreamingGemini(
 	ctx context.Context,
