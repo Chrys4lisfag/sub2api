@@ -471,6 +471,24 @@ func (s *AntigravityNativeGatewayService) ForwardGemini(
 			fingerprint.ForceRefresh()
 		}
 
+		// 403 PERMISSION_DENIED — pause account so the failover loop
+		// stops cycling through dead accounts and the operator sees the
+		// reason in the admin UI. ratelimit_service.handleAntigravity403
+		// does this for the legacy backend; we mirror it here for native
+		// (which doesn't go through the same rate-limit path because
+		// agymimic owns the upstream call).
+		if resp.StatusCode == http.StatusForbidden {
+			upstreamMsg := extractAgyErrorMessage(raw)
+			fbType := classifyForbiddenType(string(raw))
+			switch fbType {
+			case forbiddenTypeValidation:
+				validationURL := extractValidationURL(string(raw))
+				s.pauseAccountForValidation(ctx, account, upstreamMsg, raw, validationURL)
+			case forbiddenTypeViolation:
+				s.pauseAccountForViolation(ctx, account, upstreamMsg, raw)
+			}
+		}
+
 		return nil, &UpstreamFailoverError{
 			StatusCode:             resp.StatusCode,
 			ResponseBody:           raw,
@@ -2025,30 +2043,9 @@ func (s *AntigravityNativeGatewayService) TestConnection(
 		return nil, err
 	}
 
-	// Use the caller's prompt when provided so the dialog's "Prompt: 'hi'"
-	// label matches what the model actually sees. Fall back to "ping" if
-	// the UI sent an empty string.
 	userPrompt := strings.TrimSpace(prompt)
 	if userPrompt == "" {
 		userPrompt = "ping"
-	}
-	probeReq := types.GenerateInner{
-		Contents: []types.Content{
-			{
-				Role:  "user",
-				Parts: []types.Part{{Text: userPrompt}},
-			},
-		},
-		SystemInstruction: &types.SystemInstruction{
-			Parts: []types.Part{{Text: antigravity.GetDefaultIdentityPatch()}},
-		},
-		// Enough headroom for a short reply ("Hello!" etc) but still cheap.
-		// maxOutputTokens=16 with "." as the prompt frequently returned an
-		// empty candidate (the model couldn't fit anything past the
-		// thoughtSignature prelude).
-		GenerationConfig: &types.GenerationConfig{
-			MaxOutputTokens: 256,
-		},
 	}
 
 	wireModel := antigravity.AntigravityWireModel(modelID)
@@ -2056,29 +2053,174 @@ func (s *AntigravityNativeGatewayService) TestConnection(
 		wireModel = modelID
 	}
 
-	resp, err := cli.Generate(ctx, wireModel, probeReq)
-	if err != nil {
-		return nil, fmt.Errorf("native test: generate: %w", err)
+	// Build the Gemini inner request manually (instead of calling
+	// cli.Generate) so we can inspect the raw response body when upstream
+	// returns 403 — the validation URL the operator needs is buried in
+	// the JSON body and agymimic's parseAPIError discards it. RawRequest
+	// gives us status + body, we own the parse.
+	innerBody, _ := json.Marshal(map[string]any{
+		"contents": []any{map[string]any{
+			"role":  "user",
+			"parts": []any{map[string]any{"text": userPrompt}},
+		}},
+		"systemInstruction": map[string]any{
+			"parts": []any{map[string]any{"text": antigravity.GetDefaultIdentityPatch()}},
+		},
+		"generationConfig": map[string]any{
+			"maxOutputTokens": 256,
+		},
+	})
+	envelope, wrapErr := wrapNativeV1Internal(cli.ProjectID(), wireModel, innerBody)
+	if wrapErr != nil {
+		return nil, fmt.Errorf("native test: envelope: %w", wrapErr)
 	}
+
+	resp, rawErr := cli.RawRequest(ctx, "/v1internal:generateContent", envelope)
+	if rawErr != nil {
+		return nil, fmt.Errorf("native test: request: %w", rawErr)
+	}
+	rawBody, _ := io.ReadAll(resp.Body)
+	_ = resp.Body.Close()
 	s.maybePersistRefreshedTokens(ctx, account, cli)
 
-	text := extractTextFromAgyResponse(resp)
-	// Log the response shape diagnostics. If text is empty we still want
-	// to know whether the upstream returned candidates / parts / a finish
-	// reason that explains it (MAX_TOKENS, SAFETY, etc).
+	// Non-200 paths — surface the verification URL on validation_required
+	// 403, pause the account, return a structured TestConnectionResult so
+	// the admin dialog can render a clickable link.
+	if resp.StatusCode != http.StatusOK {
+		logNativeUpstreamError(ctx, account.ID, modelID, wireModel, "generateContent", false, resp.StatusCode, resp.Header, rawBody, envelope)
+		upstreamMsg := extractAgyErrorMessage(rawBody)
+		if resp.StatusCode == http.StatusForbidden {
+			fbType := classifyForbiddenType(string(rawBody))
+			result := &TestConnectionResult{
+				MappedModel:  wireModel,
+				ErrorMessage: upstreamMsg,
+			}
+			if fbType == forbiddenTypeValidation {
+				result.NeedsVerify = true
+				result.ValidationURL = extractValidationURL(string(rawBody))
+				s.pauseAccountForValidation(ctx, account, upstreamMsg, rawBody, result.ValidationURL)
+				return result, nil
+			}
+			if fbType == forbiddenTypeViolation {
+				result.IsBanned = true
+				s.pauseAccountForViolation(ctx, account, upstreamMsg, rawBody)
+				return result, nil
+			}
+			// Generic 403 — surface the upstream message verbatim.
+			return result, fmt.Errorf("native test: %s", upstreamMsg)
+		}
+		return nil, fmt.Errorf("native test: antigravity api %d: %s", resp.StatusCode, upstreamMsg)
+	}
+
+	// Happy path — parse the body the same way agymimic.Generate does so
+	// the existing helpers (extractTextFromAgyResponse + the diagnostics
+	// log fields) work unchanged.
+	var parsed types.Response
+	if err := json.Unmarshal(rawBody, &parsed); err != nil {
+		return nil, fmt.Errorf("native test: decode: %w", err)
+	}
+	text := extractTextFromAgyResponse(&parsed)
 	slog.InfoContext(ctx, "native test connection probe",
 		"account_id", account.ID,
 		"public_model", modelID,
 		"wire_model", wireModel,
 		"text_len", len(text),
-		"candidates", responseCandidateCount(resp),
-		"finish_reason", responseFirstFinishReason(resp),
-		"parts_summary", responsePartsSummary(resp),
+		"candidates", responseCandidateCount(&parsed),
+		"finish_reason", responseFirstFinishReason(&parsed),
+		"parts_summary", responsePartsSummary(&parsed),
 	)
 	return &TestConnectionResult{
 		Text:        text,
 		MappedModel: wireModel,
 	}, nil
+}
+
+// pauseAccountForValidation sets the account to error status with a
+// human-readable reason that includes the upstream validation URL when
+// available. Called from both TestConnection and ForwardGemini's 403
+// branch — keeps a single source of truth for "VALIDATION_REQUIRED →
+// stop scheduling this account until an operator verifies it in
+// Google's signin flow".
+func (s *AntigravityNativeGatewayService) pauseAccountForValidation(
+	ctx context.Context,
+	account *Account,
+	upstreamMsg string,
+	rawBody []byte,
+	validationURL string,
+) {
+	if account == nil || s.accountRepo == nil {
+		return
+	}
+	msg := "Validation required (403): account needs Google verification"
+	if upstreamMsg != "" {
+		msg += " | upstream: " + upstreamMsg
+	}
+	if validationURL != "" {
+		msg += " | validation_url: " + validationURL
+	}
+	if err := s.accountRepo.SetError(ctx, account.ID, msg); err != nil {
+		slog.WarnContext(ctx, "native: SetError(validation_required) failed",
+			slog.Int64("account_id", account.ID), slog.String("error", err.Error()))
+		return
+	}
+	slog.WarnContext(ctx, "native: account paused — validation required",
+		slog.Int64("account_id", account.ID),
+		slog.String("upstream_msg", upstreamMsg),
+		slog.String("validation_url", validationURL),
+		slog.Int("body_bytes", len(rawBody)),
+	)
+}
+
+// pauseAccountForViolation mirrors pauseAccountForValidation for the
+// TOS_VIOLATION 403 case. Same persistence path; different log/key.
+func (s *AntigravityNativeGatewayService) pauseAccountForViolation(
+	ctx context.Context,
+	account *Account,
+	upstreamMsg string,
+	rawBody []byte,
+) {
+	if account == nil || s.accountRepo == nil {
+		return
+	}
+	msg := "Account violation (403): terms of service violation"
+	if upstreamMsg != "" {
+		msg += " | upstream: " + upstreamMsg
+	}
+	if err := s.accountRepo.SetError(ctx, account.ID, msg); err != nil {
+		slog.WarnContext(ctx, "native: SetError(violation) failed",
+			slog.Int64("account_id", account.ID), slog.String("error", err.Error()))
+		return
+	}
+	slog.WarnContext(ctx, "native: account paused — TOS violation",
+		slog.Int64("account_id", account.ID),
+		slog.String("upstream_msg", upstreamMsg),
+		slog.Int("body_bytes", len(rawBody)),
+	)
+}
+
+// extractAgyErrorMessage parses the upstream JSON body for
+// `error.message`. Returns "" when the body doesn't parse or the field
+// is missing — caller should fall back to the raw bytes.
+func extractAgyErrorMessage(rawBody []byte) string {
+	if len(rawBody) == 0 {
+		return ""
+	}
+	var env struct {
+		Error struct {
+			Status  string `json:"status"`
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(rawBody, &env); err != nil {
+		return ""
+	}
+	if env.Error.Message == "" {
+		return env.Error.Status
+	}
+	if env.Error.Status != "" {
+		return env.Error.Status + ": " + env.Error.Message
+	}
+	return env.Error.Message
 }
 
 // extractTextFromAgyResponse returns the concatenated text of every Part

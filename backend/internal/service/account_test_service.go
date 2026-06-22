@@ -948,6 +948,47 @@ func (s *AccountTestService) routeAntigravityTest(c *gin.Context, account *Accou
 		s.sendEvent(c, TestEvent{Type: "test_start", Model: testModelID})
 
 		result, err := s.antigravityNativeGatewayService.TestConnection(c.Request.Context(), account, testModelID, prompt)
+		// When upstream answered 403 the helper returns a structured
+		// result instead of just an error so the dialog can render a
+		// clickable verification link (mirrors real `agy` CLI output)
+		// instead of dumping "antigravity api 403 PERMISSION_DENIED".
+		if result != nil && result.NeedsVerify {
+			s.sendEvent(c, TestEvent{
+				Type:   "content",
+				Text:   "Account needs verification.\n\nOpen this URL in your browser to verify:\n" + result.ValidationURL,
+				Status: "needs_verify",
+				Data: map[string]string{
+					"validation_url": result.ValidationURL,
+					"upstream_msg":   result.ErrorMessage,
+				},
+			})
+			s.sendEvent(c, TestEvent{
+				Type:    "test_complete",
+				Success: false,
+				Status:  "needs_verify",
+				Code:    "VALIDATION_REQUIRED",
+				Error:   "Account paused: needs Google verification. Open the link above to verify, then re-enable the account.",
+			})
+			return nil
+		}
+		if result != nil && result.IsBanned {
+			s.sendEvent(c, TestEvent{
+				Type:   "content",
+				Text:   "Account banned by upstream (terms of service violation).\n\n" + result.ErrorMessage,
+				Status: "banned",
+				Data: map[string]string{
+					"upstream_msg": result.ErrorMessage,
+				},
+			})
+			s.sendEvent(c, TestEvent{
+				Type:    "test_complete",
+				Success: false,
+				Status:  "banned",
+				Code:    "TOS_VIOLATION",
+				Error:   "Account paused: TOS violation. Replace the account.",
+			})
+			return nil
+		}
 		if err != nil {
 			return s.sendErrorAndEnd(c, err.Error())
 		}

@@ -1052,6 +1052,16 @@ func (s *AntigravityGatewayService) IsModelSupported(requestedModel string) bool
 type TestConnectionResult struct {
 	Text        string // 响应文本
 	MappedModel string // 实际使用的模型
+
+	// Set by the antigravity_native TestConnection when upstream returns
+	// HTTP 403 with PERMISSION_DENIED / "Verify your account to continue".
+	// The dialog should surface this so the operator can click through
+	// and complete the Google verification flow instead of guessing why
+	// the account is failing.
+	NeedsVerify   bool   // upstream answered with VALIDATION_REQUIRED
+	ValidationURL string // signin/continue URL extracted from the 403 body
+	IsBanned      bool   // upstream answered with TOS_VIOLATION
+	ErrorMessage  string // raw upstream error message for display
 }
 
 // TestConnection 测试 Antigravity 账号连接。
