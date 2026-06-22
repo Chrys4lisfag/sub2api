@@ -29,12 +29,24 @@ var (
 )
 
 // LatestAntigravityVersion returns the version string to advertise. If we've
-// fetched the live latest from the auto-updater within the last 6h, returns
-// that; otherwise returns DefaultAntigravityVersion.
+// fetched the live latest from the auto-updater within the last 24h, returns
+// that; otherwise returns the most recently cached value (stale-while-
+// revalidate). Only when no version has ever been cached do we fall back to
+// DefaultAntigravityVersion.
+//
+// The previous behavior — falling back to DefaultAntigravityVersion the
+// moment versionExpiry passed — caused a 1.21.9 ↔ 1.0.10 oscillation
+// observed in production: after 24h the cache "expired", default 1.21.9
+// got advertised, upstream rejected it ("no longer supported"), the
+// gateway fired fingerprint.ForceRefresh which hit the
+// Refresher-snap-matches-manifest early-return path and never re-armed
+// versionExpiry. Stale-while-revalidate breaks the loop: a manually
+// cached value is ALWAYS preferred to the hardcoded default, even when
+// the freshness TTL has elapsed.
 func LatestAntigravityVersion() string {
 	versionMu.RLock()
 	defer versionMu.RUnlock()
-	if cachedVersion != "" && time.Now().Before(versionExpiry) {
+	if cachedVersion != "" {
 		return cachedVersion
 	}
 	return DefaultAntigravityVersion

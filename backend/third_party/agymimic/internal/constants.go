@@ -71,10 +71,16 @@ const (
 	PathRecordTrajectory   = "/v1internal:recordTrajectoryAnalytics"
 )
 
-// Default version baked into agy.exe (real binary on disk is 1.0.2, but
-// the Antigravity desktop fork advertises higher version numbers — Google
-// honors both per live testing).
-const DefaultAntigravityVersion = "1.21.9"
+// Default version baked in for the first request after a cold start, when
+// the fingerprint.Refresher hasn't yet populated the live cache. Real
+// agy.exe currently builds 1.0.10 (verified via manifest endpoint
+// 2026-06-22). Keep this aligned with the most recent observed manifest
+// so that even when the live cache is unavailable we don't advertise a
+// version Google has stopped honoring (the now-historic 1.21.9 default
+// triggered a 1.21.9 ↔ 1.0.10 oscillation when paired with the
+// versionExpiry fallback bug — see internal/version.go for the full
+// post-mortem).
+const DefaultAntigravityVersion = "1.0.10"
 
 // FallbackProjectID — hardcoded last-resort project; only used if loadCodeAssist
 // AND onboardUser both fail to produce a cloudaicompanionProject for the user.

@@ -214,8 +214,18 @@ func (r *Refresher) Refresh(ctx context.Context) (*Snapshot, error) {
 	if err != nil {
 		return nil, fmt.Errorf("manifest: %w", err)
 	}
-	// Skip download if cached snapshot already matches this version.
+	// Skip download if cached snapshot already matches this version,
+	// but STILL re-publish the snapshot via OnUpdate so downstream
+	// caches (notably internal.SetLiveFingerprint's versionExpiry) get
+	// their TTL refreshed. Without this re-publish the
+	// internal.LatestAntigravityVersion() cache eventually expires —
+	// fall-back returns the stale DefaultAntigravityVersion which
+	// upstream then rejects, ForceRefresh fires, this early-return hits,
+	// nothing changes, infinite 1.21.9 ↔ 1.0.10 oscillation.
 	if prev := r.snap.Load(); prev != nil && prev.Version == m.Version && prev.GoVersion != "" {
+		if r.opts.OnUpdate != nil {
+			r.opts.OnUpdate(prev)
+		}
 		return prev, nil
 	}
 	binPath, sum, err := r.downloadBinary(ctx, m)
