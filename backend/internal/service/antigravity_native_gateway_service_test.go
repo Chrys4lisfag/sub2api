@@ -361,3 +361,86 @@ func TestInspectStreamChunk_InvalidJSON(t *testing.T) {
 		t.Fatalf("invalid JSON should be silent: %v %v %q", saw, fn, empty)
 	}
 }
+
+// TestExtractAgyErrorMessage covers the upstream-body -> human-readable
+// summary path used by the 403 surface (the message we put into
+// account.error_message and into the test-dialog content event).
+func TestExtractAgyErrorMessage(t *testing.T) {
+	cases := []struct {
+		name string
+		body string
+		want string
+	}{
+		{
+			name: "PERMISSION_DENIED verify",
+			body: `{"error":{"code":403,"message":"Verify your account to continue.","status":"PERMISSION_DENIED"}}`,
+			want: "PERMISSION_DENIED: Verify your account to continue.",
+		},
+		{
+			name: "message only",
+			body: `{"error":{"message":"nope"}}`,
+			want: "nope",
+		},
+		{
+			name: "status only",
+			body: `{"error":{"status":"UNAUTHENTICATED"}}`,
+			want: "UNAUTHENTICATED",
+		},
+		{
+			name: "empty body",
+			body: ``,
+			want: "",
+		},
+		{
+			name: "garbage body",
+			body: `not json`,
+			want: "",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := extractAgyErrorMessage([]byte(tc.body))
+			if got != tc.want {
+				t.Errorf("got %q want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestVerifyFlow_ParsesUpstream403 exercises the parsing helpers the
+// VALIDATION_REQUIRED flow chains together (classifyForbiddenType ->
+// extractValidationURL -> extractAgyErrorMessage) against a Google-
+// shaped 403 body that includes both the structured
+// details[].metadata.validation_url field AND the URL inside the human
+// message. The point is to lock the parse outputs that the new
+// pauseAccountForValidation + TestConnection surface depend on.
+func TestVerifyFlow_ParsesUpstream403(t *testing.T) {
+	body := `{
+		"error": {
+			"code": 403,
+			"status": "PERMISSION_DENIED",
+			"message": "Your current account is not eligible for Antigravity. Verify your account to continue. https://accounts.google.com/signin/continue?sarp=1&continue=https://developers.google.com/gemini-code-assist/auth/auth_success_gemini&plt=AKgnsbsTOKEN&flowName=GlifWebSignIn&authuser",
+			"details": [{
+				"@type": "type.googleapis.com/google.rpc.ErrorInfo",
+				"reason": "VALIDATION_REQUIRED",
+				"metadata": {
+					"validation_url": "https://accounts.google.com/signin/continue?sarp=1&continue=https://developers.google.com/gemini-code-assist/auth/auth_success_gemini&plt=AKgnsbsTOKEN&flowName=GlifWebSignIn&authuser"
+				}
+			}]
+		}
+	}`
+	if got := classifyForbiddenType(body); got != forbiddenTypeValidation {
+		t.Errorf("classifyForbiddenType: got %q want validation", got)
+	}
+	url := extractValidationURL(body)
+	if !strings.Contains(url, "accounts.google.com/signin/continue") {
+		t.Errorf("extractValidationURL: missing google signin URL, got %q", url)
+	}
+	if !strings.Contains(url, "plt=AKgnsbsTOKEN") {
+		t.Errorf("extractValidationURL: missing plt token (the per-account piece omp/the dialog needs), got %q", url)
+	}
+	msg := extractAgyErrorMessage([]byte(body))
+	if !strings.Contains(msg, "PERMISSION_DENIED") || !strings.Contains(msg, "Verify your account") {
+		t.Errorf("extractAgyErrorMessage: missing status/message, got %q", msg)
+	}
+}
