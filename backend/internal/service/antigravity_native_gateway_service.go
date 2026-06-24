@@ -869,6 +869,17 @@ func (s *AntigravityNativeGatewayService) streamGeminiToClient(
 	streamSawFunctionCall := false
 	streamSawFinishReason := false
 	streamEmptyArgsFn := ""
+	// `first` tracks "any byte received from upstream" — drives the
+	// firstTokenMs latency metric. `headersCommitted` tracks "any byte
+	// written to the gin client" — the only semantic that matters for
+	// pre-flush failover decisions. The two were the same variable
+	// historically, which made the pre-write guards below (version
+	// rejection + 200-with-429-in-SSE) ineffective: by the time the
+	// inner SSE-line loop ran, the flag had already flipped on the
+	// outer `if n > 0`, so the `if first { return UpstreamFailoverError }`
+	// branch was unreachable. Failover stopped working for payload-
+	// level rejection cases, and the bad bytes leaked to the client.
+	headersCommitted := false
 	for {
 		n, readErr := resp.Body.Read(chunkBuf)
 		if n > 0 {
@@ -906,7 +917,7 @@ func (s *AntigravityNativeGatewayService) streamGeminiToClient(
 				if isVersionRejectionPayload(out) {
 					slog.WarnContext(ctx, "native: version-rejection text in SSE chunk, forcing fingerprint refresh",
 						slog.Int64("account_id", accountID),
-						slog.Bool("any_bytes_sent", !first))
+						slog.Bool("any_bytes_sent", headersCommitted))
 					fingerprint.ForceRefresh()
 					// Drain the rest of the body whether or not bytes
 					// were already sent — we can't unsend what's gone
@@ -914,7 +925,7 @@ func (s *AntigravityNativeGatewayService) streamGeminiToClient(
 					// rejection text. The user retrying on the same
 					// account will get the refreshed fingerprint.
 					_, _ = io.Copy(io.Discard, resp.Body)
-					if first {
+					if !headersCommitted {
 						return nil, &UpstreamFailoverError{
 							StatusCode:             http.StatusBadRequest,
 							ResponseBody:           out,
@@ -935,11 +946,58 @@ func (s *AntigravityNativeGatewayService) streamGeminiToClient(
 					return s.finalizeResult(result, startTime), nil
 				}
 
+				// 200-OK-with-429-inside-SSE guard. cloudcode-pa
+				// occasionally returns HTTP 200 but with an error event
+				// as the first SSE payload (e.g. quota check failed
+				// after the response started). If we let the bytes
+				// through, c.Writer.Write commits the 200 OK headers
+				// and the failover loop can no longer rotate. Catch it
+				// pre-flush and surface as UpstreamFailoverError so the
+				// loop switches accounts. Symmetric to the version-
+				// rejection guard above.
+				//
+				// HTTP-level 429 is caught earlier in ForwardGemini's
+				// non-200 branch; this branch only fires for the rare
+				// "200 with error body" anomaly.
+				if isUpstreamRateLimitPayload(out) {
+					slog.WarnContext(ctx, "native: rate-limit error inside 200-OK SSE stream",
+						slog.Int64("account_id", accountID),
+						slog.String("model", originalModel),
+						slog.String("wire_model", wireModel),
+						slog.Bool("any_bytes_sent", headersCommitted),
+					)
+					_, _ = io.Copy(io.Discard, resp.Body)
+					if !headersCommitted {
+						// No bytes written yet — failover can still
+						// rotate. Mark as HTTP 429 + PassthroughVerbatim
+						// so the loop's switch path treats it the same
+						// as a real HTTP 429.
+						return nil, &UpstreamFailoverError{
+							StatusCode:             http.StatusTooManyRequests,
+							ResponseBody:           out,
+							ResponseHeaders:        resp.Header,
+							PassthroughVerbatim:    true,
+							RetryableOnSameAccount: false,
+						}
+					}
+					// Bytes already on the wire — can't rotate. Let
+					// the loop end naturally; the synthetic-terminator
+					// path at function tail will emit a finishReason so
+					// the client SDK closes cleanly instead of raising
+					// "stream ended without finish reason".
+					return s.finalizeResult(result, startTime), nil
+				}
+
 				if _, wErr := c.Writer.Write(out); wErr != nil {
 					result.ClientDisconnect = true
 					_, _ = io.Copy(io.Discard, resp.Body)
 					return s.finalizeResult(result, startTime), nil
 				}
+				// First successful Write — gin has now committed the
+				// 200 OK headers. From this point on, no failover-via-
+				// error-return is possible; only the synthetic-terminator
+				// path can recover.
+				headersCommitted = true
 				if flusher != nil {
 					flusher.Flush()
 				}
@@ -1968,6 +2026,48 @@ func isVersionRejectionPayload(body []byte) bool {
 	}
 	for _, p := range patterns {
 		if bytes.Contains(low, p) {
+			return true
+		}
+	}
+	return false
+}
+
+// isUpstreamRateLimitPayload returns true when an SSE payload (or any
+// upstream body slice) carries a Google `code:429 / RESOURCE_EXHAUSTED /
+// QUOTA_EXHAUSTED` error event. Symmetric to isVersionRejectionPayload:
+// pre-write inspector for the case where cloudcode-pa returns
+// `HTTP 200 OK` but the very first SSE event is actually an error JSON.
+// Without this guard the bytes flow straight through `c.Writer.Write`,
+// gin commits the 200 OK headers, and the failover loop can no longer
+// rotate accounts — the client sees a 200 stream containing a 429
+// error and the SDK surfaces it as `RESOURCE_EXHAUSTED`.
+//
+// HTTP-level 429 (status != 200 from upstream) is handled separately by
+// ForwardGemini's `resp.StatusCode != http.StatusOK` branch and is NOT
+// the case this helper exists for.
+func isUpstreamRateLimitPayload(body []byte) bool {
+	if len(body) == 0 {
+		return false
+	}
+	scan := body
+	if len(scan) > 8*1024 {
+		scan = scan[:8*1024]
+	}
+	// Must contain an `"error"` envelope AND one of the well-known
+	// rate-limit markers. The `"code":429` numeric match is conservative
+	// (json formatters preserve compact spacing for numeric fields).
+	if !bytes.Contains(scan, []byte(`"error"`)) {
+		return false
+	}
+	for _, p := range [][]byte{
+		[]byte(`"code":429`),
+		[]byte(`"code": 429`),
+		[]byte(`"status":"RESOURCE_EXHAUSTED"`),
+		[]byte(`"status": "RESOURCE_EXHAUSTED"`),
+		[]byte(`"reason":"QUOTA_EXHAUSTED"`),
+		[]byte(`"reason": "QUOTA_EXHAUSTED"`),
+	} {
+		if bytes.Contains(scan, p) {
 			return true
 		}
 	}

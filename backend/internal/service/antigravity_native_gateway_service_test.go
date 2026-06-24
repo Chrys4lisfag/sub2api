@@ -444,3 +444,61 @@ func TestVerifyFlow_ParsesUpstream403(t *testing.T) {
 		t.Errorf("extractAgyErrorMessage: missing status/message, got %q", msg)
 	}
 }
+
+// TestIsUpstreamRateLimitPayload covers the new pre-write guard that
+// catches the "HTTP 200 OK with 429 inside an SSE event" case so the
+// failover loop can rotate accounts before c.Writer.Write commits gin
+// headers. The string shapes mirror live cloudcode-pa bodies pulled
+// from production logs (compact + indented JSON variants).
+func TestIsUpstreamRateLimitPayload(t *testing.T) {
+	cases := []struct {
+		name string
+		body string
+		want bool
+	}{
+		{
+			name: "google compact 429",
+			body: `data: {"error":{"code":429,"message":"Individual quota reached.","status":"RESOURCE_EXHAUSTED"}}`,
+			want: true,
+		},
+		{
+			name: "google indented 429",
+			body: `data: {
+  "error": {
+    "code": 429,
+    "message": "Individual quota reached.",
+    "status": "RESOURCE_EXHAUSTED"
+  }
+}`,
+			want: true,
+		},
+		{
+			name: "google QUOTA_EXHAUSTED metadata reason",
+			body: `{"error":{"details":[{"reason":"QUOTA_EXHAUSTED"}]}}`,
+			want: true,
+		},
+		{
+			name: "normal candidates chunk",
+			body: `data: {"candidates":[{"content":{"parts":[{"text":"hi"}]}}]}`,
+			want: false,
+		},
+		{
+			name: "different error (validation)",
+			body: `{"error":{"code":403,"status":"PERMISSION_DENIED","message":"Verify your account"}}`,
+			want: false,
+		},
+		{
+			name: "empty body",
+			body: ``,
+			want: false,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := isUpstreamRateLimitPayload([]byte(tc.body))
+			if got != tc.want {
+				t.Errorf("got %v want %v\nbody=%q", got, tc.want, tc.body)
+			}
+		})
+	}
+}
