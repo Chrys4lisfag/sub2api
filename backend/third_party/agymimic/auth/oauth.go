@@ -15,6 +15,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -178,12 +179,12 @@ func ExchangeCode(ctx context.Context, code string, verifier string) (*Tokens, e
 
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("token exchange: %w", err)
+		return nil, err
 	}
 	defer resp.Body.Close()
 	body, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode != 200 {
-		return nil, fmt.Errorf("token exchange: %d: %s", resp.StatusCode, string(body))
+		return nil, errors.New(strings.TrimSpace(string(body)))
 	}
 
 	var tr struct {

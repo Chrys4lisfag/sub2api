@@ -65,7 +65,12 @@ func (h *AntigravityNativeOAuthHandler) ExchangeCode(c *gin.Context) {
 		ProxyID:   req.ProxyID,
 	})
 	if err != nil {
-		response.BadRequest(c, "Token 交换失败: "+err.Error())
+		// Pass the verbatim upstream error to the UI — agymimic now
+		// returns the raw Google OAuth error body or the underlying
+		// transport failure (proxy refused, TLS, DNS). The operator
+		// already knows they're at the exchange step from the dialog
+		// context; no human-framing prefix needed.
+		response.BadRequest(c, err.Error())
 		return
 	}
 	response.Success(c, tokenInfo)

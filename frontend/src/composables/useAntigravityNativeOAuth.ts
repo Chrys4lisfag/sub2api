@@ -88,8 +88,16 @@ export function useAntigravityNativeOAuth() {
       const tokenInfo = await adminAPI.antigravityNative.exchangeCode(payload as any)
       return tokenInfo as AntigravityNativeTokenInfo
     } catch (err: any) {
+      // Prefer the verbatim backend message — backend now ships the raw
+      // upstream OAuth error body (e.g. {"error":"invalid_grant",...})
+      // or the underlying transport failure (proxy refused / TLS / DNS)
+      // so the operator sees exactly what went wrong. Fall back to the
+      // older `detail` field, then the generic i18n string only if
+      // nothing else is available.
       error.value =
-        err.response?.data?.detail || t('admin.accounts.oauth.antigravity.failedToExchangeCode')
+        err.response?.data?.message ||
+        err.response?.data?.detail ||
+        t('admin.accounts.oauth.antigravity.failedToExchangeCode')
       appStore.showError(error.value)
       return null
     } finally {

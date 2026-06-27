@@ -152,7 +152,13 @@ func (s *AntigravityNativeOAuthService) ExchangeCode(ctx context.Context, input 
 
 	tokens, err := agyauth.ExchangeCodeWithClient(ctx, input.Code, verifier, httpc)
 	if err != nil {
-		return nil, fmt.Errorf("native oauth: exchange: %w", err)
+		// Pass agymimic's verbatim error through — it now contains the
+		// raw Google error body (e.g. {"error":"invalid_grant",...}) or
+		// the actual transport failure (proxy refused, DNS, TLS). The
+		// handler layer prepends a "Token 交换失败: " prefix only when
+		// the operator's UI needs human framing; the underlying message
+		// is now actionable.
+		return nil, err
 	}
 
 	return tokensToInfo(tokens), nil

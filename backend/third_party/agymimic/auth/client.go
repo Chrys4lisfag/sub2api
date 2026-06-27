@@ -47,12 +47,22 @@ func ExchangeCodeWithClient(ctx context.Context, code, verifier string, httpc *h
 
 	resp, err := httpc.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("token exchange: %w", err)
+		// Pass dial / TLS / proxy errors through verbatim so callers
+		// see the actual transport failure (e.g. "proxyconnect tcp:
+		// dial tcp X: connection refused") instead of an opaque
+		// "token exchange: …" wrapper. The function name is the
+		// implicit context.
+		return nil, err
 	}
 	defer resp.Body.Close()
 	body, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode != 200 {
-		return nil, fmt.Errorf("token exchange: %d: %s", resp.StatusCode, string(body))
+		// Google's OAuth token endpoint returns a structured JSON body
+		// on non-200 (e.g. {"error":"invalid_grant","error_description":
+		// "Bad Request"}). Surface that body verbatim so the operator
+		// can act on the actual reason — invalid_grant means re-auth,
+		// invalid_client means wrong client_id, etc.
+		return nil, errors.New(strings.TrimSpace(string(body)))
 	}
 	var tr struct {
 		AccessToken  string `json:"access_token"`
