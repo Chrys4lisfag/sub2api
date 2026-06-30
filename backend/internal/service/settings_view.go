@@ -200,12 +200,21 @@ type SystemSettings struct {
 	RewriteMessageCacheControl             bool   // 是否改写 messages[*].content[*].cache_control（默认 false）
 	AntigravityUserAgentVersion            string // Antigravity 上游 User-Agent 版本号；空值使用配置/默认值
 	OpenAICodexUserAgent                   string // OpenAI Codex 上游完整 User-Agent；空值使用内置默认
+<<<<<<< HEAD
 	OpenAIAllowClaudeCodeCodexPlugin       bool   // 全局开关：是否额外放行 Claude Code 的 Codex 插件（默认 false）
 	AntigravityNativeMcpDiscoveryMode      string // 全局：MCP 发现策略；"prompt"|"list_tool"|"both"；默认 "both"
 	AntigravityNativeToolCallMode          string // 全局：MCP 调用模式；"single_name"|"agy_mimic"；默认 "single_name"
 	AntigravityNativeMcpAggregatorName     string // 全局默认 MCP 聚合器函数名；空值 → "call_mcp_tool"（agy 真机默认）
 	ChatHistoryEnabled                     bool   // 全局开关：是否记录 chat history（默认 true）
 	ChatHistoryMaxBytes                    int64  // chat history 目录总字节上限（默认 524288000 = 500 MiB）
+=======
+	MinCodexVersion                        string // codex_cli_only 最低 Codex 引擎版本；空=不检查
+	MaxCodexVersion                        string // codex_cli_only 最高 Codex 引擎版本；空=不检查
+	CodexCLIOnlyBlacklist                  string // codex_cli_only 全局黑名单 JSON（[]AllowedClientEntry，OR deny）
+	CodexCLIOnlyWhitelist                  string // codex_cli_only 全局白名单 JSON（[]AllowedClientEntry，AND allow）
+	CodexCLIOnlyAllowAppServerClients      bool   // codex_cli_only App Server 开关：对未列名客户端开闸（默认 false）
+	CodexCLIOnlyEngineFingerprintSignals   string // codex_cli_only 引擎指纹门信号列表 JSON（[]EngineFingerprintSignal）
+>>>>>>> upstream/main
 
 	// Web Search Emulation
 	WebSearchEmulationEnabled bool // 是否启用 web search 模拟
