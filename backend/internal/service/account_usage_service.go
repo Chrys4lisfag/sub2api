@@ -13,7 +13,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/Wei-Shaw/sub2api/internal/pkg/antigravity"
 	httppool "github.com/Wei-Shaw/sub2api/internal/pkg/httpclient"
 	openaipkg "github.com/Wei-Shaw/sub2api/internal/pkg/openai"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/pagination"
@@ -865,24 +864,24 @@ func recalcAntigravityRemainingSeconds(info *UsageInfo) {
 	}
 }
 
-// persistAntigravityExhaustedModels writes a `model_rate_limits` entry
-// for every model in the freshly-fetched UsageInfo whose tier is at
-// 100% utilization. Without this, the selector keeps picking accounts
-// the dashboard already marks red — `model_rate_limits` is the only
-// signal the selector reads, and historically it was only populated on
-// a real 429 from the upstream (no proactive marker).
+// persistAntigravityExhaustedModels writes a single `model_rate_limits`
+// entry for every model in the freshly-fetched UsageInfo whose tier is
+// at 100 % utilization. Without this, the selector keeps picking
+// accounts the dashboard already marks red — `model_rate_limits` is
+// the only signal the selector reads, and historically it was only
+// populated on a real 429 from the upstream (no proactive marker).
+//
+// Wire-vs-public name handling: we write entries under whatever name
+// the upstream snapshot returned (the cloudcode-pa fetchAvailableModels
+// keys). The selector's modelRateLimitKeysForRequest extends its lookup
+// with the wire form via antigravity.AntigravityWireModel
+// (PlatformAntigravityNative branch), so a snapshot entry under either
+// the public OR wire name is found from a request using the other.
+// One writer, two readers — keeps STATUS column uncluttered.
 //
 // Best-effort: every failure is logged and swallowed. The cached
 // UsageInfo is still returned to the caller — failure to persist must
 // not break the dashboard refresh.
-//
-// Aliases: the upstream keys the response by the wire model name (e.g.
-// `gemini-3-flash-agent`), but the selector resolves its lookup key
-// via `account.GetMappedModel(requestedModel)` which typically returns
-// the public name (`gemini-3.5-flash-high`). Writing under only one
-// form leaves the other side blind, so we expand each exhausted name
-// to every public alias that translates to it (see
-// antigravity.PublicAliasesForWireModel).
 func (s *AccountUsageService) persistAntigravityExhaustedModels(ctx context.Context, account *Account, info *UsageInfo) {
 	if account == nil || info == nil || s.accountRepo == nil {
 		return
@@ -893,14 +892,17 @@ func (s *AccountUsageService) persistAntigravityExhaustedModels(ctx context.Cont
 
 	now := time.Now()
 	// Fallback reset window when the upstream omits ResetTime. 1 h is
-	// short enough to recover within a typical quota cycle if upstream
-	// rolls over silently, long enough to drop the account out of the
-	// rotation for the request burst that triggered the snapshot.
+	// short enough to recover if the upstream snapshot is stale, long
+	// enough to drop the account out of rotation for the burst that
+	// triggered the snapshot.
 	const fallbackReset = time.Hour
 
-	seen := map[string]struct{}{}
 	for modelName, quota := range info.AntigravityQuota {
 		if quota == nil || quota.Utilization < 100 {
+			continue
+		}
+		key := strings.TrimSpace(strings.ToLower(modelName))
+		if key == "" {
 			continue
 		}
 		resetAt := now.Add(fallbackReset)
@@ -909,25 +911,18 @@ func (s *AccountUsageService) persistAntigravityExhaustedModels(ctx context.Cont
 				resetAt = parsed
 			}
 		}
-
-		for _, alias := range antigravity.PublicAliasesForWireModel(modelName) {
-			if _, dup := seen[alias]; dup {
-				continue
-			}
-			seen[alias] = struct{}{}
-			if err := s.accountRepo.SetModelRateLimit(ctx, account.ID, alias, resetAt, "quota_snapshot_exhausted"); err != nil {
-				slog.Warn("antigravity quota: persist exhausted model failed",
-					slog.Int64("account_id", account.ID),
-					slog.String("model", alias),
-					slog.String("error", err.Error()))
-				continue
-			}
-			slog.Info("antigravity quota: exhausted model marked",
+		if err := s.accountRepo.SetModelRateLimit(ctx, account.ID, key, resetAt, "quota_snapshot_exhausted"); err != nil {
+			slog.Warn("antigravity quota: persist exhausted model failed",
 				slog.Int64("account_id", account.ID),
-				slog.String("model", alias),
-				slog.Time("reset_at", resetAt),
-				slog.Int("utilization", quota.Utilization))
+				slog.String("model", key),
+				slog.String("error", err.Error()))
+			continue
 		}
+		slog.Info("antigravity quota: exhausted model marked",
+			slog.Int64("account_id", account.ID),
+			slog.String("model", key),
+			slog.Time("reset_at", resetAt),
+			slog.Int("utilization", quota.Utilization))
 	}
 }
 

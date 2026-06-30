@@ -2463,24 +2463,32 @@ func (s *AntigravityNativeGatewayService) persistNativeRateLimit429ByID(
 		resetAt = time.Now().Add(d)
 	}
 
-	keys := antigravity.RateLimitKeysForRequest(originalModel, wireModel)
-	if len(keys) == 0 {
+	// Write the SINGLE public model name the caller requested. The
+	// selector's modelRateLimitKeysForRequest extends the lookup with
+	// the wire form (PlatformAntigravityNative case in model_rate_limit.go),
+	// so a one-write / two-reader pattern keeps `extra.model_rate_limits`
+	// uncluttered while still matching both naming conventions.
+	key := strings.TrimSpace(strings.TrimPrefix(strings.ToLower(originalModel), "models/"))
+	if key == "" {
+		// Fallback: caller didn't supply a public name. Use wire as a
+		// last resort so the marker still lands somewhere reachable
+		// via the wire-form lookup branch.
+		key = strings.TrimSpace(strings.TrimPrefix(strings.ToLower(wireModel), "models/"))
+	}
+	if key == "" {
 		return
 	}
-
-	for _, key := range keys {
-		if err := s.accountRepo.SetModelRateLimit(ctx, accountID, key, resetAt, "native_429"); err != nil {
-			slog.WarnContext(ctx, "native: persist 429 rate-limit failed",
-				slog.Int64("account_id", accountID),
-				slog.String("model", key),
-				slog.String("error", err.Error()))
-			continue
-		}
-		slog.InfoContext(ctx, "native: 429 rate-limit marked",
+	if err := s.accountRepo.SetModelRateLimit(ctx, accountID, key, resetAt, "native_429"); err != nil {
+		slog.WarnContext(ctx, "native: persist 429 rate-limit failed",
 			slog.Int64("account_id", accountID),
 			slog.String("model", key),
-			slog.Time("reset_at", resetAt))
+			slog.String("error", err.Error()))
+		return
 	}
+	slog.InfoContext(ctx, "native: 429 rate-limit marked",
+		slog.Int64("account_id", accountID),
+		slog.String("model", key),
+		slog.Time("reset_at", resetAt))
 }
 
 // parseQuotaResetsInDuration extracts the "Resets in Xh Ym Zs" duration
