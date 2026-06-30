@@ -57,6 +57,89 @@ func AntigravityWireModel(modelName string) string {
 	}
 }
 
+// PublicAliasesForWireModel returns the public-facing Antigravity model
+// names that resolve to the given wire model. Used to write
+// rate-limit / quota-exhaustion entries under every public name a user
+// might request when the UPSTREAM (which keys by wire model) reports
+// the tier exhausted.
+//
+// Direction matters: this function takes a wire-form input (what the
+// cloudcode-pa fetchAvailableModels response keys models by) and
+// returns the set of public-form names that map to it via
+// AntigravityWireModel. Always includes the wire name itself first so
+// the caller can write a single combined list without remembering to
+// prepend it.
+//
+// Why we need this: the selector's eligibility check resolves
+// `account.GetMappedModel(requestedModel)` to derive its lookup key.
+// For native Antigravity that's typically the public name the user
+// sent (e.g. `gemini-3.5-flash-high`). The upstream quota poll returns
+// the wire name (`gemini-3-flash-agent`). Writing only the wire form
+// leaves public requests unblocked; writing only the public form
+// leaves wire-name lookups (when the account's mapping passes the
+// wire name through) unblocked. The fix is to write BOTH.
+//
+// Note that we deliberately do NOT collapse public variants that map
+// to different wire tiers (e.g. `gemini-3.5-flash-low` public →
+// `gemini-3.5-flash-extra-low` wire is a separate tier from
+// `gemini-3.5-flash` public → `gemini-3.5-flash-low` wire). Each entry
+// only covers the one tier the wire name represents.
+//
+// Empty input → nil.
+func PublicAliasesForWireModel(wireName string) []string {
+	normalized := strings.ToLower(strings.TrimSpace(strings.TrimPrefix(wireName, "models/")))
+	if normalized == "" {
+		return nil
+	}
+
+	// wire → public mapping inverted from AntigravityWireModel. One
+	// entry per backend tier, listing the public names that translate
+	// to that wire form.
+	wireToPublic := map[string][]string{
+		"gemini-3-flash-agent":        {"gemini-3.5-flash-high"},
+		"gemini-3.5-flash-low":        {"gemini-3.5-flash", "gemini-3.5-flash-medium"},
+		"gemini-3.5-flash-extra-low":  {"gemini-3.5-flash-low"},
+		"gemini-3-flash":              {"gemini-3-flash-high", "gemini-3-flash-medium", "gemini-3-flash-low"},
+		"gemini-pro-agent":            {"gemini-3.1-pro-high"},
+	}
+
+	out := []string{normalized}
+	seen := map[string]struct{}{normalized: {}}
+	for _, n := range wireToPublic[normalized] {
+		if _, ok := seen[n]; ok {
+			continue
+		}
+		seen[n] = struct{}{}
+		out = append(out, n)
+	}
+	return out
+}
+
+// RateLimitKeysForRequest returns every key under which a rate-limit
+// entry must be written for a single in-flight request, so a later
+// selector lookup finds the entry regardless of which form
+// (wire vs public) the account's mapping resolves to. Used on the
+// reactive 429 path where the gateway knows BOTH the public name the
+// caller sent AND the wire name it translated to.
+//
+// Always returns at least the public name; the wire name is appended
+// only when it differs and is non-empty. Both are lowercased + trimmed.
+func RateLimitKeysForRequest(publicName, wireName string) []string {
+	pub := strings.ToLower(strings.TrimSpace(strings.TrimPrefix(publicName, "models/")))
+	wire := strings.ToLower(strings.TrimSpace(strings.TrimPrefix(wireName, "models/")))
+	if pub == "" && wire == "" {
+		return nil
+	}
+	out := make([]string, 0, 2)
+	if pub != "" {
+		out = append(out, pub)
+	}
+	if wire != "" && wire != pub {
+		out = append(out, wire)
+	}
+	return out
+}
+
 // ResolveWireFromBody returns the wire model name, taking the caller's
 // explicit `thinkingConfig.thinkingLevel` into account when the public
 // name is the suffix-less Gemini 3.5 Flash base.

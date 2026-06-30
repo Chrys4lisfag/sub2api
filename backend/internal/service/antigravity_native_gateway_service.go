@@ -489,6 +489,20 @@ func (s *AntigravityNativeGatewayService) ForwardGemini(
 			}
 		}
 
+		// 429 TOO_MANY_REQUESTS — persist a model_rate_limits entry so
+		// the selector stops handing us the same exhausted account on
+		// the next request. Mirrors what the legacy gateway does at
+		// antigravity_gateway_service.go via setModelRateLimitByModelName;
+		// without this the failover loop rotates correctly THIS request
+		// but the next request still re-picks the dead account because
+		// nothing has been written to extra.model_rate_limits. The
+		// proactive quota-snapshot persistence covers the slow path
+		// (dashboard poll catches 100% utilization); this covers the
+		// fast path (account exhausts mid-burst before the next poll).
+		if resp.StatusCode == http.StatusTooManyRequests {
+			s.persistNativeRateLimit429(ctx, account, originalModel, wireModel, raw)
+		}
+
 		return nil, &UpstreamFailoverError{
 			StatusCode:             resp.StatusCode,
 			ResponseBody:           raw,
@@ -967,6 +981,12 @@ func (s *AntigravityNativeGatewayService) streamGeminiToClient(
 						slog.Bool("any_bytes_sent", headersCommitted),
 					)
 					_, _ = io.Copy(io.Discard, resp.Body)
+					// Same persistence as the HTTP-429 branch above —
+					// without it, the failover loop rotates correctly
+					// this request but the selector re-picks the same
+					// account on the next call because nothing is in
+					// extra.model_rate_limits yet.
+					s.persistNativeRateLimit429ByID(ctx, accountID, originalModel, wireModel, out)
 					if !headersCommitted {
 						// No bytes written yet — failover can still
 						// rotate. Mark as HTTP 429 + PassthroughVerbatim
@@ -2390,4 +2410,66 @@ func responsePartsSummary(resp *types.Response) string {
 	}
 	return fmt.Sprintf("text=%d thought=%d fn=%d inline=%d empty=%d",
 		text, thought, fn, inline, empty)
+}
+
+// persistNativeRateLimit429 writes a model_rate_limits entry on the
+// account for every key (public + wire) the in-flight request
+// represents, so the next selector pass skips this account when the
+// same model is requested. Best-effort; failures are logged and
+// swallowed.
+//
+// Reset window is taken from the upstream RetryInfo body when present
+// (Google's RPC error format includes retryDelay seconds in the
+// `error.details[type=type.googleapis.com/google.rpc.RetryInfo]`
+// element), falling back to antigravityDefaultRateLimitDuration so a
+// missing retryDelay doesn't lock the account out indefinitely.
+func (s *AntigravityNativeGatewayService) persistNativeRateLimit429(
+	ctx context.Context,
+	account *Account,
+	originalModel, wireModel string,
+	body []byte,
+) {
+	if account == nil {
+		return
+	}
+	s.persistNativeRateLimit429ByID(ctx, account.ID, originalModel, wireModel, body)
+}
+
+// persistNativeRateLimit429ByID is the variant used when only the
+// account ID is available (the streaming inner loop carries the ID
+// but has already dropped the *Account reference). Same semantics as
+// persistNativeRateLimit429.
+func (s *AntigravityNativeGatewayService) persistNativeRateLimit429ByID(
+	ctx context.Context,
+	accountID int64,
+	originalModel, wireModel string,
+	body []byte,
+) {
+	if s.accountRepo == nil || accountID == 0 {
+		return
+	}
+
+	resetAt := time.Now().Add(antigravityDefaultRateLimitDuration)
+	if info := parseAntigravitySmartRetryInfo(body); info != nil && info.RetryDelay > 0 {
+		resetAt = time.Now().Add(info.RetryDelay)
+	}
+
+	keys := antigravity.RateLimitKeysForRequest(originalModel, wireModel)
+	if len(keys) == 0 {
+		return
+	}
+
+	for _, key := range keys {
+		if err := s.accountRepo.SetModelRateLimit(ctx, accountID, key, resetAt, "native_429"); err != nil {
+			slog.WarnContext(ctx, "native: persist 429 rate-limit failed",
+				slog.Int64("account_id", accountID),
+				slog.String("model", key),
+				slog.String("error", err.Error()))
+			continue
+		}
+		slog.InfoContext(ctx, "native: 429 rate-limit marked",
+			slog.Int64("account_id", accountID),
+			slog.String("model", key),
+			slog.Time("reset_at", resetAt))
+	}
 }
