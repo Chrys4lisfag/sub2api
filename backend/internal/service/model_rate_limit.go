@@ -5,7 +5,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/Wei-Shaw/sub2api/internal/pkg/antigravity"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/ctxkey"
 )
 
@@ -78,17 +77,6 @@ func (a *Account) modelRateLimitKeysForRequest(ctx context.Context, requestedMod
 	case PlatformAntigravity:
 		if isAntigravityGeminiModel(modelKey) && modelKey != antigravityGeminiModelRateLimitKey {
 			keys = append(keys, antigravityGeminiModelRateLimitKey)
-		}
-	case PlatformAntigravityNative:
-		// Native antigravity sends the wire-translated form to upstream
-		// (gemini-3.5-flash → gemini-3.5-flash-low, gemini-3.1-pro-high
-		// → gemini-pro-agent, etc. via AntigravityWireModel). The
-		// gateway's 429 handler and the quota-snapshot persistence
-		// write entries under whichever form the upstream surfaced —
-		// so the selector MUST look up both the public name AND the
-		// wire form to find them. One writer, two readers.
-		if wire := antigravity.AntigravityWireModel(modelKey); wire != "" && wire != modelKey {
-			keys = append(keys, wire)
 		}
 	case PlatformOpenAI:
 		if openAIImageGenerationRateLimitApplies(ctx, requestedModel, modelKey) && modelKey != openAIImageGenerationRateLimitKey {

@@ -24,7 +24,6 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
-	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -488,20 +487,6 @@ func (s *AntigravityNativeGatewayService) ForwardGemini(
 			case forbiddenTypeViolation:
 				s.pauseAccountForViolation(ctx, account, upstreamMsg, raw)
 			}
-		}
-
-		// 429 TOO_MANY_REQUESTS — persist a model_rate_limits entry so
-		// the selector stops handing us the same exhausted account on
-		// the next request. Mirrors what the legacy gateway does at
-		// antigravity_gateway_service.go via setModelRateLimitByModelName;
-		// without this the failover loop rotates correctly THIS request
-		// but the next request still re-picks the dead account because
-		// nothing has been written to extra.model_rate_limits. The
-		// proactive quota-snapshot persistence covers the slow path
-		// (dashboard poll catches 100% utilization); this covers the
-		// fast path (account exhausts mid-burst before the next poll).
-		if resp.StatusCode == http.StatusTooManyRequests {
-			s.persistNativeRateLimit429(ctx, account, originalModel, wireModel, raw)
 		}
 
 		return nil, &UpstreamFailoverError{
@@ -982,12 +967,6 @@ func (s *AntigravityNativeGatewayService) streamGeminiToClient(
 						slog.Bool("any_bytes_sent", headersCommitted),
 					)
 					_, _ = io.Copy(io.Discard, resp.Body)
-					// Same persistence as the HTTP-429 branch above —
-					// without it, the failover loop rotates correctly
-					// this request but the selector re-picks the same
-					// account on the next call because nothing is in
-					// extra.model_rate_limits yet.
-					s.persistNativeRateLimit429ByID(ctx, accountID, originalModel, wireModel, out)
 					if !headersCommitted {
 						// No bytes written yet — failover can still
 						// rotate. Mark as HTTP 429 + PassthroughVerbatim
@@ -2411,112 +2390,4 @@ func responsePartsSummary(resp *types.Response) string {
 	}
 	return fmt.Sprintf("text=%d thought=%d fn=%d inline=%d empty=%d",
 		text, thought, fn, inline, empty)
-}
-
-// persistNativeRateLimit429 writes a model_rate_limits entry on the
-// account for every key (public + wire) the in-flight request
-// represents, so the next selector pass skips this account when the
-// same model is requested. Best-effort; failures are logged and
-// swallowed.
-//
-// Reset window is taken from the upstream RetryInfo body when present
-// (Google's RPC error format includes retryDelay seconds in the
-// `error.details[type=type.googleapis.com/google.rpc.RetryInfo]`
-// element), falling back to antigravityDefaultRateLimitDuration so a
-// missing retryDelay doesn't lock the account out indefinitely.
-func (s *AntigravityNativeGatewayService) persistNativeRateLimit429(
-	ctx context.Context,
-	account *Account,
-	originalModel, wireModel string,
-	body []byte,
-) {
-	if account == nil {
-		return
-	}
-	s.persistNativeRateLimit429ByID(ctx, account.ID, originalModel, wireModel, body)
-}
-
-// persistNativeRateLimit429ByID is the variant used when only the
-// account ID is available (the streaming inner loop carries the ID
-// but has already dropped the *Account reference). Same semantics as
-// persistNativeRateLimit429.
-func (s *AntigravityNativeGatewayService) persistNativeRateLimit429ByID(
-	ctx context.Context,
-	accountID int64,
-	originalModel, wireModel string,
-	body []byte,
-) {
-	if s.accountRepo == nil || accountID == 0 {
-		return
-	}
-
-	resetAt := time.Now().Add(antigravityDefaultRateLimitDuration)
-	if info := parseAntigravitySmartRetryInfo(body); info != nil && info.RetryDelay > 0 {
-		resetAt = time.Now().Add(info.RetryDelay)
-	} else if d := parseQuotaResetsInDuration(body); d > 0 {
-		// Native cloudcode-pa returns its real reset window as a human-
-		// readable string inside error.message (e.g. "Resets in
-		// 23h52m16s"), NOT in RetryInfo.retryDelay. Honoring this is
-		// critical — falling back to the legacy 30 s default lets the
-		// account get re-picked within seconds of exhausting a 24-72 h
-		// quota tier, undoing the whole point of the persistence step.
-		resetAt = time.Now().Add(d)
-	}
-
-	// Write the SINGLE public model name the caller requested. The
-	// selector's modelRateLimitKeysForRequest extends the lookup with
-	// the wire form (PlatformAntigravityNative case in model_rate_limit.go),
-	// so a one-write / two-reader pattern keeps `extra.model_rate_limits`
-	// uncluttered while still matching both naming conventions.
-	key := strings.TrimSpace(strings.TrimPrefix(strings.ToLower(originalModel), "models/"))
-	if key == "" {
-		// Fallback: caller didn't supply a public name. Use wire as a
-		// last resort so the marker still lands somewhere reachable
-		// via the wire-form lookup branch.
-		key = strings.TrimSpace(strings.TrimPrefix(strings.ToLower(wireModel), "models/"))
-	}
-	if key == "" {
-		return
-	}
-	if err := s.accountRepo.SetModelRateLimit(ctx, accountID, key, resetAt, "native_429"); err != nil {
-		slog.WarnContext(ctx, "native: persist 429 rate-limit failed",
-			slog.Int64("account_id", accountID),
-			slog.String("model", key),
-			slog.String("error", err.Error()))
-		return
-	}
-	slog.InfoContext(ctx, "native: 429 rate-limit marked",
-		slog.Int64("account_id", accountID),
-		slog.String("model", key),
-		slog.Time("reset_at", resetAt))
-}
-
-// parseQuotaResetsInDuration extracts the "Resets in Xh Ym Zs" duration
-// that cloudcode-pa embeds in QUOTA_EXHAUSTED error messages. The
-// upstream's official RetryInfo.retryDelay field is almost always
-// missing for native antigravity quota errors — the only place the
-// real reset window surfaces is in the human-readable error.message
-// text. Without parsing it, the 429 handler can only fall back to
-// antigravityDefaultRateLimitDuration (30 s), which causes the
-// account to be eligible again within seconds of exhausting a
-// multi-hour quota tier and the selector re-picks it.
-//
-// Returns 0 when no duration is found. Component order is fixed (h
-// before m before s) per Go's time.Duration string format, which is
-// what cloudcode-pa emits.
-var quotaResetsInRegex = regexp.MustCompile(`(?i)resets?\s+in\s+((?:\d+h)?(?:\d+m)?(?:\d+(?:\.\d+)?s)?)`)
-
-func parseQuotaResetsInDuration(body []byte) time.Duration {
-	if len(body) == 0 {
-		return 0
-	}
-	m := quotaResetsInRegex.FindSubmatch(body)
-	if len(m) < 2 || len(m[1]) == 0 {
-		return 0
-	}
-	d, err := time.ParseDuration(string(m[1]))
-	if err != nil {
-		return 0
-	}
-	return d
 }
