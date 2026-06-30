@@ -18,6 +18,7 @@ const (
 
 // Platform constants
 const (
+<<<<<<< HEAD
 	PlatformAnthropic         = "anthropic"
 	PlatformOpenAI            = "openai"
 	PlatformGemini            = "gemini"
@@ -27,6 +28,13 @@ const (
 	// Same upstream API (daily-cloudcode-pa.sandbox.googleapis.com), but
 	// the OAuth + per-account identity + Unleash mimic loop is owned by us.
 	PlatformAntigravityNative = "antigravity_native"
+=======
+	PlatformAnthropic   = "anthropic"
+	PlatformOpenAI      = "openai"
+	PlatformGemini      = "gemini"
+	PlatformAntigravity = "antigravity"
+	PlatformGrok        = "grok"
+>>>>>>> upstream/main
 )
 
 // IsAntigravityFamily returns true for both the legacy in-tree antigravity
