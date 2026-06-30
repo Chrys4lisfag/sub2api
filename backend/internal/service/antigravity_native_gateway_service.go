@@ -24,6 +24,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -2452,6 +2453,14 @@ func (s *AntigravityNativeGatewayService) persistNativeRateLimit429ByID(
 	resetAt := time.Now().Add(antigravityDefaultRateLimitDuration)
 	if info := parseAntigravitySmartRetryInfo(body); info != nil && info.RetryDelay > 0 {
 		resetAt = time.Now().Add(info.RetryDelay)
+	} else if d := parseQuotaResetsInDuration(body); d > 0 {
+		// Native cloudcode-pa returns its real reset window as a human-
+		// readable string inside error.message (e.g. "Resets in
+		// 23h52m16s"), NOT in RetryInfo.retryDelay. Honoring this is
+		// critical — falling back to the legacy 30 s default lets the
+		// account get re-picked within seconds of exhausting a 24-72 h
+		// quota tier, undoing the whole point of the persistence step.
+		resetAt = time.Now().Add(d)
 	}
 
 	keys := antigravity.RateLimitKeysForRequest(originalModel, wireModel)
@@ -2472,4 +2481,34 @@ func (s *AntigravityNativeGatewayService) persistNativeRateLimit429ByID(
 			slog.String("model", key),
 			slog.Time("reset_at", resetAt))
 	}
+}
+
+// parseQuotaResetsInDuration extracts the "Resets in Xh Ym Zs" duration
+// that cloudcode-pa embeds in QUOTA_EXHAUSTED error messages. The
+// upstream's official RetryInfo.retryDelay field is almost always
+// missing for native antigravity quota errors — the only place the
+// real reset window surfaces is in the human-readable error.message
+// text. Without parsing it, the 429 handler can only fall back to
+// antigravityDefaultRateLimitDuration (30 s), which causes the
+// account to be eligible again within seconds of exhausting a
+// multi-hour quota tier and the selector re-picks it.
+//
+// Returns 0 when no duration is found. Component order is fixed (h
+// before m before s) per Go's time.Duration string format, which is
+// what cloudcode-pa emits.
+var quotaResetsInRegex = regexp.MustCompile(`(?i)resets?\s+in\s+((?:\d+h)?(?:\d+m)?(?:\d+(?:\.\d+)?s)?)`)
+
+func parseQuotaResetsInDuration(body []byte) time.Duration {
+	if len(body) == 0 {
+		return 0
+	}
+	m := quotaResetsInRegex.FindSubmatch(body)
+	if len(m) < 2 || len(m[1]) == 0 {
+		return 0
+	}
+	d, err := time.ParseDuration(string(m[1]))
+	if err != nil {
+		return 0
+	}
+	return d
 }
