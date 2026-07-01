@@ -11,6 +11,15 @@ import (
 const (
 	modelRateLimitsKey                 = "model_rate_limits"
 	antigravityGeminiModelRateLimitKey = "antigravity:gemini"
+	// Native antigravity has TWO quota families in agy.exe's own UI:
+	// "Gemini" and "Others" (Claude/GPT). Family-scoped rate limits
+	// mean that a 429 for one member marks the whole family on the
+	// account until cooldown, matching how the upstream actually
+	// enforces quota. Selector reads both the specific model AND the
+	// family key when checking eligibility (mirrors legacy
+	// antigravity's antigravityGeminiModelRateLimitKey pattern).
+	antigravityNativeGeminiFamilyKey = "antigravity_native:gemini"
+	antigravityNativeOthersFamilyKey = "antigravity_native:others"
 	openAIImageGenerationRateLimitKey  = "openai:image_generation"
 )
 
@@ -77,6 +86,10 @@ func (a *Account) modelRateLimitKeysForRequest(ctx context.Context, requestedMod
 	case PlatformAntigravity:
 		if isAntigravityGeminiModel(modelKey) && modelKey != antigravityGeminiModelRateLimitKey {
 			keys = append(keys, antigravityGeminiModelRateLimitKey)
+		}
+	case PlatformAntigravityNative:
+		if fam := antigravityNativeFamilyKey(modelKey); fam != "" && fam != modelKey {
+			keys = append(keys, fam)
 		}
 	case PlatformOpenAI:
 		if openAIImageGenerationRateLimitApplies(ctx, requestedModel, modelKey) && modelKey != openAIImageGenerationRateLimitKey {
@@ -157,4 +170,25 @@ func (a *Account) modelRateLimitResetAt(scope string) *time.Time {
 		return nil
 	}
 	return &resetAt
+}
+
+// antigravityNativeFamilyKey classifies a native antigravity model
+// into one of the two upstream quota families: "gemini" (all gemini-*
+// models including image variants) or "others" (claude-* + gpt-* +
+// anything else). Empty string when the input is empty.
+//
+// Mirrors real agy.exe's UI: agy shows exactly two quota bars per
+// account labeled "Gemini" and "Claude and GPT" — reflecting the
+// upstream cloudcode-pa enforcement. When any member of a family
+// returns 429, sub2api records the family-scoped cooldown so all
+// family-mates are skipped until reset.
+func antigravityNativeFamilyKey(model string) string {
+	m := strings.ToLower(strings.TrimSpace(strings.TrimPrefix(model, "models/")))
+	if m == "" {
+		return ""
+	}
+	if strings.HasPrefix(m, "gemini-") {
+		return antigravityNativeGeminiFamilyKey
+	}
+	return antigravityNativeOthersFamilyKey
 }

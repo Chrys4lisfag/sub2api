@@ -1745,6 +1745,13 @@ func sleepGeminiBackoff(attempt int) {
 var (
 	sensitiveQueryParamRegex = regexp.MustCompile(`(?i)([?&](?:key|client_secret|access_token|refresh_token)=)[^&"\s]+`)
 	retryInRegex             = regexp.MustCompile(`Please retry in ([0-9.]+)s`)
+	// Native antigravity (cloudcode-pa) QUOTA_EXHAUSTED bodies express
+	// the reset window ONLY as human-readable text inside error.message,
+	// e.g. "Resets in 51h32m9s". RetryInfo.retryDelay + quotaResetDelay
+	// are almost never populated for this class of error. Parsed at the
+	// tail of ParseGeminiRateLimitResetTime so gemini + antigravity_native
+	// share one reset-time source of truth.
+	resetsInRegex            = regexp.MustCompile(`(?i)resets?\s+in\s+((?:\d+h)?(?:\d+m)?(?:\d+(?:\.\d+)?s)?)`)
 )
 
 func sanitizeUpstreamErrorMessage(msg string) string {
@@ -2992,6 +2999,18 @@ func ParseGeminiRateLimitResetTime(body []byte) *int64 {
 	matches := retryInRegex.FindStringSubmatch(string(body))
 	if len(matches) == 2 {
 		if dur, err := time.ParseDuration(matches[1] + "s"); err == nil {
+			ts := time.Now().Unix() + int64(math.Ceil(dur.Seconds()))
+			return &ts
+		}
+	}
+
+	// 第三阶段：cloudcode-pa native antigravity QUOTA_EXHAUSTED —
+	// only carries the reset window as "Resets in Xh Ym Zs" in
+	// error.message. Regex fallback matches the exact Go time.Duration
+	// grammar (h, m, s components) so time.ParseDuration handles
+	// arbitrary combinations ("51h32m9s", "1h43m56s", "5m30s").
+	if m := resetsInRegex.FindSubmatch(body); len(m) == 2 && len(m[1]) > 0 {
+		if dur, err := time.ParseDuration(string(m[1])); err == nil && dur > 0 {
 			ts := time.Now().Unix() + int64(math.Ceil(dur.Seconds()))
 			return &ts
 		}

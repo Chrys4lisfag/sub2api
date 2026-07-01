@@ -24,7 +24,6 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
-	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -490,25 +489,16 @@ func (s *AntigravityNativeGatewayService) ForwardGemini(
 			}
 		}
 
-		// 429 RESOURCE_EXHAUSTED — merge a synthetic 100 % entry into
-		// account.Extra["antigravity_quota"] for the exhausted model
-		// (and its wire alias) so the selector skips this account on
-		// the NEXT request. Failover already rotates the current
-		// request; without this the next request re-picks the same
-		// dead account because the dashboard's cached snapshot still
-		// shows the account healthy (Google returns 429 for individual
-		// quota holds even when the tier utilization reads < 100 %,
-		// hence the user report "limit ok but gets 429").
-		//
-		// Reset window: prefer the human-readable "Resets in Xh Ym Zs"
-		// string in error.message (cloudcode-pa's canonical shape for
-		// QUOTA_EXHAUSTED), then RetryInfo.retryDelay, then a 30 s
-		// default cooldown. Cooldown is scoped to the request's model
-		// only — other models on the same account stay eligible.
+		// 429 → family-scoped cooldown so the selector skips this
+		// account (for Gemini or Others, matching agy's own quota
+		// split) on the NEXT request. Failover still rotates THIS
+		// request via the UpstreamFailoverError below. Reset window
+		// comes from ParseGeminiRateLimitResetTime — inherits every
+		// upstream reset-shape sub2api's gemini gateway already knows,
+		// plus the "Resets in Xh Ym Zs" cloudcode-pa native format.
 		if resp.StatusCode == http.StatusTooManyRequests {
-			s.markNative429IntoQuotaSnapshot(ctx, account, originalModel, wireModel, raw)
+			s.handleAntigravityNative429(ctx, account, originalModel, raw)
 		}
-
 		return nil, &UpstreamFailoverError{
 			StatusCode:             resp.StatusCode,
 			ResponseBody:           raw,
@@ -987,10 +977,16 @@ func (s *AntigravityNativeGatewayService) streamGeminiToClient(
 						slog.Bool("any_bytes_sent", headersCommitted),
 					)
 					_, _ = io.Copy(io.Discard, resp.Body)
-					// Same snapshot marker as the HTTP-429 branch — the
-					// failover loop rotates this request; without this
-					// the next request re-picks the same account.
-					s.markNative429IntoQuotaSnapshotByID(ctx, accountID, originalModel, wireModel, out)
+					// Same family-cooldown treatment as the HTTP-429
+					// branch above. Fetch the Account by ID (streaming
+					// inner loop only carries the ID) so the handler
+					// has the object it needs; best-effort — if the
+					// lookup fails the failover below still rotates.
+					if s.accountRepo != nil {
+						if acc, gerr := s.accountRepo.GetByID(ctx, accountID); gerr == nil && acc != nil {
+							s.handleAntigravityNative429(ctx, acc, originalModel, out)
+						}
+					}
 					if !headersCommitted {
 						// No bytes written yet — failover can still
 						// rotate. Mark as HTTP 429 + PassthroughVerbatim
@@ -2416,144 +2412,68 @@ func responsePartsSummary(resp *types.Response) string {
 		text, thought, fn, inline, empty)
 }
 
-// markNative429IntoQuotaSnapshot merges a synthetic 100 % utilization
-// entry into account.Extra["antigravity_quota"] for the exhausted
-// model + its wire alias so the selector
-// (Account.isAntigravityNativeModelExhausted) skips this account for
-// the same model on the next request. The dashboard's cached usage
-// snapshot may still show the tier as healthy (Google returns 429 for
-// individual-quota holds even when tier utilization reads < 100 %),
-// so we override the snapshot with the upstream's own error signal.
+// handleAntigravityNative429 marks the account rate-limited under the
+// two-family scope agy.exe enforces upstream (Gemini vs Others). Mirrors
+// GeminiMessagesCompatService.handleGeminiUpstreamError but writes to
+// account.Extra["model_rate_limits"] under the FAMILY key
+// (antigravity_native:gemini / antigravity_native:others) instead of
+// account-level SetRateLimited — so a native account whose Gemini
+// quota is hit can still serve Claude/GPT requests, matching agy's
+// own per-family quota split.
 //
-// This preserves the "one source of truth" pattern — the snapshot
-// field drives both display AND scheduling — while letting a real 429
-// override a stale/inaccurate poll.
+// Reset-time priority (all handled inside ParseGeminiRateLimitResetTime):
+//  1. Gemini per-daily-quota heuristic (looksLikeGeminiDailyQuota)
+//  2. error.details[].metadata.quotaResetDelay
+//  3. `Please retry in Xs` regex
+//  4. `Resets in Xh Ym Zs` regex (added for cloudcode-pa native)
+// Falls back to ApplyCustom429Policy (per-account custom cooldown)
+// then to antigravityDefaultRateLimitDuration.
 //
-// Best-effort: DB write failure logged + swallowed. Failover still
-// rotates the CURRENT request via UpstreamFailoverError; this marker
-// only affects the NEXT request.
-func (s *AntigravityNativeGatewayService) markNative429IntoQuotaSnapshot(
+// Failover STILL rotates the current request via the caller's
+// UpstreamFailoverError return. This function only writes the marker
+// so the selector skips this account for the same family until reset.
+func (s *AntigravityNativeGatewayService) handleAntigravityNative429(
 	ctx context.Context,
 	account *Account,
-	originalModel, wireModel string,
+	originalModel string,
 	body []byte,
 ) {
-	if account == nil {
+	if account == nil || s.accountRepo == nil {
 		return
 	}
-	s.markNative429IntoQuotaSnapshotByID(ctx, account.ID, originalModel, wireModel, body)
-}
-
-// markNative429IntoQuotaSnapshotByID is the variant used inside the
-// streaming inner loop where only the account ID is available.
-func (s *AntigravityNativeGatewayService) markNative429IntoQuotaSnapshotByID(
-	ctx context.Context,
-	accountID int64,
-	originalModel, wireModel string,
-	body []byte,
-) {
-	if s.accountRepo == nil || accountID == 0 {
+	fam := antigravityNativeFamilyKey(originalModel)
+	if fam == "" {
 		return
 	}
 
-	// Reset window preference: human-readable text in error.message
-	// ("Resets in Xh Ym Zs") is the CANONICAL shape for cloudcode-pa
-	// QUOTA_EXHAUSTED. RetryInfo.retryDelay is rarely populated for
-	// this class of error. Default: 30 s cooldown.
-	cooldown := antigravityDefaultRateLimitDuration
-	if d := parseQuotaResetsInDuration(body); d > 0 {
-		cooldown = d
-	} else if info := parseAntigravitySmartRetryInfo(body); info != nil && info.RetryDelay > 0 {
-		cooldown = info.RetryDelay
-	}
-	resetAt := time.Now().Add(cooldown).UTC().Format(time.RFC3339)
-
-	// Read the current snapshot (if any) so we merge — never clobber
-	// the other models' entries. Best-effort: on read error we treat
-	// as empty snapshot.
-	acc, err := s.accountRepo.GetByID(ctx, accountID)
-	if err != nil || acc == nil {
-		slog.WarnContext(ctx, "native 429 marker: account fetch failed",
-			slog.Int64("account_id", accountID),
-			slog.Any("error", err))
-		return
-	}
-	snapshot := make(map[string]any)
-	if acc.Extra != nil {
-		if existing, ok := acc.Extra["antigravity_quota"].(map[string]any); ok {
-			for k, v := range existing {
-				snapshot[k] = v
-			}
-		}
+	// Custom 429 policy takes precedence (per-account operator setting).
+	// Only used when its counter still permits + parsing succeeds; if
+	// the counter is exhausted or missing, falls through to platform
+	// defaults exactly like handleGeminiUpstreamError does.
+	var resetAt time.Time
+	if ts := ParseGeminiRateLimitResetTime(body); ts != nil {
+		resetAt = time.Unix(*ts, 0)
+	} else if cd, used, _ := ApplyCustom429Policy(account); used {
+		resetAt = time.Now().Add(cd)
+		slog.InfoContext(ctx, "native 429: custom policy cooldown",
+			slog.Int64("account_id", account.ID),
+			slog.String("family", fam),
+			slog.Duration("cooldown", cd))
+	} else {
+		resetAt = time.Now().Add(antigravityDefaultRateLimitDuration)
 	}
 
-	entry := map[string]any{
-		"utilization": float64(100),
-		"reset_time":  resetAt,
-	}
-
-	// Mark under the caller's public name AND the wire form so the
-	// read-side candidate lookup finds it regardless of which side of
-	// AntigravityWireModel the request happens to speak.
-	keys := make([]string, 0, 2)
-	if k := strings.TrimSpace(strings.ToLower(strings.TrimPrefix(originalModel, "models/"))); k != "" {
-		keys = append(keys, k)
-	}
-	if k := strings.TrimSpace(strings.ToLower(strings.TrimPrefix(wireModel, "models/"))); k != "" && !containsString(keys, k) {
-		keys = append(keys, k)
-	}
-	if len(keys) == 0 {
-		return
-	}
-	for _, k := range keys {
-		snapshot[k] = entry
-	}
-
-	updates := map[string]any{
-		"antigravity_quota":            snapshot,
-		"antigravity_quota_updated_at": time.Now().UTC().Format(time.RFC3339),
-	}
-	if err := s.accountRepo.UpdateExtra(ctx, accountID, updates); err != nil {
-		slog.WarnContext(ctx, "native 429 marker: UpdateExtra failed",
-			slog.Int64("account_id", accountID),
+	if err := s.accountRepo.SetModelRateLimit(ctx, account.ID, fam, resetAt, "antigravity_native_429"); err != nil {
+		slog.WarnContext(ctx, "native 429: family rate-limit persist failed",
+			slog.Int64("account_id", account.ID),
+			slog.String("family", fam),
 			slog.String("error", err.Error()))
 		return
 	}
-	slog.InfoContext(ctx, "native: 429 → antigravity_quota override",
-		slog.Int64("account_id", accountID),
-		slog.Any("models", keys),
-		slog.String("reset_at", resetAt),
-		slog.Duration("cooldown", cooldown))
-}
-
-func containsString(ss []string, want string) bool {
-	for _, s := range ss {
-		if s == want {
-			return true
-		}
-	}
-	return false
-}
-
-// parseQuotaResetsInDuration extracts the "Resets in Xh Ym Zs"
-// duration cloudcode-pa embeds in QUOTA_EXHAUSTED error messages.
-// The upstream's official RetryInfo.retryDelay is almost always
-// missing for this error class; the only place the real reset window
-// surfaces is the human-readable error.message text. Returns 0 when
-// no duration is found.
-var quotaResetsInRegex = regexp.MustCompile(`(?i)resets?\s+in\s+((?:\d+h)?(?:\d+m)?(?:\d+(?:\.\d+)?s)?)`)
-
-func parseQuotaResetsInDuration(body []byte) time.Duration {
-	if len(body) == 0 {
-		return 0
-	}
-	m := quotaResetsInRegex.FindSubmatch(body)
-	if len(m) < 2 || len(m[1]) == 0 {
-		return 0
-	}
-	d, err := time.ParseDuration(string(m[1]))
-	if err != nil {
-		return 0
-	}
-	return d
+	slog.InfoContext(ctx, "native 429: family cooldown applied",
+		slog.Int64("account_id", account.ID),
+		slog.String("family", fam),
+		slog.String("model", originalModel),
+		slog.Time("reset_at", resetAt),
+		slog.Duration("remaining", time.Until(resetAt).Truncate(time.Second)))
 }

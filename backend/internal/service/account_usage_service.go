@@ -825,18 +825,6 @@ func (s *AccountUsageService) getAntigravityUsage(ctx context.Context, account *
 			usageInfo: fetchResult.UsageInfo,
 			timestamp: time.Now(),
 		})
-
-		// Persist the just-fetched per-model utilization to
-		// account.Extra["antigravity_quota"] so the selector
-		// (Account.isAntigravityNativeModelExhausted, called from
-		// IsSchedulableForModelWithContext) can read it without
-		// service injection. Mirrors the OpenAI codex pattern that
-		// persists codex_5h_used_percent / codex_7d_used_percent.
-		// Best-effort: write failure is logged and swallowed so the
-		// dashboard refresh still works.
-		if IsAntigravityFamily(account.Platform) {
-			s.persistAntigravityQuotaToExtra(fetchCtx, account, fetchResult.UsageInfo)
-		}
 		return fetchResult.UsageInfo, nil
 	})
 
@@ -865,48 +853,6 @@ func recalcAntigravityRemainingSeconds(info *UsageInfo) {
 		info.FiveHour.RemainingSeconds = remaining
 	}
 }
-
-// persistAntigravityQuotaToExtra mirrors a freshly-fetched quota
-// snapshot into account.Extra["antigravity_quota"] so the account
-// selector (Account.isAntigravityNativeModelExhausted called from
-// IsSchedulableForModelWithContext) can read per-model utilization
-// without a service-injection refactor. The shape is a plain
-// map[model]={utilization,reset_time} — same fields the UsageInfo
-// surfaces, just promoted from the in-memory cache to the DB row.
-//
-// Best-effort: failure is logged + swallowed so the dashboard refresh
-// doesn't break on a transient DB hiccup. The in-memory cache stays
-// authoritative for the dashboard; the persisted copy is purely the
-// selector's signal.
-func (s *AccountUsageService) persistAntigravityQuotaToExtra(ctx context.Context, account *Account, info *UsageInfo) {
-	if account == nil || info == nil || s.accountRepo == nil {
-		return
-	}
-	// Always write — even an empty map. Otherwise a successful fetch
-	// returning "no exhausted models" leaves a stale prior snapshot in
-	// place and the selector keeps excluding accounts that recovered.
-	snapshot := make(map[string]map[string]any, len(info.AntigravityQuota))
-	for modelName, quota := range info.AntigravityQuota {
-		if quota == nil {
-			continue
-		}
-		entry := map[string]any{"utilization": quota.Utilization}
-		if quota.ResetTime != "" {
-			entry["reset_time"] = quota.ResetTime
-		}
-		snapshot[modelName] = entry
-	}
-	updates := map[string]any{
-		"antigravity_quota":            snapshot,
-		"antigravity_quota_updated_at": time.Now().UTC().Format(time.RFC3339),
-	}
-	if err := s.accountRepo.UpdateExtra(ctx, account.ID, updates); err != nil {
-		slog.Warn("antigravity quota: persist to account.Extra failed",
-			slog.Int64("account_id", account.ID),
-			slog.String("error", err.Error()))
-	}
-}
-
 
 // antigravityCacheTTL 根据 UsageInfo 内容决定缓存 TTL
 // 403 forbidden 状态稳定，缓存与成功相同（3 分钟）；
