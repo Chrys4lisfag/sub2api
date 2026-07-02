@@ -167,6 +167,39 @@ func (h *ProxyHandler) Create(c *gin.Context) {
 	})
 }
 
+// CreateWarpRequest represents the Warp-tab payload.
+// All fields have sensible defaults if omitted.
+type CreateWarpRequest struct {
+	Name     string `json:"name"`
+	Protocol string `json:"protocol"`
+	Username string `json:"username"`
+	Password string `json:"password"`
+}
+
+// CreateWarp spawns a fresh warp container via warp-panel and
+// records a sub2api Proxy row pointing at its SOCKS5 endpoint.
+// POST /api/v1/admin/proxies/warp
+func (h *ProxyHandler) CreateWarp(c *gin.Context) {
+	var req CreateWarpRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		response.BadRequest(c, "Invalid request: "+err.Error())
+		return
+	}
+
+	executeAdminIdempotentJSON(c, "admin.proxies.create_warp", req, service.DefaultWriteIdempotencyTTL(), func(ctx context.Context) (any, error) {
+		proxy, err := h.adminService.CreateWarpProxy(ctx, &service.CreateWarpProxyInput{
+			Name:     strings.TrimSpace(req.Name),
+			Protocol: strings.TrimSpace(req.Protocol),
+			Username: strings.TrimSpace(req.Username),
+			Password: strings.TrimSpace(req.Password),
+		})
+		if err != nil {
+			return nil, err
+		}
+		return dto.ProxyFromServiceAdmin(proxy), nil
+	})
+}
+
 // Update handles updating a proxy
 // PUT /api/v1/admin/proxies/:id
 func (h *ProxyHandler) Update(c *gin.Context) {

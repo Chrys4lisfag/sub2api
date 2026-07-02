@@ -250,6 +250,12 @@ const (
 	SettingKeyGoogleOAuthRedirectURL         = "google_oauth_redirect_url"
 	SettingKeyGoogleOAuthFrontendRedirectURL = "google_oauth_frontend_redirect_url"
 
+	// Warp panel integration (self-hosted wgcf+WireGuard+gost farm).
+	// Never in git — configured per-instance via admin UI, stored in DB.
+	SettingKeyWarpPanelURL  = "warp_panel_url"
+	SettingKeyWarpPanelUser = "warp_panel_user"
+	SettingKeyWarpPanelPass = "warp_panel_pass"
+
 	// OEM设置
 	SettingKeySiteName                    = "site_name"                     // 网站名称
 	SettingKeySiteLogo                    = "site_logo"                     // 网站Logo (base64)

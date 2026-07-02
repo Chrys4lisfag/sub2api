@@ -133,8 +133,17 @@
           </template>
 
           <template #cell-address="{ row }">
-            <div class="flex items-center gap-1.5">
-              <code class="code text-xs">{{ row.host }}:{{ row.port }}</code>
+            <div class="flex items-start gap-1.5">
+              <div class="flex flex-col gap-0.5">
+                <code class="code text-xs">{{ row.host }}:{{ row.port }}</code>
+                <code
+                  v-if="row.ip_address && row.ip_address !== row.host"
+                  class="text-[10px] font-mono text-gray-500 dark:text-gray-400"
+                  :title="t('admin.proxies.qualityExitIP')"
+                >
+                  → {{ row.ip_address }}
+                </code>
+              </div>
               <div class="relative">
                 <button
                   type="button"
@@ -416,6 +425,19 @@
             </svg>
             {{ t('admin.proxies.batchAdd') }}
           </button>
+          <button
+            type="button"
+            @click="createMode = 'warp'"
+            :class="[
+              '-mb-px border-b-2 px-4 py-2 text-sm font-medium transition-colors',
+              createMode === 'warp'
+                ? 'border-primary-500 text-primary-600 dark:text-primary-400'
+                : 'border-transparent text-gray-500 hover:text-gray-700 dark:text-gray-400 dark:hover:text-gray-300'
+            ]"
+          >
+            <Icon name="cloud" size="sm" class="mr-1.5 inline" />
+            Warp
+          </button>
         </div>
         <ProxyAdBanner />
       </div>
@@ -531,7 +553,7 @@
       </form>
 
       <!-- Batch Add Form -->
-      <div v-else class="space-y-5">
+      <div v-else-if="createMode === 'batch'" class="space-y-5">
         <div>
           <label class="input-label">{{ t('admin.proxies.batchInput') }}</label>
           <textarea
@@ -589,6 +611,45 @@
 
       </div>
 
+      <!-- Warp Add Form -->
+      <form
+        v-else-if="createMode === 'warp'"
+        id="create-warp-form"
+        @submit.prevent="handleCreateWarp"
+        class="space-y-5"
+      >
+        <p class="text-xs text-gray-500 dark:text-gray-400">
+          Provision a fresh warp container via warp-panel. Panel URL / creds live in the DB
+          (<code class="font-mono">settings</code> table keys
+          <code class="font-mono">warp_panel_url</code>,
+          <code class="font-mono">warp_panel_user</code>,
+          <code class="font-mono">warp_panel_pass</code>).
+        </p>
+        <div>
+          <label class="input-label">Protocol</label>
+          <Select v-model="warpForm.protocol" :options="warpProtocolOptions" />
+        </div>
+        <div>
+          <label class="input-label">{{ t('admin.proxies.name') }} <span class="text-xs text-gray-400">(optional — auto if blank)</span></label>
+          <input
+            v-model="warpForm.name"
+            type="text"
+            class="input"
+            placeholder="auto-derived from container name"
+          />
+        </div>
+        <div class="grid grid-cols-2 gap-4">
+          <div>
+            <label class="input-label">Login</label>
+            <input v-model="warpForm.username" type="text" class="input" placeholder="Chrys4lis" />
+          </div>
+          <div>
+            <label class="input-label">Password</label>
+            <input v-model="warpForm.password" type="text" class="input" placeholder="13371488" />
+          </div>
+        </div>
+      </form>
+
       <template #footer>
         <div class="flex justify-end gap-3">
           <button @click="closeCreateModal" type="button" class="btn btn-secondary">
@@ -624,7 +685,7 @@
             {{ submitting ? t('admin.proxies.creating') : t('common.create') }}
           </button>
           <button
-            v-else
+            v-else-if="createMode === 'batch'"
             @click="handleBatchCreate"
             type="button"
             :disabled="submitting || batchParseResult.valid === 0"
@@ -655,6 +716,35 @@
                 ? t('admin.proxies.importing')
                 : t('admin.proxies.importProxies', { count: batchParseResult.valid })
             }}
+          </button>
+          <button
+            v-else-if="createMode === 'warp'"
+            type="submit"
+            form="create-warp-form"
+            :disabled="submitting"
+            class="btn btn-primary"
+          >
+            <svg
+              v-if="submitting"
+              class="-ml-1 mr-2 h-4 w-4 animate-spin"
+              fill="none"
+              viewBox="0 0 24 24"
+            >
+              <circle
+                class="opacity-25"
+                cx="12"
+                cy="12"
+                r="10"
+                stroke="currentColor"
+                stroke-width="4"
+              ></circle>
+              <path
+                class="opacity-75"
+                fill="currentColor"
+                d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"
+              ></path>
+            </svg>
+            {{ submitting ? 'Spawning…' : 'Spawn Warp Proxy' }}
           </button>
         </div>
       </template>
@@ -1105,7 +1195,7 @@ const qualityReportProxy = ref<Proxy | null>(null)
 const qualityReport = ref<ProxyQualityCheckResult | null>(null)
 
 // Batch import state
-const createMode = ref<'standard' | 'batch'>('standard')
+const createMode = ref<'standard' | 'batch' | 'warp'>('standard')
 const batchInput = ref('')
 const batchParseResult = reactive({
   total: 0,
@@ -1120,6 +1210,19 @@ const batchParseResult = reactive({
     password: string
   }>
 })
+
+const warpForm = reactive({
+  name: '',
+  protocol: 'socks5h' as ProxyProtocol,
+  username: 'Chrys4lis',
+  password: '13371488',
+})
+
+const warpProtocolOptions = [
+  { value: 'socks5h', label: 'SOCKS5h' },
+  { value: 'socks5', label: 'SOCKS5' },
+  { value: 'http', label: 'HTTP' },
+]
 
 const createForm = reactive({
   name: '',
@@ -1268,6 +1371,10 @@ const closeCreateModal = () => {
   batchParseResult.invalid = 0
   batchParseResult.duplicate = 0
   batchParseResult.proxies = []
+  warpForm.name = ''
+  warpForm.protocol = 'socks5h'
+  warpForm.username = 'Chrys4lis'
+  warpForm.password = '13371488'
 }
 
 const handleDataImported = () => {
@@ -1397,6 +1504,26 @@ const handleCreateProxy = async () => {
   } catch (error: any) {
     appStore.showError(error.response?.data?.detail || t('admin.proxies.failedToCreate'))
     console.error('Error creating proxy:', error)
+  } finally {
+    submitting.value = false
+  }
+}
+
+const handleCreateWarp = async () => {
+  submitting.value = true
+  try {
+    await adminAPI.proxies.createWarp({
+      name: warpForm.name.trim() || undefined,
+      protocol: warpForm.protocol,
+      username: warpForm.username.trim(),
+      password: warpForm.password.trim(),
+    })
+    appStore.showSuccess(t('admin.proxies.proxyCreated'))
+    closeCreateModal()
+    loadProxies()
+  } catch (error: any) {
+    appStore.showError(error.response?.data?.detail || error.response?.data?.error?.message || t('admin.proxies.failedToCreate'))
+    console.error('Error spawning warp proxy:', error)
   } finally {
     submitting.value = false
   }

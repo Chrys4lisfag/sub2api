@@ -482,6 +482,11 @@ func (s *stubAdminService) CreateProxy(ctx context.Context, input *service.Creat
 	return &proxy, nil
 }
 
+func (s *stubAdminService) CreateWarpProxy(ctx context.Context, input *service.CreateWarpProxyInput) (*service.Proxy, error) {
+	proxy := service.Proxy{ID: 401, Name: input.Name, Status: service.StatusActive}
+	return &proxy, nil
+}
+
 func (s *stubAdminService) UpdateProxy(ctx context.Context, id int64, input *service.UpdateProxyInput) (*service.Proxy, error) {
 	s.mu.Lock()
 	s.updatedProxyIDs = append(s.updatedProxyIDs, id)

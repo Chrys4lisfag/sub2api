@@ -88,6 +88,23 @@ export async function create(proxyData: CreateProxyRequest): Promise<Proxy> {
 }
 
 /**
+ * Provision a fresh warp-panel-backed proxy container and register
+ * the resulting SOCKS5 endpoint as a sub2api proxy row.
+ * Panel URL / creds are read server-side from the `settings` table.
+ */
+export interface CreateWarpProxyRequest {
+  name?: string
+  protocol?: string
+  username?: string
+  password?: string
+}
+
+export async function createWarp(payload: CreateWarpProxyRequest): Promise<Proxy> {
+  const { data } = await apiClient.post<Proxy>('/admin/proxies/warp', payload)
+  return data
+}
+
+/**
  * Update proxy
  * @param id - Proxy ID
  * @param updates - Fields to update
@@ -261,6 +278,7 @@ export const proxiesAPI = {
   getAllWithCount,
   getById,
   create,
+  createWarp,
   update,
   delete: deleteProxy,
   toggleStatus,
