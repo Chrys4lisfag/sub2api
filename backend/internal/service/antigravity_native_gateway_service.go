@@ -325,20 +325,40 @@ func (s *AntigravityNativeGatewayService) ForwardGemini(
 	}
 
 	// Proactive USAGE WINDOWS check — read the same in-memory cache
-	// the dashboard renders (usageInfo.antigravity_quota). If ANY
-	// family-mate of the requested model shows 100 % utilization with
-	// the upstream-reported reset time still in the future, skip
-	// this account immediately via UpstreamFailoverError{429}. The
-	// gateway handler's failover loop rotates to the next account in
-	// the group. No badge writes, no Extra writes — the cache IS the
-	// selection signal.
+	// the dashboard renders. If ANY family-mate of the requested
+	// model is at 100 % with reset time still in the future, DO NOT
+	// call upstream: mark the account rate-limited (SetRateLimited
+	// touches account.RateLimitedAt so the next SelectAccountForModel
+	// naturally skips this account), then return
+	// UpstreamFailoverError{429} so the current-request failover loop
+	// rotates to a healthy account.
+	//
+	// The 429 body is Google's canonical RESOURCE_EXHAUSTED shape —
+	// PassthroughVerbatim=false + the wrapper below only surfaces if
+	// the entire failover loop is exhausted (all accounts rate
+	// limited); in that terminal case the loop's per-platform error
+	// mapping produces the client-facing text, not this body.
 	if s.nativeIsFamilyExhausted(account.ID, originalModel) {
-		msg := []byte(`{"error":{"code":429,"message":"native antigravity: family quota exhausted for this account (per USAGE WINDOWS snapshot); rotating","status":"RESOURCE_EXHAUSTED"}}`)
+		resetAt := s.nativeFamilyResetForModel(account.ID, originalModel)
+		if !resetAt.IsZero() && s.accountRepo != nil {
+			if err := s.accountRepo.SetRateLimited(ctx, account.ID, resetAt); err != nil {
+				slog.WarnContext(ctx, "native: SetRateLimited failed",
+					slog.Int64("account_id", account.ID),
+					slog.String("error", err.Error()))
+			} else {
+				slog.InfoContext(ctx, "native: proactive family exhaustion → SetRateLimited",
+					slog.Int64("account_id", account.ID),
+					slog.String("model", originalModel),
+					slog.String("family", nativeFamilyForModel(originalModel)),
+					slog.Time("reset_at", resetAt))
+			}
+		}
+		body := []byte(`{"error":{"code":429,"message":"Individual quota reached. Please upgrade your subscription to increase your limits.","status":"RESOURCE_EXHAUSTED"}}`)
 		return nil, &UpstreamFailoverError{
 			StatusCode:             http.StatusTooManyRequests,
-			ResponseBody:           msg,
+			ResponseBody:           body,
 			ResponseHeaders:        http.Header{"Content-Type": []string{"application/json"}},
-			PassthroughVerbatim:    false,
+			PassthroughVerbatim:    true,
 			RetryableOnSameAccount: false,
 		}
 	}
@@ -2542,13 +2562,13 @@ func (s *AntigravityNativeGatewayService) nativeMarkFamilyExhaustedInCache(
 	account *Account,
 	originalModel string,
 	body []byte,
-) {
+) time.Time {
 	if s.usageCache == nil || account == nil {
-		return
+		return time.Time{}
 	}
 	modelKey := strings.ToLower(strings.TrimSpace(strings.TrimPrefix(originalModel, "models/")))
 	if modelKey == "" {
-		return
+		return time.Time{}
 	}
 
 	var resetAt time.Time
@@ -2560,8 +2580,9 @@ func (s *AntigravityNativeGatewayService) nativeMarkFamilyExhaustedInCache(
 		resetAt = time.Now().Add(antigravityDefaultRateLimitDuration)
 	}
 
-	// Read-modify-write the cache entry. Preserve every other model's
-	// utilization + reset time; only overwrite the failing model.
+	// 1) Update the USAGE WINDOWS in-memory cache so dashboard renders
+	//    the exhaustion (family bar goes red) — same cache the proactive
+	//    check reads.
 	raw, _ := s.usageCache.antigravityCache.Load(account.ID)
 	entry, _ := raw.(*antigravityUsageCache)
 	if entry == nil || entry.usageInfo == nil {
@@ -2584,10 +2605,70 @@ func (s *AntigravityNativeGatewayService) nativeMarkFamilyExhaustedInCache(
 	entry.timestamp = time.Now()
 	s.usageCache.antigravityCache.Store(account.ID, entry)
 
-	slog.InfoContext(ctx, "native: 429 → USAGE WINDOWS cache marked",
+	// 2) Mark the account rate-limited at the DB level so
+	//    Account.IsSchedulable() naturally skips it on the NEXT select.
+	//    Mirrors what GeminiMessagesCompatService.handleGeminiUpstreamError
+	//    does — this is the standard sub2api pattern for "429 → skip
+	//    account until reset". No STATUS badges (this only touches
+	//    account.RateLimitedAt / RateLimitResetAt, not model_rate_limits).
+	if s.accountRepo != nil {
+		if err := s.accountRepo.SetRateLimited(ctx, account.ID, resetAt); err != nil {
+			slog.WarnContext(ctx, "native: SetRateLimited failed",
+				slog.Int64("account_id", account.ID),
+				slog.String("error", err.Error()))
+		}
+	}
+
+	slog.InfoContext(ctx, "native: 429 → cache marked + SetRateLimited",
 		slog.Int64("account_id", account.ID),
 		slog.String("model", modelKey),
 		slog.String("family", nativeFamilyForModel(modelKey)),
 		slog.Time("reset_at", resetAt),
 		slog.Duration("cooldown", time.Until(resetAt).Truncate(time.Second)))
+	return resetAt
+}
+
+// nativeFamilyResetForModel returns the earliest future reset_time
+// across every exhausted (utilization >= 100) family-mate of the
+// requested model in the USAGE WINDOWS cache. Used by the proactive
+// check to feed a SetRateLimited call so the selector's next pass
+// skips the account naturally. Returns zero time when nothing usable
+// is found — caller must guard.
+func (s *AntigravityNativeGatewayService) nativeFamilyResetForModel(accountID int64, requestedModel string) time.Time {
+	if s.usageCache == nil {
+		return time.Time{}
+	}
+	fam := nativeFamilyForModel(requestedModel)
+	if fam == "" {
+		return time.Time{}
+	}
+	raw, ok := s.usageCache.antigravityCache.Load(accountID)
+	if !ok {
+		return time.Time{}
+	}
+	entry, ok := raw.(*antigravityUsageCache)
+	if !ok || entry == nil || entry.usageInfo == nil {
+		return time.Time{}
+	}
+	now := time.Now()
+	var best time.Time
+	for modelName, q := range entry.usageInfo.AntigravityQuota {
+		if q == nil || q.Utilization < 100 {
+			continue
+		}
+		if !nativeModelInFamily(modelName, fam) {
+			continue
+		}
+		if q.ResetTime == "" {
+			continue
+		}
+		reset, err := time.Parse(time.RFC3339, q.ResetTime)
+		if err != nil || !now.Before(reset) {
+			continue
+		}
+		if best.IsZero() || reset.Before(best) {
+			best = reset
+		}
+	}
+	return best
 }
