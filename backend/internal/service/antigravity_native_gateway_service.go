@@ -324,6 +324,25 @@ func (s *AntigravityNativeGatewayService) ForwardGemini(
 		return nil, fmt.Errorf("native gemini: wrong platform %q", account.Platform)
 	}
 
+	// Proactive re-auth check — skip accounts the dashboard's USAGE
+	// WINDOWS already flags as "Re-auth Required" (needs_reauth
+	// populated by the periodic quota fetch on HTTP 401 / invalid_grant).
+	// pauseAccountForReauth persists account.Status='error' so the
+	// selector's IsSchedulable() skips this account on subsequent
+	// SelectAccountForModel calls. Failover on this request rotates
+	// via the UpstreamFailoverError{401} below.
+	if s.nativeIsReauthRequired(account.ID) {
+		s.pauseAccountForReauth(ctx, account, "USAGE WINDOWS snapshot flagged needs_reauth", nil)
+		body := []byte(`{"error":{"code":401,"message":"Antigravity native account needs re-authentication.","status":"UNAUTHENTICATED"}}`)
+		return nil, &UpstreamFailoverError{
+			StatusCode:             http.StatusUnauthorized,
+			ResponseBody:           body,
+			ResponseHeaders:        http.Header{"Content-Type": []string{"application/json"}},
+			PassthroughVerbatim:    true,
+			RetryableOnSameAccount: false,
+		}
+	}
+
 	// Proactive USAGE WINDOWS check — read the same in-memory cache
 	// the dashboard renders. If ANY family-mate of the requested
 	// model is at 100 % with reset time still in the future, DO NOT
@@ -376,7 +395,14 @@ func (s *AntigravityNativeGatewayService) ForwardGemini(
 		// a real error body. classifyNativeUpstreamErr decides the
 		// shape — OAuth refresh failures get 401 + verbatim body so
 		// admins see "invalid_grant"; everything else gets a 502.
-		return nil, classifyNativeUpstreamErr(err, "getClient")
+		uErr := classifyNativeUpstreamErr(err, "getClient")
+		if uErr.StatusCode == http.StatusUnauthorized {
+			// invalid_grant → OAuth token dead. Persist so subsequent
+			// selections skip this account until an operator re-runs
+			// the OAuth flow.
+			s.pauseAccountForReauth(ctx, account, err.Error(), uErr.ResponseBody)
+		}
+		return nil, uErr
 	}
 
 	// Best-effort: ensure the per-account Unleash organic-traffic mimic
@@ -499,7 +525,11 @@ func (s *AntigravityNativeGatewayService) ForwardGemini(
 		// internal token refresh returning `400 invalid_grant` — that
 		// must surface as 401 to the client (and NOT silently 200-empty)
 		// so the admin re-authenticates the account.
-		return nil, classifyNativeUpstreamErr(err, "upstream")
+		uErr := classifyNativeUpstreamErr(err, "upstream")
+		if uErr.StatusCode == http.StatusUnauthorized {
+			s.pauseAccountForReauth(ctx, account, err.Error(), uErr.ResponseBody)
+		}
+		return nil, uErr
 	}
 	defer resp.Body.Close()
 
@@ -537,6 +567,18 @@ func (s *AntigravityNativeGatewayService) ForwardGemini(
 			case forbiddenTypeViolation:
 				s.pauseAccountForViolation(ctx, account, upstreamMsg, raw)
 			}
+		}
+
+		// 400 / 401 with re-auth signal → persist account.Status='error'
+		// so future SelectAccountForModel calls skip this account. The
+		// invalid_grant path in classifyNativeUpstreamErr handles SDK-
+		// level auth failures; this branch handles upstream JSON bodies
+		// that indicate the OAuth session is dead ("Re-auth Required" /
+		// "reauth" / "invalid_grant"). Failover on this request still
+		// rotates via the UpstreamFailoverError below.
+		if (resp.StatusCode == http.StatusBadRequest || resp.StatusCode == http.StatusUnauthorized) &&
+			nativeBodyIndicatesReauth(raw) {
+			s.pauseAccountForReauth(ctx, account, extractAgyErrorMessage(raw), raw)
 		}
 
 		// 429 → update the USAGE WINDOWS in-memory cache with the
@@ -2364,6 +2406,85 @@ func (s *AntigravityNativeGatewayService) pauseAccountForViolation(
 		slog.String("upstream_msg", upstreamMsg),
 		slog.Int("body_bytes", len(rawBody)),
 	)
+}
+
+// pauseAccountForReauth mirrors pauseAccountForValidation/Violation for
+// the "account needs re-authentication" case — when the upstream's
+// OAuth token has been revoked (invalid_grant on refresh) or the
+// upstream returns a "Re-auth Required" error body directly. Same
+// persistence path (SetError → account.Status becomes 'error' →
+// selector's IsSchedulable returns false → next SelectAccountForModel
+// skips it) as the 403 helpers.
+//
+// Recovery: operator re-runs the OAuth flow via the admin UI (which
+// clears the error status). Until then, the account is out of
+// rotation, matching the "Re-auth Required" badge shown in USAGE
+// WINDOWS.
+func (s *AntigravityNativeGatewayService) pauseAccountForReauth(
+	ctx context.Context,
+	account *Account,
+	upstreamMsg string,
+	rawBody []byte,
+) {
+	if account == nil || s.accountRepo == nil {
+		return
+	}
+	msg := "Re-auth required: account OAuth token needs re-authentication"
+	if upstreamMsg != "" {
+		msg += " | upstream: " + upstreamMsg
+	}
+	if err := s.accountRepo.SetError(ctx, account.ID, msg); err != nil {
+		slog.WarnContext(ctx, "native: SetError(reauth_required) failed",
+			slog.Int64("account_id", account.ID), slog.String("error", err.Error()))
+		return
+	}
+	slog.WarnContext(ctx, "native: account paused — re-auth required",
+		slog.Int64("account_id", account.ID),
+		slog.String("upstream_msg", upstreamMsg),
+		slog.Int("body_bytes", len(rawBody)),
+	)
+}
+
+// nativeIsReauthRequired reports whether the requested-account's
+// USAGE WINDOWS cache flags it as needs_reauth (set by the periodic
+// quota fetch on HTTP 401 / invalid_grant). Used by ForwardGemini's
+// proactive check to skip accounts the dashboard already shows as
+// "Re-auth Required" — the SAME cache the UI reads. Cache-cold
+// returns false (never over-block).
+func (s *AntigravityNativeGatewayService) nativeIsReauthRequired(accountID int64) bool {
+	if s.usageCache == nil {
+		return false
+	}
+	raw, ok := s.usageCache.antigravityCache.Load(accountID)
+	if !ok {
+		return false
+	}
+	entry, ok := raw.(*antigravityUsageCache)
+	if !ok || entry == nil || entry.usageInfo == nil {
+		return false
+	}
+	return entry.usageInfo.NeedsReauth
+}
+
+// nativeBodyIndicatesReauth reports whether an upstream error body
+// carries the "Re-auth" / re-authentication signal (case-insensitive).
+// Cloudcode-pa surfaces this in several shapes:
+//   - HTTP 400 with error.message containing "Re-auth" or "reauth"
+//   - HTTP 401 UNAUTHENTICATED with a message about token refresh
+//   - agymimic-wrapped errors surfacing "invalid_grant" in the body
+//
+// Any hit → the caller should call pauseAccountForReauth so the
+// selector skips this account until an operator re-runs the OAuth
+// flow.
+func nativeBodyIndicatesReauth(body []byte) bool {
+	if len(body) == 0 {
+		return false
+	}
+	low := strings.ToLower(string(body))
+	return strings.Contains(low, "re-auth") ||
+		strings.Contains(low, "reauth") ||
+		strings.Contains(low, "invalid_grant") ||
+		strings.Contains(low, "re-authentication")
 }
 
 // extractAgyErrorMessage parses the upstream JSON body for
