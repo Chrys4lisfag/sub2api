@@ -47,8 +47,13 @@ func RegisterAdminRoutes(
 		// Antigravity OAuth (legacy in-tree backend)
 		registerAntigravityOAuthRoutes(admin, h)
 
+<<<<<<< HEAD
 		// Antigravity Native OAuth (github.com/koval/agymimic-backed)
 		registerAntigravityNativeOAuthRoutes(admin, h)
+=======
+		// Grok OAuth
+		registerGrokOAuthRoutes(admin, h)
+>>>>>>> upstream/main
 
 		// 代理管理
 		registerProxyRoutes(admin, h)
@@ -335,6 +340,9 @@ func registerAccountRoutes(admin *gin.RouterGroup, h *handler.Handlers) {
 		// Antigravity 默认模型映射
 		accounts.GET("/antigravity/default-model-mapping", h.Admin.Account.GetAntigravityDefaultModelMapping)
 
+		// Spark 影子账号
+		accounts.POST("/:id/shadow", h.Admin.OpenAIOAuth.CreateShadow)
+
 		// Claude OAuth routes
 		accounts.POST("/generate-auth-url", h.Admin.OAuth.GenerateAuthURL)
 		accounts.POST("/generate-setup-token-url", h.Admin.OAuth.GenerateSetupTokenURL)
@@ -365,6 +373,7 @@ func registerOpenAIOAuthRoutes(admin *gin.RouterGroup, h *handler.Handlers) {
 		openai.POST("/refresh-token", h.Admin.OpenAIOAuth.RefreshToken)
 		openai.POST("/accounts/:id/refresh", h.Admin.OpenAIOAuth.RefreshAccountToken)
 		openai.POST("/create-from-oauth", h.Admin.OpenAIOAuth.CreateAccountFromOAuth)
+		openai.POST("/create-from-codex-pat", h.Admin.OpenAIOAuth.CreateAccountFromCodexPAT)
 		openai.GET("/accounts/:id/quota", h.Admin.OpenAIOAuth.QueryQuota)
 		openai.POST("/accounts/:id/reset-quota", h.Admin.OpenAIOAuth.ResetQuota)
 	}
@@ -388,12 +397,26 @@ func registerAntigravityOAuthRoutes(admin *gin.RouterGroup, h *handler.Handlers)
 	}
 }
 
+<<<<<<< HEAD
 func registerAntigravityNativeOAuthRoutes(admin *gin.RouterGroup, h *handler.Handlers) {
 	g := admin.Group("/antigravity-native")
 	{
 		g.POST("/oauth/auth-url", h.Admin.AntigravityNativeOAuth.GenerateAuthURL)
 		g.POST("/oauth/exchange-code", h.Admin.AntigravityNativeOAuth.ExchangeCode)
 		g.POST("/oauth/refresh-token", h.Admin.AntigravityNativeOAuth.RefreshToken)
+=======
+func registerGrokOAuthRoutes(admin *gin.RouterGroup, h *handler.Handlers) {
+	grok := admin.Group("/grok")
+	{
+		grok.POST("/oauth/auth-url", h.Admin.GrokOAuth.GenerateAuthURL)
+		grok.POST("/oauth/exchange-code", h.Admin.GrokOAuth.ExchangeCode)
+		grok.POST("/oauth/refresh-token", h.Admin.GrokOAuth.RefreshToken)
+		grok.POST("/oauth/create-from-oauth", h.Admin.GrokOAuth.CreateAccountFromOAuth)
+		grok.POST("/accounts/:id/refresh", h.Admin.GrokOAuth.RefreshAccountToken)
+		grok.GET("/accounts/:id/quota", h.Admin.GrokOAuth.QueryQuota)
+		grok.POST("/accounts/:id/reset-quota", h.Admin.GrokOAuth.ResetQuota)
+		grok.GET("/runtime-sanity", h.Admin.GrokOAuth.RuntimeSanity)
+>>>>>>> upstream/main
 	}
 }
 
@@ -552,6 +575,7 @@ func registerSubscriptionRoutes(admin *gin.RouterGroup, h *handler.Handlers) {
 		subscriptions.POST("/bulk-assign", h.Admin.Subscription.BulkAssign)
 		subscriptions.POST("/:id/extend", h.Admin.Subscription.Extend)
 		subscriptions.POST("/:id/reset-quota", h.Admin.Subscription.ResetQuota)
+		subscriptions.POST("/:id/revoke", h.Admin.Subscription.Revoke)
 		subscriptions.DELETE("/:id", h.Admin.Subscription.Revoke)
 	}
 
