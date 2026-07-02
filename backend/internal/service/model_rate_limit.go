@@ -142,11 +142,20 @@ func antigravityModelRateLimitKeys(model string) []string {
 	if model == "" {
 		return nil
 	}
-	keys := []string{model}
-	if isAntigravityGeminiModel(model) && model != antigravityGeminiModelRateLimitKey {
-		keys = append(keys, antigravityGeminiModelRateLimitKey)
+	// For gemini models: write ONLY the family key. The selector's
+	// modelRateLimitKeysForRequest (PlatformAntigravity case) still
+	// looks up [model, antigravityGeminiModelRateLimitKey], so a
+	// single family-key entry catches every gemini-* request without
+	// littering STATUS with per-model badges. Mirrors the
+	// PlatformAntigravityNative writer's family-only pattern.
+	//
+	// For claude/other models: keep the per-model entry (no family
+	// key exists for those in legacy antigravity — one badge per
+	// exhausted model is the intended granularity).
+	if isAntigravityGeminiModel(model) {
+		return []string{antigravityGeminiModelRateLimitKey}
 	}
-	return keys
+	return []string{model}
 }
 
 func (a *Account) modelRateLimitResetAt(scope string) *time.Time {
