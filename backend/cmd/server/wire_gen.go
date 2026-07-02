@@ -182,7 +182,7 @@ func initializeApplication(buildInfo handler.BuildInfo) (*Application, error) {
 	antigravityQuotaFetcher := service.NewAntigravityQuotaFetcher(proxyRepository)
 	usageCache := service.NewUsageCache()
 	accountUsageService := service.NewAccountUsageService(accountRepository, usageLogRepository, claudeUsageFetcher, geminiQuotaService, antigravityQuotaFetcher, usageCache, identityCache, tlsFingerprintProfileService)
-	antigravityNativeGatewayService := service.NewAntigravityNativeGatewayService(accountRepository, proxyRepository, antigravityNativeOAuthService, settingService, chatHistoryLogService)
+	antigravityNativeGatewayService := service.NewAntigravityNativeGatewayService(accountRepository, proxyRepository, antigravityNativeOAuthService, settingService, chatHistoryLogService, usageCache)
 	// Inject the agymimic-backed native gateway as the quota fetcher
 	// for platform=antigravity_native. Keeps native dashboard refresh on
 	// the agymimic wire (token auto-refresh + agy.exe headers).

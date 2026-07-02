@@ -52,6 +52,15 @@ type AntigravityNativeGatewayService struct {
 	settingService  *SettingService
 	chatHistoryLog  *ChatHistoryLogService
 
+	// usageCache is the shared antigravity USAGE WINDOWS cache
+	// (populated by AccountUsageService.getAntigravityUsage every
+	// dashboard render). Native gateway consults it BEFORE hitting
+	// the upstream to proactively skip accounts whose requested-model
+	// family is already at 100 % utilization. On real 429s, native
+	// updates the same cache so the dashboard + subsequent selections
+	// see the exhaustion — one source of truth, no parallel field.
+	usageCache *UsageCache
+
 	// Per-account agymimic Client cache — keyed by account ID. Recreated on
 	// proxy/credential change (handled by callers via Invalidate).
 	clientCacheMu sync.RWMutex
@@ -88,6 +97,7 @@ func NewAntigravityNativeGatewayService(
 	oauthService *AntigravityNativeOAuthService,
 	settingService *SettingService,
 	chatHistoryLog *ChatHistoryLogService,
+	usageCache *UsageCache,
 ) *AntigravityNativeGatewayService {
 	return &AntigravityNativeGatewayService{
 		accountRepo:    accountRepo,
@@ -95,6 +105,7 @@ func NewAntigravityNativeGatewayService(
 		oauthService:   oauthService,
 		settingService: settingService,
 		chatHistoryLog: chatHistoryLog,
+		usageCache:     usageCache,
 		clientCache:    map[int64]*nativeCacheEntry{},
 		metricsCache:   map[int64]*nativeMetricsEntry{},
 	}
@@ -313,6 +324,25 @@ func (s *AntigravityNativeGatewayService) ForwardGemini(
 		return nil, fmt.Errorf("native gemini: wrong platform %q", account.Platform)
 	}
 
+	// Proactive USAGE WINDOWS check — read the same in-memory cache
+	// the dashboard renders (usageInfo.antigravity_quota). If ANY
+	// family-mate of the requested model shows 100 % utilization with
+	// the upstream-reported reset time still in the future, skip
+	// this account immediately via UpstreamFailoverError{429}. The
+	// gateway handler's failover loop rotates to the next account in
+	// the group. No badge writes, no Extra writes — the cache IS the
+	// selection signal.
+	if s.nativeIsFamilyExhausted(account.ID, originalModel) {
+		msg := []byte(`{"error":{"code":429,"message":"native antigravity: family quota exhausted for this account (per USAGE WINDOWS snapshot); rotating","status":"RESOURCE_EXHAUSTED"}}`)
+		return nil, &UpstreamFailoverError{
+			StatusCode:             http.StatusTooManyRequests,
+			ResponseBody:           msg,
+			ResponseHeaders:        http.Header{"Content-Type": []string{"application/json"}},
+			PassthroughVerbatim:    false,
+			RetryableOnSameAccount: false,
+		}
+	}
+
 	cli, err := s.getClient(ctx, account)
 	if err != nil {
 		// Pre-2026-06-18: returned the raw error here. The gateway
@@ -489,15 +519,16 @@ func (s *AntigravityNativeGatewayService) ForwardGemini(
 			}
 		}
 
-		// 429 → family-scoped cooldown so the selector skips this
-		// account (for Gemini or Others, matching agy's own quota
-		// split) on the NEXT request. Failover still rotates THIS
-		// request via the UpstreamFailoverError below. Reset window
-		// comes from ParseGeminiRateLimitResetTime — inherits every
-		// upstream reset-shape sub2api's gemini gateway already knows,
-		// plus the "Resets in Xh Ym Zs" cloudcode-pa native format.
+		// 429 → update the USAGE WINDOWS in-memory cache with the
+		// failing model at 100 % + parsed reset time. Same cache the
+		// dashboard reads AND our proactive check (nativeIsFamilyExhausted)
+		// consults on the next request. No STATUS badges, no Extra
+		// writes — cache IS the source of truth. Reset priority via
+		// ParseGeminiRateLimitResetTime (structured retryDelay +
+		// quotaResetDelay + "Please retry in Xs" + "Resets in Xh Ym Zs")
+		// → ApplyCustom429Policy → default cooldown.
 		if resp.StatusCode == http.StatusTooManyRequests {
-			s.handleAntigravityNative429(ctx, account, originalModel, raw)
+			s.nativeMarkFamilyExhaustedInCache(ctx, account, originalModel, raw)
 		}
 		return nil, &UpstreamFailoverError{
 			StatusCode:             resp.StatusCode,
@@ -977,14 +1008,11 @@ func (s *AntigravityNativeGatewayService) streamGeminiToClient(
 						slog.Bool("any_bytes_sent", headersCommitted),
 					)
 					_, _ = io.Copy(io.Discard, resp.Body)
-					// Same family-cooldown treatment as the HTTP-429
-					// branch above. Fetch the Account by ID (streaming
-					// inner loop only carries the ID) so the handler
-					// has the object it needs; best-effort — if the
-					// lookup fails the failover below still rotates.
+					// Same cache mark as the HTTP-429 branch — fetch
+					// account by ID (SSE inner loop only has the ID).
 					if s.accountRepo != nil {
 						if acc, gerr := s.accountRepo.GetByID(ctx, accountID); gerr == nil && acc != nil {
-							s.handleAntigravityNative429(ctx, acc, originalModel, out)
+							s.nativeMarkFamilyExhaustedInCache(ctx, acc, originalModel, out)
 						}
 					}
 					if !headersCommitted {
@@ -2412,68 +2440,154 @@ func responsePartsSummary(resp *types.Response) string {
 		text, thought, fn, inline, empty)
 }
 
-// handleAntigravityNative429 marks the account rate-limited under the
-// two-family scope agy.exe enforces upstream (Gemini vs Others). Mirrors
-// GeminiMessagesCompatService.handleGeminiUpstreamError but writes to
-// account.Extra["model_rate_limits"] under the FAMILY key
-// (antigravity_native:gemini / antigravity_native:others) instead of
-// account-level SetRateLimited — so a native account whose Gemini
-// quota is hit can still serve Claude/GPT requests, matching agy's
-// own per-family quota split.
+// nativeFamilyForModel classifies a native antigravity model into
+// one of the two upstream quota families that agy.exe's own UI
+// exposes: "gemini" (all gemini-* models including image variants)
+// or "others" (claude-*, gpt-*, anything else). Empty string when
+// the input is empty.
 //
-// Reset-time priority (all handled inside ParseGeminiRateLimitResetTime):
-//  1. Gemini per-daily-quota heuristic (looksLikeGeminiDailyQuota)
-//  2. error.details[].metadata.quotaResetDelay
-//  3. `Please retry in Xs` regex
-//  4. `Resets in Xh Ym Zs` regex (added for cloudcode-pa native)
-// Falls back to ApplyCustom429Policy (per-account custom cooldown)
-// then to antigravityDefaultRateLimitDuration.
+// Same classification logic drives both:
+//  - proactive check: nativeIsFamilyExhausted reads the USAGE WINDOWS
+//    cache and returns true if ANY family-mate is at 100 %
+//  - reactive cache update: on 429, we mark the failing model at
+//    100 % in the same cache so the next proactive check catches it
+//    without needing to write anything to account.Extra
+func nativeFamilyForModel(model string) string {
+	m := strings.ToLower(strings.TrimSpace(strings.TrimPrefix(model, "models/")))
+	if m == "" {
+		return ""
+	}
+	if strings.HasPrefix(m, "gemini-") {
+		return "gemini"
+	}
+	return "others"
+}
+
+// nativeModelInFamily reports whether the given upstream model name
+// (as it appears in cache keys — normalized/lowercased) belongs to
+// the given family. Used by nativeIsFamilyExhausted's aggregation.
+func nativeModelInFamily(model, family string) bool {
+	m := strings.ToLower(model)
+	switch family {
+	case "gemini":
+		return strings.HasPrefix(m, "gemini-")
+	case "others":
+		return !strings.HasPrefix(m, "gemini-")
+	}
+	return false
+}
+
+// nativeIsFamilyExhausted reads the USAGE WINDOWS in-memory cache
+// (populated by AccountUsageService.getAntigravityUsage on every
+// dashboard render + by nativeMarkFamilyExhaustedInCache on every
+// 429) and returns true if ANY member of the requested family shows
+// utilization >= 100 with the upstream-reported reset time still in
+// the future.
 //
-// Failover STILL rotates the current request via the caller's
-// UpstreamFailoverError return. This function only writes the marker
-// so the selector skips this account for the same family until reset.
-func (s *AntigravityNativeGatewayService) handleAntigravityNative429(
+// Cache-cold (no cache entry yet) returns false — never over-block
+// scheduling. The reactive 429 path warms the cache on first
+// upstream error, so subsequent selections converge.
+func (s *AntigravityNativeGatewayService) nativeIsFamilyExhausted(accountID int64, requestedModel string) bool {
+	if s.usageCache == nil {
+		return false
+	}
+	fam := nativeFamilyForModel(requestedModel)
+	if fam == "" {
+		return false
+	}
+	raw, ok := s.usageCache.antigravityCache.Load(accountID)
+	if !ok {
+		return false
+	}
+	entry, ok := raw.(*antigravityUsageCache)
+	if !ok || entry == nil || entry.usageInfo == nil {
+		return false
+	}
+	quota := entry.usageInfo.AntigravityQuota
+	if len(quota) == 0 {
+		return false
+	}
+	now := time.Now()
+	for modelName, q := range quota {
+		if q == nil || q.Utilization < 100 {
+			continue
+		}
+		if !nativeModelInFamily(modelName, fam) {
+			continue
+		}
+		// Reset already passed → stale entry, don't over-block.
+		if q.ResetTime != "" {
+			if reset, err := time.Parse(time.RFC3339, q.ResetTime); err == nil && !now.Before(reset) {
+				continue
+			}
+		}
+		return true
+	}
+	return false
+}
+
+// nativeMarkFamilyExhaustedInCache updates the USAGE WINDOWS cache
+// so the failing model shows 100 % utilization with the parsed
+// reset time. That's the same cache the dashboard renders and the
+// selector's proactive check reads — one source of truth, no writes
+// to account.Extra or model_rate_limits.
+//
+// Reset priority: ParseGeminiRateLimitResetTime (structured
+// retryDelay + quotaResetDelay + "Please retry in Xs" +
+// "Resets in Xh Ym Zs") → ApplyCustom429Policy per-account cooldown
+// → antigravityDefaultRateLimitDuration (30 s). Mirrors gemini's
+// handleGeminiUpstreamError order exactly.
+func (s *AntigravityNativeGatewayService) nativeMarkFamilyExhaustedInCache(
 	ctx context.Context,
 	account *Account,
 	originalModel string,
 	body []byte,
 ) {
-	if account == nil || s.accountRepo == nil {
+	if s.usageCache == nil || account == nil {
 		return
 	}
-	fam := antigravityNativeFamilyKey(originalModel)
-	if fam == "" {
+	modelKey := strings.ToLower(strings.TrimSpace(strings.TrimPrefix(originalModel, "models/")))
+	if modelKey == "" {
 		return
 	}
 
-	// Custom 429 policy takes precedence (per-account operator setting).
-	// Only used when its counter still permits + parsing succeeds; if
-	// the counter is exhausted or missing, falls through to platform
-	// defaults exactly like handleGeminiUpstreamError does.
 	var resetAt time.Time
 	if ts := ParseGeminiRateLimitResetTime(body); ts != nil {
 		resetAt = time.Unix(*ts, 0)
 	} else if cd, used, _ := ApplyCustom429Policy(account); used {
 		resetAt = time.Now().Add(cd)
-		slog.InfoContext(ctx, "native 429: custom policy cooldown",
-			slog.Int64("account_id", account.ID),
-			slog.String("family", fam),
-			slog.Duration("cooldown", cd))
 	} else {
 		resetAt = time.Now().Add(antigravityDefaultRateLimitDuration)
 	}
 
-	if err := s.accountRepo.SetModelRateLimit(ctx, account.ID, fam, resetAt, "antigravity_native_429"); err != nil {
-		slog.WarnContext(ctx, "native 429: family rate-limit persist failed",
-			slog.Int64("account_id", account.ID),
-			slog.String("family", fam),
-			slog.String("error", err.Error()))
-		return
+	// Read-modify-write the cache entry. Preserve every other model's
+	// utilization + reset time; only overwrite the failing model.
+	raw, _ := s.usageCache.antigravityCache.Load(account.ID)
+	entry, _ := raw.(*antigravityUsageCache)
+	if entry == nil || entry.usageInfo == nil {
+		now := time.Now()
+		entry = &antigravityUsageCache{
+			usageInfo: &UsageInfo{
+				UpdatedAt:        &now,
+				AntigravityQuota: map[string]*AntigravityModelQuota{},
+			},
+			timestamp: now,
+		}
 	}
-	slog.InfoContext(ctx, "native 429: family cooldown applied",
+	if entry.usageInfo.AntigravityQuota == nil {
+		entry.usageInfo.AntigravityQuota = map[string]*AntigravityModelQuota{}
+	}
+	entry.usageInfo.AntigravityQuota[modelKey] = &AntigravityModelQuota{
+		Utilization: 100,
+		ResetTime:   resetAt.UTC().Format(time.RFC3339),
+	}
+	entry.timestamp = time.Now()
+	s.usageCache.antigravityCache.Store(account.ID, entry)
+
+	slog.InfoContext(ctx, "native: 429 → USAGE WINDOWS cache marked",
 		slog.Int64("account_id", account.ID),
-		slog.String("family", fam),
-		slog.String("model", originalModel),
+		slog.String("model", modelKey),
+		slog.String("family", nativeFamilyForModel(modelKey)),
 		slog.Time("reset_at", resetAt),
-		slog.Duration("remaining", time.Until(resetAt).Truncate(time.Second)))
+		slog.Duration("cooldown", time.Until(resetAt).Truncate(time.Second)))
 }

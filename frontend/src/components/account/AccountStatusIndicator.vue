@@ -254,11 +254,6 @@ const formatScopeName = (scope: string): string => {
     gemini_image: 'GImg',
     gemini_flash: 'GFlash',
     gemini_pro: 'GPro',
-    // Antigravity family keys (writer's family-only pattern renders
-    // as a single badge per family — one for legacy, two for native).
-    'antigravity:gemini': 'Gemini',
-    'antigravity_native:gemini': 'Gemini',
-    'antigravity_native:others': 'Others',
   }
   return aliases[scope] || scope
 }
