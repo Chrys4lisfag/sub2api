@@ -509,7 +509,11 @@ var platformToLiteLLMProvider = map[string]string{
 	service.PlatformOpenAI:      "openai",
 	service.PlatformGemini:      "google",
 	service.PlatformAntigravity: "anthropic",
+<<<<<<< HEAD
 	service.PlatformAntigravityNative: "anthropic",
+=======
+	service.PlatformGrok:        "xai",
+>>>>>>> upstream/main
 }
 
 // SyncPricingModels 返回 LiteLLM 定价目录中指定平台的最新模型列表
