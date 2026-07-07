@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"strings"
 )
 
 const (
@@ -151,6 +152,28 @@ func FromError(err error) *ApplicationError {
 	}
 	if se := new(ApplicationError); errors.As(err, &se) {
 		return se
+	}
+
+	// ent schema validators (MaxLen, NotEmpty, custom Validate funcs) format
+	// their errors as `ent: validator failed for field "..."`. Surface that as
+	// 400 with the actual field message instead of collapsing to a generic
+	// 500 — otherwise operators see a bare "internal error" and have no idea
+	// what field is wrong. String-match instead of importing ent to avoid a
+	// package cycle: ent/group -> internal/domain -> internal/pkg/errors ->
+	// (would be) ent -> ent/group.
+	msg := err.Error()
+	if strings.HasPrefix(msg, "ent: validator failed for field ") {
+		return New(http.StatusBadRequest, "invalid_argument", msg).WithCause(err)
+	}
+	// ent NotFound and ConstraintError share the same "ent: ..." prefix
+	// convention. These aren't as high-signal as the validator case (the
+	// caller usually maps them explicitly), but the generic 500 is worse
+	// than a legible message when they DO leak through.
+	if strings.HasPrefix(msg, "ent: ") && strings.Contains(msg, " not found") {
+		return New(http.StatusNotFound, "not_found", msg).WithCause(err)
+	}
+	if strings.HasPrefix(msg, "ent: constraint failed") {
+		return New(http.StatusConflict, "conflict", msg).WithCause(err)
 	}
 
 	// Fall back to a generic internal error.

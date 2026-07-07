@@ -120,6 +120,27 @@ func TestFromError_Generic(t *testing.T) {
 			wantReason: UnknownReason,
 			wantMsg:    UnknownMessage,
 		},
+		{
+			name:       "ent_validator_error_becomes_400",
+			err:        stderrors.New(`ent: validator failed for field "Account.name": value is greater than the required length`),
+			wantCode:   400,
+			wantReason: "invalid_argument",
+			wantMsg:    `ent: validator failed for field "Account.name": value is greater than the required length`,
+		},
+		{
+			name:       "ent_not_found_becomes_404",
+			err:        stderrors.New("ent: account not found"),
+			wantCode:   404,
+			wantReason: "not_found",
+			wantMsg:    "ent: account not found",
+		},
+		{
+			name:       "ent_constraint_becomes_409",
+			err:        stderrors.New("ent: constraint failed: UNIQUE constraint failed"),
+			wantCode:   409,
+			wantReason: "conflict",
+			wantMsg:    "ent: constraint failed: UNIQUE constraint failed",
+		},
 	}
 
 	for _, tt := range tests {

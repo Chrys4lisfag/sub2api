@@ -51,6 +51,7 @@
           v-model="form.name"
           type="text"
           required
+          maxlength="100"
           class="input"
           :placeholder="t('admin.accounts.enterAccountName')"
           data-tour="account-form-name"
