@@ -2,30 +2,11 @@ package service
 
 import (
 	"context"
-	"database/sql"
-	"encoding/json"
-	"errors"
-	"fmt"
-	"io"
-	"log/slog"
 	"net/http"
-	"sort"
-	"strconv"
-	"strings"
 	"time"
 
 	dbent "github.com/Wei-Shaw/sub2api/ent"
-	"github.com/Wei-Shaw/sub2api/ent/authidentity"
-	"github.com/Wei-Shaw/sub2api/ent/authidentitychannel"
-	"github.com/Wei-Shaw/sub2api/internal/pkg/antigravity"
-	"github.com/Wei-Shaw/sub2api/internal/pkg/claude"
 	infraerrors "github.com/Wei-Shaw/sub2api/internal/pkg/errors"
-	"github.com/Wei-Shaw/sub2api/internal/pkg/geminicli"
-	"github.com/Wei-Shaw/sub2api/internal/pkg/httpclient"
-	"github.com/Wei-Shaw/sub2api/internal/pkg/logger"
-	"github.com/Wei-Shaw/sub2api/internal/pkg/openai"
-	"github.com/Wei-Shaw/sub2api/internal/pkg/pagination"
-	"github.com/Wei-Shaw/sub2api/internal/util/httputil"
 )
 
 // AdminService interface defines admin management operations
@@ -77,6 +58,12 @@ type AdminService interface {
 
 	// Account management
 	ListAccounts(ctx context.Context, page, pageSize int, platform, accountType, status, search string, groupID int64, privacyMode string, sortBy, sortOrder string) ([]Account, int64, error)
+	// ListAccountsForSchedulerScoreFilter 返回符合过滤条件的全部账号（不分页），
+	// 作为账号列表页计算 OpenAI 调度分数的过滤范围池。
+	ListAccountsForSchedulerScoreFilter(ctx context.Context, platform, accountType, status, search string, groupID int64, privacyMode string) ([]Account, error)
+	// ListOpenAISchedulableAccountsForSchedulerScore 返回指定分组（nil 为未分组）内
+	// 可调度的 OpenAI 账号，用于按组计算调度分数。
+	ListOpenAISchedulableAccountsForSchedulerScore(ctx context.Context, groupID *int64) ([]Account, error)
 	GetAccount(ctx context.Context, id int64) (*Account, error)
 	GetAccountsByIDs(ctx context.Context, ids []int64) ([]*Account, error)
 	CreateAccount(ctx context.Context, input *CreateAccountInput) (*Account, error)
@@ -102,6 +89,9 @@ type AdminService interface {
 	// RevertAccountProxyFallback 将账号的 proxy_id 切回 proxy_fallback_origin_id，并清空 origin 字段。
 	// 若账号不存在返回 ErrAccountNotFound；若账号存在但不在 fallback 状态，返回 ErrAccountNotInFallback。
 	RevertAccountProxyFallback(ctx context.Context, id int64) error
+	// CreateShadow 为指定 OpenAI OAuth 母账号创建 spark 维度影子账号（一母一影）。
+	// 影子账号不持凭据（Credentials 恒为空），透传母账号凭据；继承母账号的 ProxyID。
+	CreateShadow(ctx context.Context, parentID int64, opts ShadowOptions) (*Account, error)
 
 	// Proxy management
 	ListProxies(ctx context.Context, page, pageSize int, protocol, status, search string, sortBy, sortOrder string) ([]Proxy, int64, error)
@@ -206,14 +196,22 @@ type CreateGroupInput struct {
 	WeeklyLimitUSD   *float64 // 周限额 (USD)
 	MonthlyLimitUSD  *float64 // 月限额 (USD)
 	// 图片生成计费配置（仅 antigravity 平台使用）
-	AllowImageGeneration bool
-	ImageRateIndependent bool
-	ImageRateMultiplier  *float64
-	ImagePrice1K         *float64
-	ImagePrice2K         *float64
-	ImagePrice4K         *float64
-	ClaudeCodeOnly       bool   // 仅允许 Claude Code 客户端
-	FallbackGroupID      *int64 // 降级分组 ID
+	AllowImageGeneration         bool
+	AllowBatchImageGeneration    bool
+	ImageRateIndependent         bool
+	ImageRateMultiplier          *float64
+	BatchImageDiscountMultiplier *float64
+	BatchImageHoldMultiplier     *float64
+	// 高峰时段倍率配置（PeakRateMultiplier 为 nil 时按 1.0 处理）
+	PeakRateEnabled    bool
+	PeakStart          string
+	PeakEnd            string
+	PeakRateMultiplier *float64
+	ImagePrice1K       *float64
+	ImagePrice2K       *float64
+	ImagePrice4K       *float64
+	ClaudeCodeOnly     bool   // 仅允许 Claude Code 客户端
+	FallbackGroupID    *int64 // 降级分组 ID
 	// 无效请求兜底分组 ID（仅 anthropic 平台使用）
 	FallbackGroupIDOnInvalidRequest *int64
 	// 模型路由配置（仅 anthropic 平台使用）
@@ -247,14 +245,22 @@ type UpdateGroupInput struct {
 	WeeklyLimitUSD   *float64 // 周限额 (USD)
 	MonthlyLimitUSD  *float64 // 月限额 (USD)
 	// 图片生成计费配置（仅 antigravity 平台使用）
-	AllowImageGeneration *bool
-	ImageRateIndependent *bool
-	ImageRateMultiplier  *float64
-	ImagePrice1K         *float64
-	ImagePrice2K         *float64
-	ImagePrice4K         *float64
-	ClaudeCodeOnly       *bool  // 仅允许 Claude Code 客户端
-	FallbackGroupID      *int64 // 降级分组 ID
+	AllowImageGeneration         *bool
+	AllowBatchImageGeneration    *bool
+	ImageRateIndependent         *bool
+	ImageRateMultiplier          *float64
+	BatchImageDiscountMultiplier *float64
+	BatchImageHoldMultiplier     *float64
+	// 高峰时段倍率配置（nil 表示不修改）
+	PeakRateEnabled    *bool
+	PeakStart          *string
+	PeakEnd            *string
+	PeakRateMultiplier *float64
+	ImagePrice1K       *float64
+	ImagePrice2K       *float64
+	ImagePrice4K       *float64
+	ClaudeCodeOnly     *bool  // 仅允许 Claude Code 客户端
+	FallbackGroupID    *int64 // 降级分组 ID
 	// 无效请求兜底分组 ID（仅 anthropic 平台使用）
 	FallbackGroupIDOnInvalidRequest *int64
 	// 模型路由配置（仅 anthropic 平台使用）
@@ -296,6 +302,15 @@ type CreateAccountInput struct {
 	// SkipMixedChannelCheck skips the mixed channel risk check when binding groups.
 	// This should only be set when the caller has explicitly confirmed the risk.
 	SkipMixedChannelCheck bool
+}
+
+// ShadowOptions is the input for CreateShadow.
+// The shadow holds no credentials — the scheduler transparently delegates to the parent account's tokens.
+type ShadowOptions struct {
+	Name        string
+	Priority    int
+	Concurrency int
+	GroupIDs    []int64
 }
 
 type UpdateAccountInput struct {
@@ -606,6 +621,7 @@ func NewAdminService(
 		runtimeBlocker:       runtimeBlocker,
 	}
 }
+<<<<<<< HEAD
 
 // User management implementations
 func (s *adminServiceImpl) ListUsers(ctx context.Context, page, pageSize int, filters UserListFilters, sortBy, sortOrder string) ([]User, int64, error) {
@@ -3982,3 +3998,5 @@ func (s *adminServiceImpl) ForceAntigravityPrivacy(ctx context.Context, account 
 	applyAntigravityPrivacyMode(account, mode)
 	return mode
 }
+=======
+>>>>>>> upstream/main

@@ -1,19 +1,13 @@
 package service
 
 import (
-	"bufio"
 	"bytes"
 	"context"
-	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"log/slog"
-	mathrand "math/rand"
-	"net"
 	"net/http"
-	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -21,26 +15,16 @@ import (
 	"strconv"
 	"strings"
 	"sync/atomic"
-	"syscall"
 	"time"
 	"unsafe"
 
 	"github.com/Wei-Shaw/sub2api/internal/config"
-	"github.com/Wei-Shaw/sub2api/internal/pkg/claude"
-	"github.com/Wei-Shaw/sub2api/internal/pkg/ctxkey"
-	infraerrors "github.com/Wei-Shaw/sub2api/internal/pkg/errors"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/logger"
-	"github.com/Wei-Shaw/sub2api/internal/pkg/usagestats"
 	"github.com/Wei-Shaw/sub2api/internal/util/responseheaders"
-	"github.com/Wei-Shaw/sub2api/internal/util/urlvalidator"
 	"github.com/cespare/xxhash/v2"
-	"github.com/google/uuid"
 	gocache "github.com/patrickmn/go-cache"
 	"github.com/tidwall/gjson"
-	"github.com/tidwall/sjson"
 	"golang.org/x/sync/singleflight"
-
-	"github.com/gin-gonic/gin"
 )
 
 const (
@@ -70,10 +54,11 @@ IMPORTANT: You must NEVER generate or guess URLs for the user unless you are con
  - Do not use a colon before tool calls. Your tool calls may not be shown directly in the output, so text like "Let me read the file:" followed by a read tool call should just be "Let me read the file." with a period.`
 	maxCacheControlBlocks = 4 // Anthropic API 允许的最大 cache_control 块数量
 
-	defaultUserGroupRateCacheTTL = 30 * time.Second
-	defaultModelsListCacheTTL    = 15 * time.Second
-	postUsageBillingTimeout      = 15 * time.Second
-	debugGatewayBodyEnv          = "SUB2API_DEBUG_GATEWAY_BODY"
+	defaultUserGroupRateCacheTTL           = 30 * time.Second
+	defaultModelsListCacheTTL              = 15 * time.Second
+	postUsageBillingTimeout                = 15 * time.Second
+	claudeCodeNoopDeltaKeepaliveMinVersion = "2.1.193"
+	debugGatewayBodyEnv                    = "SUB2API_DEBUG_GATEWAY_BODY"
 	// 上游错误体只需要提取错误 JSON/日志摘要，默认 512KiB 避免错误风暴叠加大请求体。
 	gatewayUpstreamErrorBodyReadLimit int64 = 512 << 10
 )
@@ -1067,6 +1052,7 @@ func (s *GatewayService) hashContent(content string) string {
 	return strconv.FormatUint(h, 36)
 }
 
+<<<<<<< HEAD
 type anthropicCacheControlPayload struct {
 	Type string `json:"type"`
 	TTL  string `json:"ttl,omitempty"`
@@ -4028,6 +4014,8 @@ func (s *GatewayService) isModelSupportedByAccount(account *Account, requestedMo
 	return account.IsModelSupported(requestedModel)
 }
 
+=======
+>>>>>>> upstream/main
 // GetAccessToken 获取账号凭证
 func (s *GatewayService) GetAccessToken(ctx context.Context, account *Account) (string, string, error) {
 	switch account.Type {
@@ -4078,6 +4066,7 @@ func (s *GatewayService) getOAuthToken(ctx context.Context, account *Account) (s
 	return accessToken, "oauth", nil
 }
 
+<<<<<<< HEAD
 // 重试相关常量
 const (
 	// 最大尝试次数（包含首次请求）。过多重试会导致请求堆积与资源耗尽。
@@ -10490,6 +10479,8 @@ func (s *GatewayService) validateUpstreamBaseURL(raw string) (string, error) {
 	return normalized, nil
 }
 
+=======
+>>>>>>> upstream/main
 // GetAvailableModels returns the list of models available for a group
 // It aggregates model_mapping keys from all schedulable accounts in the group
 func (s *GatewayService) GetAvailableModels(ctx context.Context, groupID *int64, platform string) []string {
@@ -10595,24 +10586,6 @@ func (s *GatewayService) InvalidateAvailableModelsCache(groupID *int64, platform
 		}
 		s.modelsListCache.Delete(key)
 	}
-}
-
-// reconcileCachedTokens 兼容 Kimi 等上游：
-// 将 OpenAI 风格的 cached_tokens 映射到 Claude 标准的 cache_read_input_tokens
-func reconcileCachedTokens(usage map[string]any) bool {
-	if usage == nil {
-		return false
-	}
-	cacheRead, _ := usage["cache_read_input_tokens"].(float64)
-	if cacheRead > 0 {
-		return false // 已有标准字段，无需处理
-	}
-	cached, _ := usage["cached_tokens"].(float64)
-	if cached <= 0 {
-		return false
-	}
-	usage["cache_read_input_tokens"] = cached
-	return true
 }
 
 const debugGatewayBodyDefaultFilename = "gateway_debug.log"
