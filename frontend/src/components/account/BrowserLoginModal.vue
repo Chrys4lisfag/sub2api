@@ -122,7 +122,7 @@ let pollTimer: ReturnType<typeof setInterval> | null = null
 const vncUrl = computed(() => {
   if (!session.value) return ''
   const host = window.location.hostname
-  return `http://${host}:6080/vnc.html?autoconnect=1&resize=scale&path=websockify&password=${encodeURIComponent(
+  return `http://${host}:6080/stream.html?path=websockify&password=${encodeURIComponent(
     session.value.vnc_token
   )}`
 })
