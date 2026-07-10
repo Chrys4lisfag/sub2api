@@ -142,6 +142,14 @@
           {{ t('common.cancel') }}
         </button>
         <button
+          v-if="isAntigravityNative"
+          type="button"
+          class="btn btn-secondary"
+          @click="showBrowserLogin = true"
+        >
+          Login with Browser
+        </button>
+        <button
           v-if="isManualInputMethod"
           type="button"
           :disabled="!canExchangeCode"
@@ -177,6 +185,15 @@
       </div>
     </template>
   </BaseDialog>
+
+  <!-- Browser Login (browser2webfront stealth-stream) — reuses saved profile -->
+  <BrowserLoginModal
+    :show="showBrowserLogin"
+    :proxy-id="account?.proxy_id ?? null"
+    :profile-id="savedBrowserProfileId"
+    @authorized="onBrowserReauthorized"
+    @close="showBrowserLogin = false"
+  />
 </template>
 
 <script setup lang="ts">
@@ -197,6 +214,7 @@ import type { Account } from '@/types'
 import BaseDialog from '@/components/common/BaseDialog.vue'
 import Icon from '@/components/icons/Icon.vue'
 import OAuthAuthorizationFlow from '@/components/account/OAuthAuthorizationFlow.vue'
+import BrowserLoginModal from '@/components/account/BrowserLoginModal.vue'
 
 // Type for exposed OAuthAuthorizationFlow component
 // Note: defineExpose automatically unwraps refs, so we use the unwrapped types
@@ -229,6 +247,12 @@ const openaiOAuth = useOpenAIOAuth()
 const geminiOAuth = useGeminiOAuth()
 const antigravityOAuth = useAntigravityOAuth()
 const antigravityNativeOAuth = useAntigravityNativeOAuth()
+const showBrowserLogin = ref(false)
+const savedBrowserProfileId = computed(() => {
+  const extra = props.account?.extra as Record<string, unknown> | undefined
+  const v = extra?.browser_profile_id
+  return typeof v === 'string' ? v : undefined
+})
 
 // Refs
 const oauthFlowRef = ref<OAuthFlowExposed | null>(null)
@@ -329,6 +353,26 @@ const resetState = () => {
 
 const handleClose = () => {
   emit('close')
+}
+
+// Browser-login re-auth: credentials already exchanged inside BrowserLoginModal.
+const onBrowserReauthorized = async (payload: { credentials: Record<string, unknown>; profileId: string }) => {
+  showBrowserLogin.value = false
+  if (!props.account) return
+  const existingExtra = (props.account.extra as Record<string, unknown>) || {}
+  const extra: Record<string, unknown> = { ...existingExtra }
+  if (payload.profileId) extra.browser_profile_id = payload.profileId
+  try {
+    await adminAPI.accounts.update(props.account.id, { type: 'oauth', credentials: payload.credentials, extra })
+    const updatedAccount = await adminAPI.accounts.clearError(props.account.id)
+    appStore.showSuccess(t('admin.accounts.reAuthorizedSuccess'))
+    emit('reauthorized', updatedAccount)
+    handleClose()
+  } catch (error: any) {
+    appStore.showError(
+      error.response?.data?.message || error.response?.data?.detail || t('admin.accounts.oauth.authFailed')
+    )
+  }
 }
 
 const handleGenerateUrl = async () => {

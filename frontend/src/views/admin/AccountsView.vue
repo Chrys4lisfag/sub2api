@@ -371,7 +371,8 @@
     <AccountTestModal :show="showTest" :account="testingAcc" @close="closeTestModal" />
     <AccountStatsModal :show="showStats" :account="statsAcc" @close="closeStatsModal" />
     <ScheduledTestsPanel :show="showSchedulePanel" :account-id="scheduleAcc?.id ?? null" :model-options="scheduleModelOptions" @close="closeSchedulePanel" />
-    <AccountActionMenu :show="menu.show" :account="menu.acc" :position="menu.pos" @close="menu.show = false" @test="handleTest" @stats="handleViewStats" @schedule="handleSchedule" @reauth="handleReAuth" @refresh-token="handleRefresh" @recover-state="handleRecoverState" @reset-quota="handleResetQuota" @set-privacy="handleSetPrivacy" />
+    <AccountActionMenu :show="menu.show" :account="menu.acc" :position="menu.pos" @close="menu.show = false" @test="handleTest" @stats="handleViewStats" @schedule="handleSchedule" @reauth="handleReAuth" @refresh-token="handleRefresh" @recover-state="handleRecoverState" @reset-quota="handleResetQuota" @set-privacy="handleSetPrivacy" @launch-browser="handleLaunchBrowser" />
+    <BrowserLoginModal :show="showLaunchBrowser" mode="launch" :proxy-id="launchAcc?.proxy_id ?? null" :profile-id="launchProfileId" :account-name="launchAcc?.name" @profile-created="onLaunchProfileCreated" @close="showLaunchBrowser = false" />
     <SyncFromCrsModal :show="showSync" @close="showSync = false" @synced="reload" />
     <ImportDataModal :show="showImportData" @close="showImportData = false" @imported="handleDataImported" />
     <BulkEditAccountModal
@@ -424,6 +425,7 @@ import ReAuthAccountModal from '@/components/admin/account/ReAuthAccountModal.vu
 import AccountTestModal from '@/components/admin/account/AccountTestModal.vue'
 import AccountStatsModal from '@/components/admin/account/AccountStatsModal.vue'
 import ScheduledTestsPanel from '@/components/admin/account/ScheduledTestsPanel.vue'
+import BrowserLoginModal from '@/components/account/BrowserLoginModal.vue'
 import type { SelectOption } from '@/components/common/Select.vue'
 import AccountStatusIndicator from '@/components/account/AccountStatusIndicator.vue'
 import AccountUsageCell from '@/components/account/AccountUsageCell.vue'
@@ -507,6 +509,11 @@ const deletingAcc = ref<Account | null>(null)
 const reAuthAcc = ref<Account | null>(null)
 const testingAcc = ref<Account | null>(null)
 const statsAcc = ref<Account | null>(null)
+const showLaunchBrowser = ref(false)
+const launchAcc = ref<Account | null>(null)
+const launchProfileId = computed(
+  () => (launchAcc.value?.extra as Record<string, unknown> | undefined)?.browser_profile_id as string | undefined
+)
 const showSchedulePanel = ref(false)
 const scheduleAcc = ref<Account | null>(null)
 const scheduleModelOptions = ref<SelectOption[]>([])
@@ -876,6 +883,7 @@ const isAnyModalOpen = computed(() => {
     showTempUnsched.value ||
     showDeleteDialog.value ||
     showReAuth.value ||
+    showLaunchBrowser.value ||
     showTest.value ||
     showStats.value ||
     showSchedulePanel.value ||
@@ -1574,6 +1582,17 @@ const handleSchedule = async (a: Account) => {
 }
 const closeSchedulePanel = () => { showSchedulePanel.value = false; scheduleAcc.value = null; scheduleModelOptions.value = [] }
 const handleReAuth = (a: Account) => { reAuthAcc.value = a; showReAuth.value = true }
+const handleLaunchBrowser = (a: Account) => { launchAcc.value = a; showLaunchBrowser.value = true }
+const onLaunchProfileCreated = async (profileId: string) => {
+  if (!launchAcc.value) return
+  try {
+    const extra = { ...((launchAcc.value.extra as Record<string, unknown>) || {}), browser_profile_id: profileId }
+    const updated = await adminAPI.accounts.update(launchAcc.value.id, { extra })
+    handleAccountUpdated(updated)
+  } catch {
+    /* non-fatal: the launched session still works this time */
+  }
+}
 const handleRefresh = async (a: Account) => {
   try {
     const updated = await adminAPI.accounts.refreshCredentials(a.id)

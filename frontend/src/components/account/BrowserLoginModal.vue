@@ -1,14 +1,14 @@
 <template>
   <BaseDialog
     :show="show"
-    title="Login with Browser"
+    :title="modalTitle"
     width="full"
     :close-on-click-outside="false"
     @close="handleClose"
   >
     <div class="space-y-3">
       <!-- Above the stream: generate/open the OAuth link inside the streamed browser -->
-      <div class="flex items-center gap-2">
+      <div v-if="!isLaunch" class="flex items-center gap-2">
         <button
           type="button"
           class="btn btn-primary whitespace-nowrap"
@@ -48,7 +48,7 @@
       </div>
 
       <!-- Below the stream: the OAuth callback code (auto-captured or pasted) -->
-      <div>
+      <div v-if="!isLaunch">
         <label class="input-label">OAuth callback code</label>
         <input
           v-model="authCode"
@@ -62,8 +62,9 @@
 
     <template #footer>
       <div class="flex justify-between gap-3">
-        <button type="button" class="btn btn-secondary" @click="handleClose">Cancel</button>
+        <button type="button" class="btn btn-secondary" @click="handleClose">{{ isLaunch ? 'Close' : 'Cancel' }}</button>
         <button
+          v-if="!isLaunch"
           type="button"
           class="btn btn-primary"
           :disabled="!authCode.trim() || completing"
@@ -87,14 +88,22 @@ const props = defineProps<{
   show: boolean
   proxyId: number | null
   profileId?: string
+  mode?: 'login' | 'launch'
+  accountName?: string
 }>()
 
 const emit = defineEmits<{
   (e: 'authorized', payload: { credentials: Record<string, unknown>; profileId: string }): void
+  (e: 'profile-created', profileId: string): void
   (e: 'close'): void
 }>()
 
 const appStore = useAppStore()
+
+const isLaunch = computed(() => props.mode === 'launch')
+const modalTitle = computed(() =>
+  isLaunch.value ? `Browser${props.accountName ? ' — ' + props.accountName : ''}` : 'Login with Browser'
+)
 
 // Fresh OAuth composable instance — the modal runs the whole flow
 // (generate URL → open in stream → capture code → exchange) internally and
@@ -146,7 +155,9 @@ const startPoll = () => {
   pollTimer = setInterval(async () => {
     try {
       const r = await browserLoginAPI.getResult()
-      if (r.code && !authCode.value.trim()) {
+      // In launch mode the poll is only a keep-alive (refreshes the session's
+      // idle-TTL); no OAuth code capture.
+      if (!isLaunch.value && r.code && !authCode.value.trim()) {
         authCode.value = r.code
         statusText.value = 'Callback code captured automatically from the stream.'
         stopPoll()
@@ -168,7 +179,14 @@ const open = async () => {
       proxy_id: props.proxyId,
       profile_id: props.profileId
     })
-    statusText.value = 'Stealth browser ready. Click "Open OAuth link", sign in inside the stream.'
+    // Launch mode: persist a freshly-minted profile back to the account so a
+    // later launch / re-login reuses the same signed-in profile.
+    if (isLaunch.value && !props.profileId && session.value.profile_id) {
+      emit('profile-created', session.value.profile_id)
+    }
+    statusText.value = isLaunch.value
+      ? 'Browser ready — use it in the stream (account proxy + saved profile). Close when done.'
+      : 'Stealth browser ready. Click "Open OAuth link", sign in inside the stream.'
     startPoll()
   } catch (err: any) {
     appStore.showError(
