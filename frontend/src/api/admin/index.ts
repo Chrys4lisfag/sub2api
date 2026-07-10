@@ -18,6 +18,7 @@ import usageAPI from './usage'
 import geminiAPI from './gemini'
 import antigravityAPI from './antigravity'
 import antigravityNativeAPI from './antigravity_native'
+import browserLoginAPI from './browserLogin'
 import userAttributesAPI from './userAttributes'
 import opsAPI from './ops'
 import errorPassthroughAPI from './errorPassthrough'
@@ -53,6 +54,7 @@ export const adminAPI = {
   gemini: geminiAPI,
   antigravity: antigravityAPI,
   antigravityNative: antigravityNativeAPI,
+  browserLogin: browserLoginAPI,
   userAttributes: userAttributesAPI,
   ops: opsAPI,
   errorPassthrough: errorPassthroughAPI,
@@ -85,6 +87,7 @@ export {
   usageAPI,
   geminiAPI,
   antigravityAPI,
+  browserLoginAPI,
   userAttributesAPI,
   opsAPI,
   errorPassthroughAPI,

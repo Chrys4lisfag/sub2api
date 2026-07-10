@@ -50,6 +50,9 @@ func RegisterAdminRoutes(
 		// Antigravity Native OAuth (github.com/koval/agymimic-backed)
 		registerAntigravityNativeOAuthRoutes(admin, h)
 
+		// Browser Login (browser2webfront stealth-stream)
+		registerBrowserLoginRoutes(admin, h)
+
 		// 代理管理
 		registerProxyRoutes(admin, h)
 
@@ -394,6 +397,16 @@ func registerAntigravityNativeOAuthRoutes(admin *gin.RouterGroup, h *handler.Han
 		g.POST("/oauth/auth-url", h.Admin.AntigravityNativeOAuth.GenerateAuthURL)
 		g.POST("/oauth/exchange-code", h.Admin.AntigravityNativeOAuth.ExchangeCode)
 		g.POST("/oauth/refresh-token", h.Admin.AntigravityNativeOAuth.RefreshToken)
+	}
+}
+
+func registerBrowserLoginRoutes(admin *gin.RouterGroup, h *handler.Handlers) {
+	g := admin.Group("/browser-login")
+	{
+		g.POST("/session", h.Admin.BrowserLogin.StartSession)
+		g.POST("/navigate", h.Admin.BrowserLogin.Navigate)
+		g.GET("/result", h.Admin.BrowserLogin.Result)
+		g.DELETE("/session", h.Admin.BrowserLogin.StopSession)
 	}
 }
 

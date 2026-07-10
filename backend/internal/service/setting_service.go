@@ -793,6 +793,24 @@ func (s *SettingService) GetWarpPanelConfig(ctx context.Context) (baseURL, user,
 		strings.TrimSpace(values[SettingKeyWarpPanelPass])
 }
 
+// GetBrowserLoginConfig 读取 browser2webfront 集成配置（base URL + Basic Auth）。
+// 三个值均取自 `settings` 表；缺失时返回空串，调用方负责给出人类可读错误。
+// 无进程内缓存 —— 运维可 `UPDATE settings ... WHERE key='browser_login_*'`
+// 后立即生效，无需重启 sub2api 容器。
+func (s *SettingService) GetBrowserLoginConfig(ctx context.Context) (baseURL, user, pass string) {
+	values, err := s.settingRepo.GetMultiple(ctx, []string{
+		SettingKeyBrowserLoginURL,
+		SettingKeyBrowserLoginUser,
+		SettingKeyBrowserLoginPass,
+	})
+	if err != nil {
+		return "", "", ""
+	}
+	return strings.TrimSpace(values[SettingKeyBrowserLoginURL]),
+		strings.TrimSpace(values[SettingKeyBrowserLoginUser]),
+		strings.TrimSpace(values[SettingKeyBrowserLoginPass])
+}
+
 // GetCyberSessionBlockRuntime 返回 (开关, TTL)，进程内缓存 ~60s，
 // 模式对齐 IsOpenAIAllowClaudeCodeCodexPluginEnabled（热路径零 DB 往返）。
 // 两个 setting key 在单次 singleflight 里一起读取，减少 DB 往返。

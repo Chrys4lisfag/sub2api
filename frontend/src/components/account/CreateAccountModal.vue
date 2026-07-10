@@ -2941,6 +2941,14 @@
           {{ t('common.back') }}
         </button>
         <button
+          v-if="form.platform === 'antigravity_native'"
+          type="button"
+          class="btn btn-secondary"
+          @click="showBrowserLogin = true"
+        >
+          Login with Browser
+        </button>
+        <button
           v-if="isManualInputMethod"
           type="button"
           :disabled="!canExchangeCode"
@@ -2976,6 +2984,14 @@
       </div>
     </template>
   </BaseDialog>
+
+  <!-- Browser Login (browser2webfront stealth-stream) -->
+  <BrowserLoginModal
+    :show="showBrowserLogin"
+    :proxy-id="form.proxy_id"
+    @authorized="onBrowserAuthorized"
+    @close="showBrowserLogin = false"
+  />
 
   <!-- Gemini Help Dialog -->
   <BaseDialog
@@ -3266,6 +3282,7 @@ import {
   type OpenAIWSMode
 } from '@/utils/openaiWsMode'
 import OAuthAuthorizationFlow from './OAuthAuthorizationFlow.vue'
+import BrowserLoginModal from './BrowserLoginModal.vue'
 
 // Type for exposed OAuthAuthorizationFlow component
 // Note: defineExpose automatically unwraps refs, so we use the unwrapped types
@@ -3575,6 +3592,7 @@ const mixedChannelWarningAction = ref<(() => Promise<void>) | null>(null)
 const antigravityMixedChannelConfirmed = ref(false)
 const showAdvancedOAuth = ref(false)
 const showGeminiHelpDialog = ref(false)
+const showBrowserLogin = ref(false)
 
 // Quota control state (Anthropic OAuth/SetupToken only)
 const windowCostEnabled = ref(false)
@@ -5436,6 +5454,27 @@ const handleAntigravityNativeExchange = async (authCode: string) => {
   } finally {
     antigravityNativeOAuth.loading.value = false
   }
+}
+
+// Browser-login result: credentials already exchanged inside BrowserLoginModal.
+// Mirror handleAntigravityNativeExchange's tail (mapping + extra) and persist the
+// per-account browser profile id so the same profile can be reused on re-login.
+const onBrowserAuthorized = async (payload: {
+  credentials: Record<string, unknown>
+  profileId: string
+}) => {
+  showBrowserLogin.value = false
+  const credentials = payload.credentials
+  applyInterceptWarmup(credentials, interceptWarmupRequests.value, 'create')
+  const antigravityModelMapping = buildModelMappingObject('mapping', [], antigravityModelMappings.value)
+  if (antigravityModelMapping) {
+    credentials.model_mapping = antigravityModelMapping
+  }
+  const extra = buildAntigravityExtra() || {}
+  if (payload.profileId) {
+    ;(extra as Record<string, unknown>).browser_profile_id = payload.profileId
+  }
+  await createAccountAndFinish('antigravity_native', 'oauth', credentials, extra)
 }
 
 // Anthropic OAuth 授权码兑换

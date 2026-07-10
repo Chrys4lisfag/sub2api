@@ -256,6 +256,12 @@ const (
 	SettingKeyWarpPanelUser = "warp_panel_user"
 	SettingKeyWarpPanelPass = "warp_panel_pass"
 
+	// browser2webfront integration (self-hosted stealth-browser stream).
+	// Never in git — configured per-instance via admin UI, stored in DB.
+	SettingKeyBrowserLoginURL  = "browser_login_url"
+	SettingKeyBrowserLoginUser = "browser_login_user"
+	SettingKeyBrowserLoginPass = "browser_login_pass"
+
 	// OEM设置
 	SettingKeySiteName                    = "site_name"                     // 网站名称
 	SettingKeySiteLogo                    = "site_logo"                     // 网站Logo (base64)
