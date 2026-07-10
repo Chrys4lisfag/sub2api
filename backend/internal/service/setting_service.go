@@ -1956,6 +1956,14 @@ func (s *SettingService) GetFrameSrcOrigins(ctx context.Context) ([]string, erro
 		addOrigin(item)
 	}
 
+	// browser2webfront noVNC stream origin (iframe embedded in the browser-login
+	// modal). Derived from browser_login_url host + the fixed noVNC port 6080.
+	if blURL, _, _ := s.GetBrowserLoginConfig(ctx); blURL != "" {
+		if u, err := url.Parse(blURL); err == nil && u.Hostname() != "" && (u.Scheme == "http" || u.Scheme == "https") {
+			addOrigin(u.Scheme + "://" + u.Hostname() + ":6080")
+		}
+	}
+
 	return origins, nil
 }
 

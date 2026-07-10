@@ -246,11 +246,15 @@ watch(
   () => props.show,
   (val) => {
     if (val) open()
+    // Modal hidden (incl. parent closing the whole account modal): tear the
+    // browser session down so it doesn't leak into a 409 "session busy".
+    else if (session.value) void cleanup()
     else stopPoll()
   }
 )
 
 onUnmounted(() => {
   stopPoll()
+  if (session.value) void cleanup()
 })
 </script>
