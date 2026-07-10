@@ -5470,9 +5470,9 @@ const onBrowserAuthorized = async (payload: {
   if (antigravityModelMapping) {
     credentials.model_mapping = antigravityModelMapping
   }
-  const extra = buildAntigravityExtra() || {}
+  const extra: Record<string, unknown> = buildAntigravityExtra() || {}
   if (payload.profileId) {
-    ;(extra as Record<string, unknown>).browser_profile_id = payload.profileId
+    extra.browser_profile_id = payload.profileId
   }
   await createAccountAndFinish('antigravity_native', 'oauth', credentials, extra)
 }
