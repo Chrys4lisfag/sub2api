@@ -1249,8 +1249,8 @@ func (s *AntigravityNativeGatewayService) streamGeminiToClient(
 // no "later chunk" to redeem an args={} call.
 func inspectStreamChunk(payload []byte) (sawText bool, sawFunctionCall bool, emptyArgsFn string) {
 	type part struct {
-		Text         *string                `json:"text,omitempty"`
-		FunctionCall map[string]interface{} `json:"functionCall,omitempty"`
+		Text         *string        `json:"text,omitempty"`
+		FunctionCall map[string]any `json:"functionCall,omitempty"`
 	}
 	type candidate struct {
 		Content struct {
@@ -1276,7 +1276,7 @@ func inspectStreamChunk(payload []byte) (sawText bool, sawFunctionCall bool, emp
 					emptyArgsFn = name
 					continue
 				}
-				if m, ok := args.(map[string]interface{}); ok && len(m) == 0 {
+				if m, ok := args.(map[string]any); ok && len(m) == 0 {
 					emptyArgsFn = name
 				}
 			}
@@ -1826,8 +1826,8 @@ func inspectGeminiResponseForAnomalies(body []byte) (string, map[string]string) 
 		return "", nil
 	}
 	type part struct {
-		Text         *string                `json:"text,omitempty"`
-		FunctionCall map[string]interface{} `json:"functionCall,omitempty"`
+		Text         *string        `json:"text,omitempty"`
+		FunctionCall map[string]any `json:"functionCall,omitempty"`
 	}
 	type candidate struct {
 		Content struct {
@@ -1859,7 +1859,7 @@ func inspectGeminiResponseForAnomalies(body []byte) (string, map[string]string) 
 			if !hasArgs || args == nil {
 				return "empty_function_args", map[string]string{"function": name, "reason": "args missing"}
 			}
-			if m, ok := args.(map[string]interface{}); ok && len(m) == 0 {
+			if m, ok := args.(map[string]any); ok && len(m) == 0 {
 				return "empty_function_args", map[string]string{"function": name, "reason": "args is empty object"}
 			}
 			return "", nil // function call with args is fine

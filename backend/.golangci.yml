@@ -11,6 +11,14 @@ linters:
     - staticcheck
     - unused
 
+  exclusions:
+    rules:
+      # Type-assertion errcheck (check-type-assertions) is idiomatic must-style
+      # in tests over known-shape JSON; exclude tests from errcheck.
+      - path: _test\.go
+        linters:
+          - errcheck
+
   settings:
     depguard:
       rules:
@@ -84,6 +92,11 @@ linters:
         - fmt.Fprint
         - fmt.Fprintf
         - fmt.Fprintln
+        # strings.Builder Write* are documented to always return a nil error.
+        - (*strings.Builder).WriteString
+        - (*strings.Builder).WriteByte
+        - (*strings.Builder).WriteRune
+        - (*strings.Builder).Write
       # Display function signature instead of selector.
       # Default: false
       verbose: true

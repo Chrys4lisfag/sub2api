@@ -139,7 +139,7 @@ func decompressionAwareRoundTrip(rt req.RoundTripper) req.RoundTripFunc {
 		resp.Header.Del("Content-Length")
 		resp.ContentLength = int64(len(decoded))
 		if resp.Response != nil {
-			resp.Response.Uncompressed = true
+			resp.Uncompressed = true
 		}
 		return resp, nil
 	}

@@ -179,7 +179,7 @@ func warpPanelList(ctx context.Context, creds warpPanelCreds) (*warpListResponse
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	body, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("warp panel /api/list: HTTP %d: %s", resp.StatusCode, string(body))
@@ -223,7 +223,7 @@ func warpPanelCreate(ctx context.Context, creds warpPanelCreds, socks, httpPort 
 	if err != nil {
 		return err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusFound && resp.StatusCode != http.StatusSeeOther {
 		body, _ := io.ReadAll(resp.Body)
 		return fmt.Errorf("warp panel /create: HTTP %d: %s", resp.StatusCode, string(body))
