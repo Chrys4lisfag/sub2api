@@ -18,15 +18,16 @@ const (
 
 // Platform constants
 const (
-	PlatformAnthropic         = "anthropic"
-	PlatformOpenAI            = "openai"
-	PlatformGemini            = "gemini"
-	PlatformAntigravity       = "antigravity"
+	PlatformAnthropic   = "anthropic"
+	PlatformOpenAI      = "openai"
+	PlatformGemini      = "gemini"
+	PlatformAntigravity = "antigravity"
 	// PlatformAntigravityNative routes through our self-contained Go client
 	// (github.com/koval/agymimic) instead of the legacy in-tree backend.
 	// Same upstream API (daily-cloudcode-pa.sandbox.googleapis.com), but
 	// the OAuth + per-account identity + Unleash mimic loop is owned by us.
 	PlatformAntigravityNative = "antigravity_native"
+	PlatformGrok              = "grok"
 )
 
 // IsAntigravityFamily returns true for both the legacy in-tree antigravity
@@ -81,6 +82,9 @@ const (
 	SubscriptionStatusSuspended = "suspended"
 )
 
+// AntigravityGemini31ProAgentModel is the upstream route for Gemini 3.1 Pro High.
+const AntigravityGemini31ProAgentModel = "gemini-pro-agent"
+
 // DefaultAntigravityModelMapping 是 Antigravity 平台的默认模型映射
 // 当账号未配置 model_mapping 时使用此默认值
 // 与前端 useModelWhitelist.ts 中的 antigravityDefaultMappings 保持一致
@@ -115,16 +119,14 @@ var DefaultAntigravityModelMapping = map[string]string{
 	// 不再在白名单中暴露；管理员配置中保留的旧名称会原样转发并触发上游错误。
 	// Gemini 3 preview 映射 → 已合并入 3.1 Pro
 	"gemini-3-flash-preview": "gemini-3-flash",
-	// Gemini 3.1 白名单 — base name + suffixed variants. The base name lets
-	// upstream clients (omp etc) ship a single picker entry whose thinking
-	// slider drives the wire model via pkg/antigravity/wire_model.go::
-	// ResolveWireFromBody (body.thinkingLevel → wire variant). Suffixed
-	// variants stay so callers that pin a tier still work.
-	"gemini-3.1-pro":      "gemini-3.1-pro",
-	"gemini-3.1-pro-high": "gemini-3.1-pro-high",
-	"gemini-3.1-pro-low":  "gemini-3.1-pro-low",
+	"gemini-3-pro-preview":   "gemini-3-pro-high",
+	// Gemini 3.1 白名单
+	AntigravityGemini31ProAgentModel: AntigravityGemini31ProAgentModel,
+	"gemini-3.1-pro":                 AntigravityGemini31ProAgentModel,
+	"gemini-3.1-pro-high":            AntigravityGemini31ProAgentModel,
+	"gemini-3.1-pro-low":             "gemini-3.1-pro-low",
 	// Gemini 3.1 preview 映射
-	"gemini-3.1-pro-preview": "gemini-3.1-pro-high",
+	"gemini-3.1-pro-preview": AntigravityGemini31ProAgentModel,
 	// Gemini 3.1 image 白名单
 	"gemini-3.1-flash-image": "gemini-3.1-flash-image",
 	// Gemini 3.1 image preview 映射
@@ -160,6 +162,7 @@ var DefaultBedrockModelMapping = map[string]string{
 	"claude-opus-4-1":          "us.anthropic.claude-opus-4-1-20250805-v1:0",
 	"claude-opus-4-20250514":   "us.anthropic.claude-opus-4-20250514-v1:0",
 	// Claude Sonnet
+	"claude-sonnet-5":            "us.anthropic.claude-sonnet-5-v1",
 	"claude-sonnet-4-6-thinking": "us.anthropic.claude-sonnet-4-6",
 	"claude-sonnet-4-6":          "us.anthropic.claude-sonnet-4-6",
 	"claude-sonnet-4-5":          "us.anthropic.claude-sonnet-4-5-20250929-v1:0",
