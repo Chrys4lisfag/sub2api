@@ -775,9 +775,10 @@ func (s *SettingService) parseSettings(settings map[string]string) *SystemSettin
 		if mode == "" {
 			legacy, hasLegacy := settings[SettingKeyAntigravityNativeListToolsEmulation]
 			if hasLegacy {
-				if legacy == "true" {
+				switch legacy {
+				case "true":
 					mode = McpDiscoveryModeBoth
-				} else if legacy == "false" {
+				case "false":
 					mode = McpDiscoveryModePrompt
 				}
 			}

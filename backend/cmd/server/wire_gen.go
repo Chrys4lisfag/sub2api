@@ -311,8 +311,8 @@ func initializeApplication(buildInfo handler.BuildInfo) (*Application, error) {
 // wire.go:
 
 type Application struct {
-	Server  *http.Server
-	Cleanup func()
+	Server      *http.Server
+	Cleanup     func()
 	ChatHistory *service.ChatHistoryLogService
 }
 

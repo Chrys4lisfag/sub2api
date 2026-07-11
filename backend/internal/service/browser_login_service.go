@@ -184,7 +184,7 @@ func (s *BrowserLoginService) doJSON(ctx context.Context, creds browserLoginCred
 	if err != nil {
 		return err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	respBody, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return fmt.Errorf("browser login %s %s: HTTP %d: %s", method, path, resp.StatusCode, string(respBody))

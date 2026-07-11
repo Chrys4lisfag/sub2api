@@ -46,11 +46,11 @@ type AntigravityNativeGatewayService struct {
 	// Unleash metrics loop (organic-traffic mimicry) can spin up one mimic
 	// daemon per credential set. Also used by Invalidate callers that need
 	// to load a fresh credential snapshot.
-	accountRepo     AccountRepository
-	proxyRepo       ProxyRepository
-	oauthService    *AntigravityNativeOAuthService
-	settingService  *SettingService
-	chatHistoryLog  *ChatHistoryLogService
+	accountRepo    AccountRepository
+	proxyRepo      ProxyRepository
+	oauthService   *AntigravityNativeOAuthService
+	settingService *SettingService
+	chatHistoryLog *ChatHistoryLogService
 
 	// usageCache is the shared antigravity USAGE WINDOWS cache
 	// (populated by AccountUsageService.getAntigravityUsage every
@@ -531,7 +531,7 @@ func (s *AntigravityNativeGatewayService) ForwardGemini(
 		}
 		return nil, uErr
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
 		raw, _ := io.ReadAll(resp.Body)
@@ -1300,6 +1300,7 @@ func extractDataPayload(line []byte) []byte {
 	}
 	return payload
 }
+
 // payloadHasFinishReason returns true when payload is a JSON object that
 // contains at least one candidates[].finishReason field with a non-empty
 // value. Used by streamGeminiToClient to decide whether to synthesize a
@@ -1362,7 +1363,6 @@ func syntheticFinishReasonSSE(reason string) []byte {
 	return out
 }
 
-
 func (s *AntigravityNativeGatewayService) passNonStreamingGemini(
 	ctx context.Context,
 	c *gin.Context,
@@ -1412,7 +1412,6 @@ func (s *AntigravityNativeGatewayService) passNonStreamingGemini(
 			RetryableOnSameAccount: true,
 		}
 	}
-
 
 	// Some upstream errors arrive as 200 OK with an `error` field or with
 	// the rejection text smuggled into candidates[].content.parts[].text.
@@ -1594,9 +1593,6 @@ func (s *AntigravityNativeGatewayService) maybeLogChatHistory(
 
 func (s *AntigravityNativeGatewayService) finalizeResult(r *ForwardResult, startTime time.Time) *ForwardResult {
 	r.Duration = time.Since(startTime)
-	if r.Usage.OutputTokens == 0 && r.Usage.InputTokens == 0 {
-		// best-effort — gateway middleware will fall back to its own counters
-	}
 	return r
 }
 
@@ -1930,7 +1926,9 @@ func (s *AntigravityNativeGatewayService) FetchQuota(
 		"metadata": map[string]any{"ideType": "ANTIGRAVITY"},
 	}
 	if pid := strings.TrimSpace(cli.ProjectID()); pid != "" {
-		loadBody["metadata"].(map[string]any)["duetProject"] = pid
+		if md, ok := loadBody["metadata"].(map[string]any); ok {
+			md["duetProject"] = pid
+		}
 	}
 	loadBodyBytes, _ := json.Marshal(loadBody)
 	loadRaw, err := s.nativeRawJSON(ctx, cli, "/v1internal:loadCodeAssist", loadBodyBytes)
@@ -1970,7 +1968,7 @@ func (s *AntigravityNativeGatewayService) nativeRawJSON(
 	if err != nil {
 		return nil, fmt.Errorf("native quota: %s: %w", path, err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	// agymimic pins `Accept-Encoding: gzip` on every cloudcode-pa request to
 	// match real agy.exe's wire fingerprint. When the client sets that
@@ -2528,10 +2526,10 @@ func extractTextFromAgyResponse(resp *types.Response) string {
 			continue
 		}
 		if p.Thought {
-			thoughtText.WriteString(p.Text)
+			_, _ = thoughtText.WriteString(p.Text)
 			continue
 		}
-		realText.WriteString(p.Text)
+		_, _ = realText.WriteString(p.Text)
 	}
 	if realText.Len() > 0 {
 		return realText.String()
@@ -2588,11 +2586,11 @@ func responsePartsSummary(resp *types.Response) string {
 // the input is empty.
 //
 // Same classification logic drives both:
-//  - proactive check: nativeIsFamilyExhausted reads the USAGE WINDOWS
-//    cache and returns true if ANY family-mate is at 100 %
-//  - reactive cache update: on 429, we mark the failing model at
-//    100 % in the same cache so the next proactive check catches it
-//    without needing to write anything to account.Extra
+//   - proactive check: nativeIsFamilyExhausted reads the USAGE WINDOWS
+//     cache and returns true if ANY family-mate is at 100 %
+//   - reactive cache update: on 429, we mark the failing model at
+//     100 % in the same cache so the next proactive check catches it
+//     without needing to write anything to account.Extra
 func nativeFamilyForModel(model string) string {
 	m := strings.ToLower(strings.TrimSpace(strings.TrimPrefix(model, "models/")))
 	if m == "" {

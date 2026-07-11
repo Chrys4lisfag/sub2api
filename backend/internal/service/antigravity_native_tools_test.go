@@ -635,18 +635,18 @@ func TestPreprocess_SingleNameNoListToolWhenDiscoveryPrompt(t *testing.T) {
 // TestNormalizeToolCallMode locks the enum canonicalization map.
 func TestNormalizeToolCallMode(t *testing.T) {
 	cases := map[string]string{
-		"single_name":  "single_name",
+		"single_name":   "single_name",
 		" SINGLE_NAME ": "single_name",
-		"single-name":  "single_name",
-		"passthrough":  "single_name",
-		"direct":       "single_name",
-		"agy_mimic":    "agy_mimic",
-		"agy-mimic":    "agy_mimic",
-		"agy":          "agy_mimic",
-		"mimic":        "agy_mimic",
-		"aggregator":   "agy_mimic",
-		"":             "",
-		"garbage":      "",
+		"single-name":   "single_name",
+		"passthrough":   "single_name",
+		"direct":        "single_name",
+		"agy_mimic":     "agy_mimic",
+		"agy-mimic":     "agy_mimic",
+		"agy":           "agy_mimic",
+		"mimic":         "agy_mimic",
+		"aggregator":    "agy_mimic",
+		"":              "",
+		"garbage":       "",
 	}
 	for in, want := range cases {
 		if got := normalizeToolCallMode(in); got != want {
@@ -841,8 +841,8 @@ func TestNormalizeOmpGeminiSDKShape_DropsRuntimeMetadata(t *testing.T) {
 	inner := map[string]any{
 		"contents": []any{},
 		"config": map[string]any{
-			"abortSignal":  map[string]any{"aborted": false},
-			"httpOptions":  map[string]any{"timeout": 30000},
+			"abortSignal":     map[string]any{"aborted": false},
+			"httpOptions":     map[string]any{"timeout": 30000},
 			"maxOutputTokens": float64(1024),
 		},
 	}
@@ -935,10 +935,10 @@ func TestMaxOutputTokensCapForModel(t *testing.T) {
 
 func TestClampMaxOutputTokens(t *testing.T) {
 	tests := []struct {
-		name  string
-		in    any
-		wire  string
-		want  any
+		name string
+		in   any
+		wire string
+		want any
 	}{
 		{"pro_65536_clamps", float64(65536), "gemini-pro-agent", float64(65535)},
 		{"pro_65535_keeps", float64(65535), "gemini-pro-agent", float64(65535)},

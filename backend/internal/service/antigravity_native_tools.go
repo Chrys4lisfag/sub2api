@@ -28,18 +28,18 @@ import (
 //
 // Modes:
 //
-//   "single_name" — mcp__<server>_<tool> declarations stay in the tools
-//                   list (schema-normalized). call_mcp_tool +
-//                   agy_list_tools are ALSO declared alongside so the
-//                   model has the three valid call paths. A short
-//                   single-name-mode instruction block is injected into
-//                   systemInstruction. No full catalog enumeration —
-//                   the declarations already carry tool names + schemas.
+//	"single_name" — mcp__<server>_<tool> declarations stay in the tools
+//	                list (schema-normalized). call_mcp_tool +
+//	                agy_list_tools are ALSO declared alongside so the
+//	                model has the three valid call paths. A short
+//	                single-name-mode instruction block is injected into
+//	                systemInstruction. No full catalog enumeration —
+//	                the declarations already carry tool names + schemas.
 //
-//   "agy_mimic"   — mcp__* stripped from declarations; only call_mcp_tool
-//                   (and agy_list_tools when discovery_mode allows) is
-//                   exposed. Full per-server catalog enumeration injected
-//                   in systemInstruction. Matches real agy.exe wire.
+//	"agy_mimic"   — mcp__* stripped from declarations; only call_mcp_tool
+//	                (and agy_list_tools when discovery_mode allows) is
+//	                exposed. Full per-server catalog enumeration injected
+//	                in systemInstruction. Matches real agy.exe wire.
 //
 // `aggregatorName` is the function name model emits to reach the
 // call_mcp_tool aggregator. Defaults to "call_mcp_tool" (agy parity).
@@ -377,6 +377,7 @@ func pickFirstNonNullBranch(branches []any) map[string]any {
 //	    "required": ["ServerName","ToolName"]
 //	  }
 //	}
+//
 // defaultMcpAggregatorName is the on-wire function name real agy uses
 // to reach the MCP aggregator. Per-account credentials may override
 // via `mcp_aggregator_name` (see accountMcpAggregatorName).
@@ -587,7 +588,7 @@ func serverNameMatches(serverFromCatalog, userFilter string) bool {
 	return strings.EqualFold(a, b)
 }
 
-func buildListMcpToolsDecl() map[string]any {
+func buildListMcpToolsDecl() map[string]any { //nolint:unused // synthetic MCP discovery tool, retained for list_tool mode variants
 	return map[string]any{
 		"name": "list_mcp_tools",
 		"description": "List all MCP tools available in the current session. Returns a JSON array of " +
@@ -599,7 +600,7 @@ func buildListMcpToolsDecl() map[string]any {
 	}
 }
 
-func buildReadMcpToolSchemaDecl() map[string]any {
+func buildReadMcpToolSchemaDecl() map[string]any { //nolint:unused // synthetic MCP schema tool, retained for list_tool mode variants
 	return map[string]any{
 		"name": "read_mcp_tool_schema",
 		"description": "Fetch the input schema (JSON Schema) for a specific MCP tool. " +
@@ -761,7 +762,7 @@ func levenshtein(a, b string) int {
 //
 // suitable as the response body for the list_mcp_tools synthetic tool.
 // Used by the back-translator when the model invokes list_mcp_tools.
-func (r toolPrepReport) renderMcpToolCatalog() []byte {
+func (r toolPrepReport) renderMcpToolCatalog() []byte { //nolint:unused // back-translator for list_mcp_tools synthetic tool
 	type catalogEntry struct {
 		ServerName  string `json:"server_name"`
 		ToolName    string `json:"tool_name"`
@@ -795,7 +796,7 @@ func (r toolPrepReport) renderMcpToolCatalog() []byte {
 // renderMcpToolSchema returns a JSON-encoded schema for a specific
 // (server, tool). Used by read_mcp_tool_schema. Falls back to an empty
 // object if no match.
-func (r toolPrepReport) renderMcpToolSchema(server, tool string) []byte {
+func (r toolPrepReport) renderMcpToolSchema(server, tool string) []byte { //nolint:unused // back-translator for read_mcp_tool_schema synthetic tool
 	h, ok := r.resolveMcpHandle(server, tool)
 	if !ok {
 		return []byte(`{"error":"unknown MCP tool"}`)
@@ -843,7 +844,7 @@ func injectMcpCatalogIntoSystemInstruction(inner map[string]any, mcpTools []mcpT
 		aggregatorName = defaultMcpAggregatorName
 	}
 	if discoveryMode == "" {
-		discoveryMode = "both"
+		discoveryMode = "both" //nolint:ineffassign // normalized default; retained for downstream discovery-mode variants
 	}
 	catalog := buildMcpCatalogText(mcpTools, aggregatorName, fullCatalog, declaresListTool)
 	if catalog == "" {
@@ -969,8 +970,8 @@ func buildSingleNameInstructions(aggregatorName string, declaresListTool bool) s
 		aggregatorName = defaultMcpAggregatorName
 	}
 	var b strings.Builder
-	b.WriteString(singleNameInstructionsStartMarker)
-	b.WriteByte('\n')
+	_, _ = b.WriteString(singleNameInstructionsStartMarker)
+	_ = b.WriteByte('\n')
 	b.WriteString("You have direct access to MCP (Model Context Protocol) tools as\n")
 	b.WriteString("`mcp__<server>_<tool>` function declarations in your toolset.\n")
 	b.WriteString("PREFER calling them directly by name — this is the canonical path.\n\n")
@@ -1059,7 +1060,7 @@ func buildMcpCatalogText(mcpTools []mcpToolHandle, aggregatorName string, fullCa
 
 	var b strings.Builder
 	b.WriteString(mcpCatalogStartMarker)
-	b.WriteByte('\n')
+	_ = b.WriteByte('\n')
 
 	// Preamble — HOW TO INVOKE + anti-fallback + anti-Python-eval.
 	b.WriteString("HOW TO INVOKE: emit a TOP-LEVEL functionCall to `")

@@ -361,22 +361,22 @@ func appendAssistantTurnAndUserResponse(body []byte, assistantParts []any, respo
 // To restore agy_list_tools discovery WITHOUT losing streaming in
 // single_name (or in agy_mimic), the loop needs a redesign. Sketch:
 //
-//   1. Switch upstream call to /v1internal:streamGenerateContent
-//      (streaming) instead of /v1internal:generateContent.
-//   2. Read SSE chunks as they arrive. Maintain a small peek buffer
-//      (~8 KiB or 3 chunks, whichever first) before flushing anything
-//      to the client.
-//   3. While peek buffer is filling:
-//      a. Parse each chunk's candidates[].content.parts. If any part
-//         has functionCall{name:"agy_list_tools"}: DISCARD buffer,
-//         abort upstream connection, synthesize functionResponse,
-//         append assistant.call + user.response to body, re-issue.
-//         Client never sees the buffered bytes.
-//      b. If peek-buffer fills WITHOUT detecting agy_list_tools:
-//         commit — flush buffered chunks to client + stream remainder
-//         through normally. The model's response includes text /
-//         call_mcp_tool / etc. as usual.
-//   4. Budget cap stays the same (max N iterations).
+//  1. Switch upstream call to /v1internal:streamGenerateContent
+//     (streaming) instead of /v1internal:generateContent.
+//  2. Read SSE chunks as they arrive. Maintain a small peek buffer
+//     (~8 KiB or 3 chunks, whichever first) before flushing anything
+//     to the client.
+//  3. While peek buffer is filling:
+//     a. Parse each chunk's candidates[].content.parts. If any part
+//     has functionCall{name:"agy_list_tools"}: DISCARD buffer,
+//     abort upstream connection, synthesize functionResponse,
+//     append assistant.call + user.response to body, re-issue.
+//     Client never sees the buffered bytes.
+//     b. If peek-buffer fills WITHOUT detecting agy_list_tools:
+//     commit — flush buffered chunks to client + stream remainder
+//     through normally. The model's response includes text /
+//     call_mcp_tool / etc. as usual.
+//  4. Budget cap stays the same (max N iterations).
 //
 // Tricky bits to think through:
 //   - SSE chunks may split mid-functionCall. Need a partial-JSON
@@ -546,6 +546,6 @@ func agyListToolsSSEEvent(respBody []byte) []byte {
 // newListToolsCallID generates a stable-ish ID for a synthesized
 // functionResponse turn. Used only when we need to correlate by ID in
 // future variants — current Gemini contract uses name-based matching.
-func newListToolsCallID() string {
+func newListToolsCallID() string { //nolint:unused // ID correlator retained for future list_tools functionResponse variants
 	return "agy-discovery-" + uuid.NewString()
 }

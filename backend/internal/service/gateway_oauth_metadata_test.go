@@ -102,6 +102,7 @@ func TestBuildOAuthMetadataUserID_SessionIDStableAcrossTurns(t *testing.T) {
 	idOther := svc.buildOAuthMetadataUserID(other, account, fp)
 	require.NotEqual(t, id1, idOther, "不同首条消息应派生不同 session_id")
 }
+
 // TestApplyClaudeCodeMimicHeaders_PinsAcceptEncoding enforces that the
 // mimic path advertises gzip/deflate/br/zstd verbatim — matching real
 // CLI 2.1.181 capture (claude_new.har). Go net/http's default would

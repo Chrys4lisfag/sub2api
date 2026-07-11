@@ -24,7 +24,6 @@ type cachedAntigravityNativeMcpDiscoveryMode struct {
 }
 
 const antigravityNativeMcpDiscoveryModeCacheTTL = 60 * time.Second
-const antigravityNativeMcpDiscoveryModeErrorTTL = 5 * time.Second
 const antigravityNativeMcpDiscoveryModeDBTimeout = 5 * time.Second
 
 // cachedAntigravityNativeToolCallMode — 60s TTL cache for the
@@ -35,7 +34,6 @@ type cachedAntigravityNativeToolCallMode struct {
 }
 
 const antigravityNativeToolCallModeCacheTTL = 60 * time.Second
-const antigravityNativeToolCallModeErrorTTL = 5 * time.Second
 const antigravityNativeToolCallModeDBTimeout = 5 * time.Second
 
 // cachedChatHistoryEnabled — 60s TTL cache for the chat-history global toggle.
@@ -138,9 +136,10 @@ func (s *SettingService) GetAntigravityNativeMcpDiscoveryMode(ctx context.Contex
 		legacyVal, legacyErr := s.settingRepo.GetValue(dbCtx, SettingKeyAntigravityNativeListToolsEmulation)
 		legacyMode := defaultMode
 		if legacyErr == nil {
-			if legacyVal == "true" {
+			switch legacyVal {
+			case "true":
 				legacyMode = McpDiscoveryModeBoth
-			} else if legacyVal == "false" {
+			case "false":
 				legacyMode = McpDiscoveryModePrompt
 			}
 		}

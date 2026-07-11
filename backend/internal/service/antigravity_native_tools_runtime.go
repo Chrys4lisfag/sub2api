@@ -1,19 +1,19 @@
 // Runtime glue for the antigravity_native tool aggregator:
 //
 //   - preprocessNativeBody    — JSON unmarshal → applyToolPreprocessing →
-//                                marshal. Returns the rewritten body bytes
-//                                + a report the streaming layer uses to
-//                                back-translate model output.
+//     marshal. Returns the rewritten body bytes
+//   - a report the streaming layer uses to
+//     back-translate model output.
 //   - accountToolAggregatorEnabled — reads the per-account credential flag
-//                                that controls whether MCP tools get hidden
-//                                behind call_mcp_tool.
+//     that controls whether MCP tools get hidden
+//     behind call_mcp_tool.
 //   - rewriteAggregatedFunctionCalls — walks one SSE chunk's candidates[]
-//                                parts[] looking for {functionCall: {name:
-//                                "call_mcp_tool", args: {ServerName, ToolName,
-//                                Arguments}}} and rewrites them back into
-//                                {functionCall: {name: "mcp__server_tool",
-//                                args: Arguments}} so omp's tool dispatch
-//                                sees the original mcp__ prefix.
+//     parts[] looking for {functionCall: {name:
+//     "call_mcp_tool", args: {ServerName, ToolName,
+//     Arguments}}} and rewrites them back into
+//     {functionCall: {name: "mcp__server_tool",
+//     args: Arguments}} so omp's tool dispatch
+//     sees the original mcp__ prefix.
 //
 // Without the rewrite, the model would emit call_mcp_tool and omp would
 // either reject (no such tool) or treat it opaquely. With the rewrite,
@@ -160,12 +160,12 @@ func isValidMcpAggregatorName(name string) bool {
 //
 //   - call_mcp_tool        → mcp__<server>_<tool>(...Arguments...)
 //   - list_mcp_tools       → synthesize a `mcp__<server>__list` no-op or
-//                            keep as-is so omp can route to a builtin
-//                            (we just inline the catalog inside args).
+//     keep as-is so omp can route to a builtin
+//     (we just inline the catalog inside args).
 //   - read_mcp_tool_schema → keep as-is (omp doesn't have a matching tool;
-//                            the model uses this purely for its own
-//                            context — schema injected via list/read calls
-//                            in the prompt prefix or via a sidecar).
+//     the model uses this purely for its own
+//     context — schema injected via list/read calls
+//     in the prompt prefix or via a sidecar).
 //
 // Returns the rewritten payload bytes if any changes were made; otherwise
 // returns the input unchanged. Idempotent.

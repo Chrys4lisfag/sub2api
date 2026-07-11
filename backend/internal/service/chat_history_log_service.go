@@ -75,7 +75,7 @@ type ChatHistoryLogService struct {
 	maxBytes int64
 
 	// Live state from settings (changes via SetEnabled / SetMaxBytes).
-	enabled  atomic.Bool
+	enabled        atomic.Bool
 	maxBytesAtomic atomic.Int64
 
 	// Async ingest.
@@ -340,7 +340,7 @@ func (s *ChatHistoryLogService) closeAndGzipCurrent() error {
 	if err != nil {
 		return fmt.Errorf("reopen %s: %w", plainPath, err)
 	}
-	defer src.Close()
+	defer func() { _ = src.Close() }()
 
 	gzPath := plainPath + ".gz.tmp"
 	dst, err := os.Create(gzPath)
@@ -435,17 +435,17 @@ func (s *ChatHistoryLogService) sweepIfOverCap() {
 // ---------------------------------------------------------------------------
 
 var redactedKeys = map[string]bool{
-	"authorization":     true,
-	"x-goog-api-key":    true,
+	"authorization":       true,
+	"x-goog-api-key":      true,
 	"x-goog-user-project": true,
-	"access_token":      true,
-	"refresh_token":     true,
-	"id_token":          true,
-	"client_secret":     true,
-	"api_key":           true,
-	"password":          true,
-	"private_key":       true,
-	"passphrase":        true,
+	"access_token":        true,
+	"refresh_token":       true,
+	"id_token":            true,
+	"client_secret":       true,
+	"api_key":             true,
+	"password":            true,
+	"private_key":         true,
+	"passphrase":          true,
 }
 
 // redactChatHistoryEntry walks the Request/Response objects in place,

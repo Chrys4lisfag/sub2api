@@ -61,8 +61,8 @@ func TestDefaultVariantThinkingLevel(t *testing.T) {
 		{"gemini-3.5-flash-high", "high"},
 		{"gemini-3.5-flash-medium", "medium"},
 		{"models/gemini-3.5-flash-high", "high"},
-		{"gemini-3.5-flash", ""},      // base flash has no implicit default
-		{"gemini-3-pro-high", ""},     // not a 3.5 variant
+		{"gemini-3.5-flash", ""},  // base flash has no implicit default
+		{"gemini-3-pro-high", ""}, // not a 3.5 variant
 		{"claude-opus-4-7", ""},
 		{"", ""},
 	}
@@ -160,9 +160,9 @@ func TestExtractSessionID(t *testing.T) {
 
 func TestResolveWireFromBody_BaseFlashPicksWireFromThinkingLevel(t *testing.T) {
 	cases := []struct {
-		name       string
-		body       string
-		wantWire   string
+		name     string
+		body     string
+		wantWire string
 	}{
 		// pre-wrap body (Gemini-format, used by native gateway pre-envelope)
 		{

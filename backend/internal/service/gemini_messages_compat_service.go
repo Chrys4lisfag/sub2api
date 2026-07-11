@@ -1751,7 +1751,7 @@ var (
 	// are almost never populated for this class of error. Parsed at the
 	// tail of ParseGeminiRateLimitResetTime so gemini + antigravity_native
 	// share one reset-time source of truth.
-	resetsInRegex            = regexp.MustCompile(`(?i)resets?\s+in\s+((?:\d+h)?(?:\d+m)?(?:\d+(?:\.\d+)?s)?)`)
+	resetsInRegex = regexp.MustCompile(`(?i)resets?\s+in\s+((?:\d+h)?(?:\d+m)?(?:\d+(?:\.\d+)?s)?)`)
 )
 
 func sanitizeUpstreamErrorMessage(msg string) string {

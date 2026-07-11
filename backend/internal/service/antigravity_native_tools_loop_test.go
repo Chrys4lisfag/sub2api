@@ -37,7 +37,7 @@ func TestSynthesizeListToolsResponse_GroupsByServer(t *testing.T) {
 	if resp["totalTools"] != 3 {
 		t.Errorf("expected 3 tools, got %v", resp["totalTools"])
 	}
-	servers := resp["servers"].(map[string]any)
+	servers, _ := resp["servers"].(map[string]any)
 	electerm, ok := servers["electerm"].([]any)
 	if !ok || len(electerm) != 2 {
 		t.Errorf("expected 2 electerm tools, got %+v", servers["electerm"])
@@ -243,7 +243,7 @@ func TestAppendAssistantTurnAndUserResponse_PreservesText(t *testing.T) {
 	if err := json.Unmarshal(out, &parsed); err != nil {
 		t.Fatalf("output not valid JSON: %v", err)
 	}
-	contents := parsed["contents"].([]any)
+	contents, _ := parsed["contents"].([]any)
 	if len(contents) != 3 {
 		t.Fatalf("expected 3 turns, got %d", len(contents))
 	}

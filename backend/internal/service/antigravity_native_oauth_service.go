@@ -21,9 +21,9 @@ import (
 	"fmt"
 	"time"
 
-	agyauth "github.com/koval/agymimic/auth"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/antigravity"
 	agynative "github.com/Wei-Shaw/sub2api/internal/pkg/antigravity_native"
+	agyauth "github.com/koval/agymimic/auth"
 )
 
 // AntigravityNativeOAuthService is the OAuth gatekeeper for the
