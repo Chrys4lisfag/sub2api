@@ -1471,7 +1471,6 @@
     "supports_web_search": true
   },
   "gemini-3-flash": {
-<<<<<<< HEAD
     "cache_read_input_token_cost": 5e-08,
     "cache_read_input_token_cost_priority": 9e-08,
     "input_cost_per_audio_token": 1e-06,
@@ -1529,8 +1528,6 @@
     "web_search_billing_unit": "per_query"
   },
   "gemini-3-flash-preview": {
-=======
->>>>>>> upstream/main
     "cache_read_input_token_cost": 5e-08,
     "cache_read_input_token_cost_priority": 9e-08,
     "input_cost_per_audio_token": 1e-06,
@@ -1587,11 +1584,7 @@
     "supports_web_search": true,
     "web_search_billing_unit": "per_query"
   },
-<<<<<<< HEAD
   "gemini-3.5-flash": {
-=======
-  "gemini-3-flash-preview": {
->>>>>>> upstream/main
     "cache_read_input_token_cost": 5e-08,
     "cache_read_input_token_cost_priority": 9e-08,
     "input_cost_per_audio_token": 1e-06,
@@ -1603,31 +1596,16 @@
     "max_audio_per_prompt": 1,
     "max_images_per_prompt": 3000,
     "max_input_tokens": 1048576,
-<<<<<<< HEAD
     "max_output_tokens": 65536,
     "max_pdf_size_mb": 30,
     "max_tokens": 65536,
-=======
-    "max_output_tokens": 65535,
-    "max_pdf_size_mb": 30,
-    "max_tokens": 65535,
->>>>>>> upstream/main
     "max_video_length": 1,
     "max_videos_per_prompt": 10,
     "mode": "chat",
     "output_cost_per_reasoning_token": 3e-06,
     "output_cost_per_token": 3e-06,
     "output_cost_per_token_priority": 5.4e-06,
-<<<<<<< HEAD
     "source": "https://ai.google.dev/gemini-api/docs/models/gemini-3.5-flash",
-=======
-    "search_context_cost_per_query": {
-      "search_context_size_high": 0.014,
-      "search_context_size_low": 0.014,
-      "search_context_size_medium": 0.014
-    },
-    "source": "https://ai.google.dev/pricing/gemini-3",
->>>>>>> upstream/main
     "supported_endpoints": [
       "/v1/chat/completions",
       "/v1/completions",
@@ -1655,12 +1633,7 @@
     "supports_tool_choice": true,
     "supports_url_context": true,
     "supports_vision": true,
-<<<<<<< HEAD
     "supports_web_search": true
-=======
-    "supports_web_search": true,
-    "web_search_billing_unit": "per_query"
->>>>>>> upstream/main
   },
   "gemini-3-pro-image-preview": {
     "input_cost_per_image": 0.0011,

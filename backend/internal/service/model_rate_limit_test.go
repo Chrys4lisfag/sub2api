@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Wei-Shaw/sub2api/internal/domain"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/ctxkey"
 	"github.com/stretchr/testify/require"
 )
@@ -108,14 +109,13 @@ func TestIsModelRateLimited(t *testing.T) {
 			expected:       true,
 		},
 		{
-			// Migrated from gemini-3-pro-* (deprecated by Google in May 2026)
-			// to gemini-3.1-pro-* which is currently in DefaultAntigravityModelMapping.
-			name: "antigravity platform - gemini-3.1-pro-preview mapped to gemini-3.1-pro-high",
+			// Gemini 3.1 Pro preview and high map to the shared Antigravity agent family.
+			name: "antigravity platform - gemini-3.1-pro-preview mapped to gemini-pro-agent",
 			account: &Account{
 				Platform: PlatformAntigravity,
 				Extra: map[string]any{
 					modelRateLimitsKey: map[string]any{
-						"gemini-3.1-pro-high": map[string]any{
+						domain.AntigravityGemini31ProAgentModel: map[string]any{
 							"rate_limit_reset_at": future,
 						},
 					},
