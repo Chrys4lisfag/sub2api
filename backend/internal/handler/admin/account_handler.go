@@ -2753,6 +2753,15 @@ func (h *AccountHandler) GetAntigravityDefaultModelMapping(c *gin.Context) {
 	response.Success(c, domain.DefaultAntigravityModelMapping)
 }
 
+func (h *AccountHandler) SyncAntigravityDefaultModelMappings(c *gin.Context) {
+	result, err := h.adminService.SyncAntigravityDefaultModelMappings(c.Request.Context())
+	if err != nil {
+		response.ErrorFrom(c, err)
+		return
+	}
+	response.Success(c, result)
+}
+
 // sanitizeExtraBaseRPM 对 extra map 中的 base_rpm 值进行范围校验和归一化。
 // 负值归零，超过 10000 截断为 10000。extra 为 nil 或不含 base_rpm 时无操作。
 func sanitizeExtraBaseRPM(extra map[string]any) {

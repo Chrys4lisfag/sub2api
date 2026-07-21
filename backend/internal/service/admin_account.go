@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Wei-Shaw/sub2api/internal/domain"
 	infraerrors "github.com/Wei-Shaw/sub2api/internal/pkg/errors"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/logger"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/pagination"
@@ -357,6 +358,21 @@ func (s *adminServiceImpl) UpdateAccountExtra(ctx context.Context, id int64, upd
 		return nil
 	}
 	return s.accountRepo.UpdateExtra(ctx, id, updates)
+}
+
+type antigravityDefaultModelMappingSyncRepository interface {
+	SyncAntigravityDefaultModelMappings(
+		ctx context.Context,
+		defaultMapping map[string]string,
+	) (*AntigravityDefaultModelMappingSyncResult, error)
+}
+
+func (s *adminServiceImpl) SyncAntigravityDefaultModelMappings(ctx context.Context) (*AntigravityDefaultModelMappingSyncResult, error) {
+	repo, ok := s.accountRepo.(antigravityDefaultModelMappingSyncRepository)
+	if !ok {
+		return nil, errors.New("account repository does not support Antigravity default model mapping sync")
+	}
+	return repo.SyncAntigravityDefaultModelMappings(ctx, domain.DefaultAntigravityModelMapping)
 }
 
 // BulkUpdateAccounts updates multiple accounts in one request.

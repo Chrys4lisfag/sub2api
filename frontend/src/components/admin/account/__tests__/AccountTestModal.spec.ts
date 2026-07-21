@@ -74,7 +74,10 @@ function mountModal(account: Record<string, unknown> = {
     global: {
       stubs: {
         BaseDialog: { template: '<div><slot /><slot name="footer" /></div>' },
-        Select: { template: '<div class="select-stub"></div>' },
+        Select: {
+          props: ['options', 'valueKey'],
+          template: '<div class="select-stub"><span v-for="option in options" :key="option[valueKey || \'value\']" :data-model-id="option[valueKey || \'value\']"></span></div>'
+        },
         TextArea: {
           props: ['modelValue'],
           emits: ['update:modelValue'],
@@ -89,6 +92,11 @@ function mountModal(account: Record<string, unknown> = {
 describe('AccountTestModal', () => {
   beforeEach(() => {
     getAvailableModels.mockResolvedValue([
+      { id: 'gemini-3.6-flash', display_name: 'Gemini 3.6 Flash' },
+      { id: 'gemini-3.6-flash-high', display_name: 'Gemini 3.6 Flash High' },
+      { id: 'gemini-3.6-flash-medium', display_name: 'Gemini 3.6 Flash Medium' },
+      { id: 'gemini-3.6-flash-low', display_name: 'Gemini 3.6 Flash Low' },
+      { id: 'gemini-3.1-flash-lite', display_name: 'Gemini 3.1 Flash Lite' },
       { id: 'gemini-2.0-flash', display_name: 'Gemini 2.0 Flash' },
       { id: 'gemini-2.5-flash-image', display_name: 'Gemini 2.5 Flash Image' },
       { id: 'gemini-3.1-flash-image', display_name: 'Gemini 3.1 Flash Image' }
@@ -114,6 +122,27 @@ describe('AccountTestModal', () => {
 
   afterEach(() => {
     vi.restoreAllMocks()
+  })
+
+  it('Antigravity Native 测试模型选择器显示 Gemini 3.6 和 3.1 Flash Lite', async () => {
+    const wrapper = mountModal({
+      id: 43,
+      name: 'Antigravity Native',
+      platform: 'antigravity_native',
+      type: 'oauth',
+      status: 'active'
+    })
+    await wrapper.setProps({ show: true })
+    await flushPromises()
+
+    const modelIDs = wrapper.findAll('[data-model-id]').map((node) => node.attributes('data-model-id'))
+    expect(modelIDs).toEqual(expect.arrayContaining([
+      'gemini-3.6-flash',
+      'gemini-3.6-flash-high',
+      'gemini-3.6-flash-medium',
+      'gemini-3.6-flash-low',
+      'gemini-3.1-flash-lite'
+    ]))
   })
 
   it('gemini 图片模型测试会携带提示词并渲染图片预览', async () => {

@@ -624,6 +624,22 @@ export async function createOpenAICodexPAT(payload: OpenAICodexPATCreateRequest)
   return data
 }
 
+export interface AntigravityDefaultModelMappingSyncResult {
+  scanned_accounts: number
+  eligible_accounts: number
+  updated_accounts: number
+  unchanged_accounts: number
+  skipped_accounts: number
+  added_mappings: number
+}
+
+export async function syncAntigravityDefaultModelMappings(): Promise<AntigravityDefaultModelMappingSyncResult> {
+  const { data } = await apiClient.post<AntigravityDefaultModelMappingSyncResult>(
+    '/admin/accounts/antigravity/sync-default-model-mappings'
+  )
+  return data
+}
+
 /**
  * Get Antigravity default model mapping from backend
  * @returns Default model mapping (from -> to)
@@ -843,6 +859,7 @@ export const accountsAPI = {
   importCodexSession,
   createOpenAICodexPAT,
   getAntigravityDefaultModelMapping,
+  syncAntigravityDefaultModelMappings,
   batchClearError,
   batchRefresh,
   setPrivacy,

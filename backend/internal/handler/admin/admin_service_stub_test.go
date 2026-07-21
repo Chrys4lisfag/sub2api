@@ -689,6 +689,10 @@ func (s *stubAdminService) ForceAntigravityPrivacy(ctx context.Context, account 
 	return ""
 }
 
+func (s *stubAdminService) SyncAntigravityDefaultModelMappings(ctx context.Context) (*service.AntigravityDefaultModelMappingSyncResult, error) {
+	return &service.AntigravityDefaultModelMappingSyncResult{}, nil
+}
+
 func (s *stubAdminService) ReplaceUserGroup(ctx context.Context, userID, oldGroupID, newGroupID int64) (*service.ReplaceUserGroupResult, error) {
 	return &service.ReplaceUserGroupResult{MigratedKeys: 0}, nil
 }

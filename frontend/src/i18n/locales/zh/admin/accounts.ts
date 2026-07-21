@@ -13,6 +13,14 @@ export default {
       listPendingSyncHint: '列表存在待同步变更，点击同步可补齐最新数据。',
       listPendingSyncAction: '立即同步',
       syncFromCrs: '从 CRS 同步',
+      syncDefaultModelMappings: '同步全部 Antigravity 模型映射',
+      syncDefaultModelMappingsLoading: '正在同步 Antigravity 映射...',
+      syncDefaultModelMappingsConfirm:
+        '为所有 Antigravity 和 Antigravity Native 账号补充当前缺失的默认模型映射吗？已有自定义目标不会被修改。',
+      syncDefaultModelMappingsSuccess: '已更新 {updated} 个账号并补充 {added} 个缺失映射',
+      syncDefaultModelMappingsNoChanges:
+        '全部 {eligible} 个显式映射均已是最新；{skipped} 个账号会自动继承默认映射',
+      syncDefaultModelMappingsFailed: '同步 Antigravity 模型映射失败',
       dataExport: '导出',
       dataExportSelected: '导出选中',
       dataExportIncludeProxies: '导出代理（导出账号关联的代理）',

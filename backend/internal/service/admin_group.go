@@ -105,7 +105,7 @@ func defaultModelsListCandidateIDs(platform string) []string {
 			ids = append(ids, model.ID)
 		}
 		return ids
-	case PlatformAntigravity:
+	case PlatformAntigravity, PlatformAntigravityNative:
 		models := antigravity.DefaultModels()
 		ids := make([]string, 0, len(models))
 		for _, model := range models {

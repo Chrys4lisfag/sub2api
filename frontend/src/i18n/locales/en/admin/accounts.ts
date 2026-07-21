@@ -13,6 +13,14 @@ export default {
       listPendingSyncHint: 'List changes are pending sync. Click sync to load latest rows.',
       listPendingSyncAction: 'Sync now',
       syncFromCrs: 'Sync from CRS',
+      syncDefaultModelMappings: 'Sync all Antigravity model mappings',
+      syncDefaultModelMappingsLoading: 'Syncing Antigravity mappings...',
+      syncDefaultModelMappingsConfirm:
+        'Add every missing current default model mapping to all Antigravity and Antigravity Native accounts? Existing custom targets will not be changed.',
+      syncDefaultModelMappingsSuccess: 'Updated {updated} account(s) and added {added} missing mapping(s)',
+      syncDefaultModelMappingsNoChanges:
+        'All {eligible} explicit mapping(s) are current; {skipped} account(s) inherit defaults automatically',
+      syncDefaultModelMappingsFailed: 'Failed to sync Antigravity model mappings',
       dataExport: 'Export',
       dataExportSelected: 'Export Selected',
       dataExportIncludeProxies: 'Include proxies linked to the exported accounts',

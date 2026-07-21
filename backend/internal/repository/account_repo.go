@@ -1649,6 +1649,120 @@ func isSchedulerNeutralExtraKey(key string) bool {
 	return false
 }
 
+func (r *accountRepository) SyncAntigravityDefaultModelMappings(
+	ctx context.Context,
+	defaultMapping map[string]string,
+) (*service.AntigravityDefaultModelMappingSyncResult, error) {
+	result := &service.AntigravityDefaultModelMappingSyncResult{}
+	if len(defaultMapping) == 0 {
+		return result, nil
+	}
+	if r == nil || r.sql == nil {
+		return nil, errors.New("account repository SQL executor not configured")
+	}
+
+	defaultsJSON, err := json.Marshal(defaultMapping)
+	if err != nil {
+		return nil, err
+	}
+
+	const query = `
+		WITH candidates AS MATERIALIZED (
+			SELECT id, credentials->'model_mapping' AS model_mapping
+			FROM accounts
+			WHERE platform IN ('antigravity', 'antigravity_native')
+			  AND deleted_at IS NULL
+		),
+		eligible AS (
+			SELECT id, model_mapping
+			FROM candidates
+			WHERE jsonb_typeof(model_mapping) = 'object'
+			  AND model_mapping <> '{}'::jsonb
+		),
+		missing AS (
+			SELECT
+				e.id,
+				COUNT(d.key)::bigint AS missing_count,
+				COALESCE(
+					jsonb_object_agg(d.key, d.value) FILTER (WHERE d.key IS NOT NULL),
+					'{}'::jsonb
+				) AS additions
+			FROM eligible e
+			LEFT JOIN LATERAL jsonb_each($1::jsonb) AS d(key, value)
+				ON NOT (e.model_mapping ? d.key)
+			GROUP BY e.id
+		),
+		updated AS (
+			UPDATE accounts AS a
+			SET credentials = jsonb_set(
+					a.credentials,
+					'{model_mapping}',
+					m.additions || (a.credentials->'model_mapping'),
+					false
+				),
+				updated_at = NOW()
+			FROM missing m
+			WHERE a.id = m.id
+			  AND m.missing_count > 0
+			  AND jsonb_typeof(a.credentials->'model_mapping') = 'object'
+			  AND a.credentials->'model_mapping' <> '{}'::jsonb
+			RETURNING a.id, m.missing_count
+		)
+		SELECT
+			(SELECT COUNT(*) FROM candidates),
+			(SELECT COUNT(*) FROM eligible),
+			(SELECT COUNT(*) FROM updated),
+			(SELECT COUNT(*) FROM eligible) - (SELECT COUNT(*) FROM updated),
+			(SELECT COUNT(*) FROM candidates) - (SELECT COUNT(*) FROM eligible),
+			COALESCE((SELECT SUM(missing_count) FROM updated), 0),
+			COALESCE((SELECT array_agg(id ORDER BY id) FROM updated), '{}'::bigint[])
+	`
+
+	rows, err := r.sql.QueryContext(ctx, query, string(defaultsJSON))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var updatedIDs []int64
+	if !rows.Next() {
+		if err := rows.Err(); err != nil {
+			return nil, err
+		}
+		return nil, errors.New("antigravity default model mapping sync returned no result")
+	}
+	if err := rows.Scan(
+		&result.ScannedAccounts,
+		&result.EligibleAccounts,
+		&result.UpdatedAccounts,
+		&result.UnchangedAccounts,
+		&result.SkippedAccounts,
+		&result.AddedMappings,
+		pq.Array(&updatedIDs),
+	); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+
+	if result.UpdatedAccounts > 0 {
+		payload := map[string]any{
+			"platforms":        []string{service.PlatformAntigravity, service.PlatformAntigravityNative},
+			"updated_accounts": result.UpdatedAccounts,
+		}
+		if err := enqueueSchedulerOutbox(ctx, r.sql, service.SchedulerOutboxEventAccountBulkChanged, nil, nil, payload); err != nil {
+			logger.LegacyPrintf("repository.account", "[SchedulerOutbox] enqueue model mapping sync failed: err=%v", err)
+		}
+		r.syncSchedulerAccountSnapshots(ctx, updatedIDs)
+	}
+
+	return result, nil
+}
+
 func (r *accountRepository) BulkUpdate(ctx context.Context, ids []int64, updates service.AccountBulkUpdate) (int64, error) {
 	if len(ids) == 0 {
 		return 0, nil

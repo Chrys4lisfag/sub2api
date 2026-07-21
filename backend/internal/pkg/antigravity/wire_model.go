@@ -168,16 +168,19 @@ func ResolveWireFromBody(publicName string, body []byte) string {
 	}
 }
 
-// extractThinkingLevel returns the first non-empty thinkingLevel found in
-// either the pre-wrap (`generationConfig…`) or post-wrap
-// (`request.generationConfig…`) location, normalized to lowercase.
-// Returns "" when neither is set.
+// extractThinkingLevel returns the first non-empty thinkingLevel found in a
+// native Gemini REST body, an OMP @google/genai SDK body, or a wrapped
+// v1internal request, normalized to lowercase.
 func extractThinkingLevel(body []byte) string {
 	keys := []string{
 		"generationConfig.thinkingConfig.thinkingLevel",
 		"generationConfig.thinkingConfig.thinking_level",
+		"config.thinkingConfig.thinkingLevel",
+		"config.thinkingConfig.thinking_level",
 		"request.generationConfig.thinkingConfig.thinkingLevel",
 		"request.generationConfig.thinkingConfig.thinking_level",
+		"request.config.thinkingConfig.thinkingLevel",
+		"request.config.thinkingConfig.thinking_level",
 	}
 	for _, k := range keys {
 		if v := strings.ToLower(strings.TrimSpace(gjson.GetBytes(body, k).String())); v != "" {

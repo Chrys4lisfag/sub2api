@@ -92,6 +92,21 @@
                       </span>
                       <span class="flex-1 text-left">{{ t('admin.accounts.syncFromCrs') }}</span>
                     </button>
+                    <button
+                      data-test="sync-default-model-mappings"
+                      class="account-tools-menu-item"
+                      :disabled="syncingDefaultModelMappings"
+                      @click="handleSyncDefaultModelMappings"
+                    >
+                      <span class="account-tools-menu-icon bg-amber-50 text-amber-600 dark:bg-amber-900/30 dark:text-amber-300">
+                        <Icon name="sync" size="sm" :class="{ 'animate-spin': syncingDefaultModelMappings }" />
+                      </span>
+                      <span class="flex-1 text-left">
+                        {{ syncingDefaultModelMappings
+                          ? t('admin.accounts.syncDefaultModelMappingsLoading')
+                          : t('admin.accounts.syncDefaultModelMappings') }}
+                      </span>
+                    </button>
                     <button class="account-tools-menu-item" @click="openImportData">
                       <span class="account-tools-menu-icon bg-emerald-50 text-emerald-600 dark:bg-emerald-900/30 dark:text-emerald-300">
                         <Icon name="upload" size="sm" />
@@ -549,6 +564,7 @@ const scheduleModelOptions = ref<SelectOption[]>([])
 const togglingSchedulable = ref<number | null>(null)
 const menu = reactive<{show:boolean, acc:Account|null, pos:{top:number, left:number}|null}>({ show: false, acc: null, pos: null })
 const exportingData = ref(false)
+const syncingDefaultModelMappings = ref(false)
 
 // Account tools dropdown
 const showAccountToolsDropdown = ref(false)
@@ -1097,6 +1113,32 @@ const closeAccountToolsDropdown = () => {
 const openSyncFromCrs = () => {
   closeAccountToolsDropdown()
   showSync.value = true
+}
+
+const handleSyncDefaultModelMappings = async () => {
+  closeAccountToolsDropdown()
+  if (!window.confirm(t('admin.accounts.syncDefaultModelMappingsConfirm'))) return
+
+  syncingDefaultModelMappings.value = true
+  try {
+    const result = await adminAPI.accounts.syncAntigravityDefaultModelMappings()
+    if (result.updated_accounts === 0) {
+      appStore.showSuccess(t('admin.accounts.syncDefaultModelMappingsNoChanges', {
+        eligible: result.eligible_accounts,
+        skipped: result.skipped_accounts
+      }))
+    } else {
+      appStore.showSuccess(t('admin.accounts.syncDefaultModelMappingsSuccess', {
+        updated: result.updated_accounts,
+        added: result.added_mappings
+      }))
+      await reload()
+    }
+  } catch (error: any) {
+    appStore.showError(error?.response?.data?.message || error?.message || t('admin.accounts.syncDefaultModelMappingsFailed'))
+  } finally {
+    syncingDefaultModelMappings.value = false
+  }
 }
 
 const openImportData = () => {

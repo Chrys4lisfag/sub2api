@@ -252,6 +252,11 @@ func TestResolveWireFromBody_36FlashPicksWireFromThinkingLevel(t *testing.T) {
 			wantWire: "gemini-3.6-flash-high",
 		},
 		{
+			name:     "3.6 high from OMP SDK config → -high",
+			body:     `{"model":"gemini-3.6-flash","config":{"thinkingConfig":{"thinkingLevel":"HIGH"}}}`,
+			wantWire: "gemini-3.6-flash-high",
+		},
+		{
 			name:     "3.6 medium → -medium",
 			body:     `{"model":"gemini-3.6-flash","generationConfig":{"thinkingConfig":{"thinkingLevel":"medium"}}}`,
 			wantWire: "gemini-3.6-flash-medium",

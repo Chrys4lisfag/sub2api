@@ -8,13 +8,19 @@ const {
   listWithEtag,
   getBatchTodayStats,
   getAllProxies,
-  getAllGroups
+  getAllGroups,
+  syncDefaultModelMappings,
+  showSuccess,
+  showError
 } = vi.hoisted(() => ({
   listAccounts: vi.fn(),
   listWithEtag: vi.fn(),
   getBatchTodayStats: vi.fn(),
   getAllProxies: vi.fn(),
-  getAllGroups: vi.fn()
+  getAllGroups: vi.fn(),
+  syncDefaultModelMappings: vi.fn(),
+  showSuccess: vi.fn(),
+  showError: vi.fn()
 }))
 
 vi.mock('@/api/admin', () => ({
@@ -26,7 +32,8 @@ vi.mock('@/api/admin', () => ({
       delete: vi.fn(),
       batchClearError: vi.fn(),
       batchRefresh: vi.fn(),
-      toggleSchedulable: vi.fn()
+      toggleSchedulable: vi.fn(),
+      syncAntigravityDefaultModelMappings: syncDefaultModelMappings,
     },
     proxies: {
       getAll: getAllProxies
@@ -39,8 +46,8 @@ vi.mock('@/api/admin', () => ({
 
 vi.mock('@/stores/app', () => ({
   useAppStore: () => ({
-    showError: vi.fn(),
-    showSuccess: vi.fn(),
+    showError,
+    showSuccess,
     showInfo: vi.fn()
   })
 }))
@@ -93,6 +100,9 @@ describe('admin AccountsView bulk edit scope', () => {
     getBatchTodayStats.mockReset()
     getAllProxies.mockReset()
     getAllGroups.mockReset()
+    syncDefaultModelMappings.mockReset()
+    showSuccess.mockReset()
+    showError.mockReset()
 
     listAccounts.mockResolvedValue({
       items: [],
@@ -109,6 +119,14 @@ describe('admin AccountsView bulk edit scope', () => {
     getBatchTodayStats.mockResolvedValue({ stats: {} })
     getAllProxies.mockResolvedValue([])
     getAllGroups.mockResolvedValue([])
+    syncDefaultModelMappings.mockResolvedValue({
+      scanned_accounts: 7,
+      eligible_accounts: 5,
+      updated_accounts: 2,
+      unchanged_accounts: 3,
+      skipped_accounts: 2,
+      added_mappings: 4
+    })
   })
 
   it('opens bulk edit in filtered-results mode from the bulk actions dropdown', async () => {
@@ -155,6 +173,60 @@ describe('admin AccountsView bulk edit scope', () => {
 
     expect(wrapper.get('[data-test="bulk-edit-modal"]').attributes('data-show')).toBe('true')
     expect(wrapper.get('[data-test="bulk-edit-modal"]').attributes('data-target-mode')).toBe('filtered')
+  })
+
+  it('syncs every Antigravity mapping from the account tools menu', async () => {
+    const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(true)
+    const wrapper = mount(AccountsView, {
+      global: {
+        stubs: {
+          AppLayout: { template: '<div><slot /></div>' },
+          TablePageLayout: {
+            template: '<div><slot name="filters" /><slot name="table" /><slot name="pagination" /></div>'
+          },
+          DataTable: DataTableStub,
+          Pagination: true,
+          ConfirmDialog: true,
+          AccountTableActions: { template: '<div><slot name="beforeCreate" /><slot name="after" /></div>' },
+          AccountTableFilters: { template: '<div></div>' },
+          AccountBulkActionsBar: AccountBulkActionsBarStub,
+          AccountActionMenu: true,
+          ImportDataModal: true,
+          ReAuthAccountModal: true,
+          AccountTestModal: true,
+          AccountStatsModal: true,
+          ScheduledTestsPanel: true,
+          SyncFromCrsModal: true,
+          TempUnschedStatusModal: true,
+          ErrorPassthroughRulesModal: true,
+          TLSFingerprintProfilesModal: true,
+          CreateAccountModal: true,
+          EditAccountModal: true,
+          BulkEditAccountModal: BulkEditAccountModalStub,
+          PlatformTypeBadge: true,
+          AccountCapacityCell: true,
+          AccountStatusIndicator: true,
+          AccountTodayStatsCell: true,
+          AccountGroupsCell: true,
+          AccountUsageCell: true,
+          Icon: true
+        }
+      }
+    })
+    await flushPromises()
+
+    const moreActions = wrapper.findAll('button').find((button) =>
+      button.text().includes('admin.accounts.moreActions')
+    )
+    expect(moreActions).toBeTruthy()
+    await moreActions!.trigger('click')
+    await wrapper.get('[data-test="sync-default-model-mappings"]').trigger('click')
+    await flushPromises()
+
+    expect(confirmSpy).toHaveBeenCalledOnce()
+    expect(syncDefaultModelMappings).toHaveBeenCalledOnce()
+    expect(showSuccess).toHaveBeenCalledWith('admin.accounts.syncDefaultModelMappingsSuccess')
+    confirmSpy.mockRestore()
   })
 
   it('renders the created_at column by default', async () => {

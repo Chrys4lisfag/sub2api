@@ -4,7 +4,7 @@ vi.mock('@/api/admin/accounts', () => ({
   getAntigravityDefaultModelMapping: vi.fn()
 }))
 
-import { buildModelMappingObject, getModelsByPlatform, splitModelMappingObject } from '../useModelWhitelist'
+import { allModels, buildModelMappingObject, getModelsByPlatform, getPresetMappingsByPlatform, splitModelMappingObject } from '../useModelWhitelist'
 
 describe('useModelWhitelist', () => {
   it('openai 模型列表包含 GPT-5.4 官方快照', () => {
@@ -34,6 +34,30 @@ describe('useModelWhitelist', () => {
     expect(models).toContain('gemini-2.5-flash-image')
     expect(models).toContain('gemini-3.1-flash-image')
     expect(models).toContain('gemini-3-pro-image')
+  })
+
+  it.each(['antigravity', 'antigravity_native'])('%s 模型列表包含 Gemini 3.6 和 3.1 Flash Lite', (platform) => {
+    const models = getModelsByPlatform(platform)
+
+    expect(models).toContain('gemini-3.1-flash-lite')
+    expect(models).toContain('gemini-3.6-flash')
+    expect(models).toContain('gemini-3.6-flash-high')
+    expect(models).toContain('gemini-3.6-flash-medium')
+    expect(models).toContain('gemini-3.6-flash-low')
+  })
+
+  it('全局模型选项包含 Antigravity 独占模型且没有重复项', () => {
+    const values = allModels.map((model) => model.value)
+
+    expect(values).toContain('gemini-3.1-flash-lite')
+    expect(values).toContain('gemini-3.6-flash')
+    expect(new Set(values).size).toBe(values.length)
+  })
+
+  it('Antigravity Native 使用 Antigravity 预设映射', () => {
+    expect(getPresetMappingsByPlatform('antigravity_native')).toEqual(
+      getPresetMappingsByPlatform('antigravity')
+    )
   })
 
   it('Claude 模型列表包含新发布的 Claude 模型', () => {

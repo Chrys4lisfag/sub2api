@@ -85,6 +85,7 @@ type AdminService interface {
 	ForceAntigravityPrivacy(ctx context.Context, account *Account) string
 	SetAccountSchedulable(ctx context.Context, id int64, schedulable bool) (*Account, error)
 	BulkUpdateAccounts(ctx context.Context, input *BulkUpdateAccountsInput) (*BulkUpdateAccountsResult, error)
+	SyncAntigravityDefaultModelMappings(ctx context.Context) (*AntigravityDefaultModelMappingSyncResult, error)
 	CheckMixedChannelRisk(ctx context.Context, currentAccountID int64, currentAccountPlatform string, groupIDs []int64) error
 	// RevertAccountProxyFallback 将账号的 proxy_id 切回 proxy_fallback_origin_id，并清空 origin 字段。
 	// 若账号不存在返回 ErrAccountNotFound；若账号存在但不在 fallback 状态，返回 ErrAccountNotInFallback。
@@ -423,6 +424,15 @@ type BulkUpdateAccountsResult struct {
 	SuccessIDs []int64                   `json:"success_ids"`
 	FailedIDs  []int64                   `json:"failed_ids"`
 	Results    []BulkUpdateAccountResult `json:"results"`
+}
+
+type AntigravityDefaultModelMappingSyncResult struct {
+	ScannedAccounts   int64 `json:"scanned_accounts"`
+	EligibleAccounts  int64 `json:"eligible_accounts"`
+	UpdatedAccounts   int64 `json:"updated_accounts"`
+	UnchangedAccounts int64 `json:"unchanged_accounts"`
+	SkippedAccounts   int64 `json:"skipped_accounts"`
+	AddedMappings     int64 `json:"added_mappings"`
 }
 
 type CreateProxyInput struct {
