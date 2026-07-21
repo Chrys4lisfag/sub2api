@@ -18,6 +18,15 @@ func TestAntigravityWireModel(t *testing.T) {
 		{"gemini-3.5-flash-medium", "gemini-3.5-flash-low"},
 		// Public "Low" → wire "extra-low" (else backend serves Medium tier).
 		{"gemini-3.5-flash-low", "gemini-3.5-flash-extra-low"},
+		// Gemini 3.6 Flash (2026-07-21) — wire names are identity (no
+		// low↔extra-low trap like 3.5). Base ID routes to -medium.
+		{"gemini-3.6-flash-high", "gemini-3.6-flash-high"},
+		{"gemini-3.6-flash-medium", "gemini-3.6-flash-medium"},
+		{"gemini-3.6-flash-low", "gemini-3.6-flash-low"},
+		{"gemini-3.6-flash-tiered", "gemini-3.6-flash-tiered"},
+		{"gemini-3.6-flash", "gemini-3.6-flash-medium"},
+		{"models/gemini-3.6-flash-high", "gemini-3.6-flash-high"},
+		{"GEMINI-3.6-FLASH-LOW", "gemini-3.6-flash-low"},
 		// 3 Flash legacy variants → base 3-flash.
 		{"gemini-3-flash-high", "gemini-3-flash"},
 		{"gemini-3-flash-medium", "gemini-3-flash"},
@@ -60,6 +69,10 @@ func TestDefaultVariantThinkingLevel(t *testing.T) {
 	}{
 		{"gemini-3.5-flash-high", "high"},
 		{"gemini-3.5-flash-medium", "medium"},
+		{"gemini-3.6-flash-high", "high"},
+		{"gemini-3.6-flash-medium", "medium"},
+		{"gemini-3.6-flash-low", "low"},
+		{"gemini-3.6-flash", ""}, // base has no implicit default
 		{"models/gemini-3.5-flash-high", "high"},
 		{"gemini-3.5-flash", ""},  // base flash has no implicit default
 		{"gemini-3-pro-high", ""}, // not a 3.5 variant

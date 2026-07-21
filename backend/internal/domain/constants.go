@@ -131,6 +131,8 @@ var DefaultAntigravityModelMapping = map[string]string{
 	"gemini-3.1-flash-image": "gemini-3.1-flash-image",
 	// Gemini 3.1 image preview 映射
 	"gemini-3.1-flash-image-preview": "gemini-3.1-flash-image",
+	// Gemini 3.1 Flash Lite (verified 2026-07-21 via daily+prod fetchAvailableModels)
+	"gemini-3.1-flash-lite": "gemini-3.1-flash-lite",
 	// Gemini 3.5 白名单 (GA 2026-05-12) + 显式 thinking-level 变体
 	// (mirrors router-for-me/CLIProxyAPI PR #3490 model registry).
 	// Wire-model 转换在 pkg/antigravity/wire_model.go::AntigravityWireModel
@@ -139,6 +141,14 @@ var DefaultAntigravityModelMapping = map[string]string{
 	"gemini-3.5-flash-high":   "gemini-3.5-flash-high",
 	"gemini-3.5-flash-medium": "gemini-3.5-flash-medium",
 	"gemini-3.5-flash-low":    "gemini-3.5-flash-low",
+	// Gemini 3.6 Flash (2026-07-21 — daily-only for now, see wire_model.go).
+	// Wire names are identity — see AntigravityWireModel comment for
+	// the verification trail. Suffixless base ID maps to -medium tier
+	// on the wire (mirrors 3.5 base → -low convention).
+	"gemini-3.6-flash":        "gemini-3.6-flash",
+	"gemini-3.6-flash-high":   "gemini-3.6-flash-high",
+	"gemini-3.6-flash-medium": "gemini-3.6-flash-medium",
+	"gemini-3.6-flash-low":    "gemini-3.6-flash-low",
 	// 注: gemini-3-pro-image 同样已弃用，不在白名单。
 	// 其他官方模型
 	"gpt-oss-120b-medium":    "gpt-oss-120b-medium",

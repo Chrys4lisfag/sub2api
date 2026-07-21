@@ -845,23 +845,37 @@ func applyAgyDefaultsToInnerRequest(inner map[string]any, wireModel string) {
 
 // thinkingBudgetForModel returns the budget agy uses for each known wire
 // model. Values match the fetchAvailableModels probe of daily-cloudcode-pa
-// (May 2026). Unknown models fall back to -1 (dynamic).
+// (last refreshed 2026-07-21 against agy.exe 1.1.0). Unknown models
+// fall back to -1 (dynamic).
 func thinkingBudgetForModel(wire string) int {
 	switch strings.ToLower(strings.TrimSpace(wire)) {
 	case "gemini-3-flash":
 		return -1
+	// 3.5 Flash tiers (verified 2026-05)
 	case "gemini-3.5-flash-extra-low":
 		return 1000
 	case "gemini-3.5-flash-low":
 		return 4000
 	case "gemini-3-flash-agent":
 		return 10000
+	// 3.6 Flash tiers (verified 2026-07-21 via fetchAvailableModels probe)
+	case "gemini-3.6-flash-low":
+		return 1000
+	case "gemini-3.6-flash-medium":
+		return 4000
+	case "gemini-3.6-flash-high":
+		return 10000
+	case "gemini-3.6-flash-tiered", "gemini-3.6-flash":
+		return -1
+	// 3.1 Pro tiers
 	case "gemini-3.1-pro-low":
 		return 1001
 	case "gemini-pro-agent":
 		return 10001
+	// Flash-lite + image variants (no dedicated thinking budget)
 	case "gemini-3.1-flash-lite", "gemini-3.1-flash-image", "gemini-3.1-flash-image-preview":
 		return -1
+	// Claude 4.6 family — Google exposes as thinking with 1024 budget
 	case "claude-sonnet-4-6", "claude-opus-4-6-thinking":
 		return 1024
 	case "gpt-oss-120b-medium":

@@ -25,6 +25,27 @@ import (
 func AntigravityWireModel(modelName string) string {
 	normalized := strings.ToLower(strings.TrimSpace(strings.TrimPrefix(modelName, "models/")))
 	switch normalized {
+	// Gemini 3.6 Flash variants (rolled onto daily-cloudcode-pa 2026-07,
+	// not yet in prod cloudcode-pa as of 2026-07-21). Sub2api's native
+	// gateway defaults to the DAILY endpoint via agymimic
+	// (internal.EndpointDailySandbox), so 3.6 users hit it directly.
+	//
+	// Wire names match public IDs verbatim — no "extra-low"-style rename
+	// trap like 3.5 flash. Verified via /v1internal:fetchAvailableModels
+	// (2026-07-21): displayName tier labels ("High"/"Medium"/"Low")
+	// align 1:1 with the wire suffix, and thinkingBudget values
+	// (10000/4000/1000) match the tier semantics we already trust for
+	// 3-flash-agent/3.5-flash-low/3.5-flash-extra-low respectively.
+	case "gemini-3.6-flash-high",
+		"gemini-3.6-flash-medium",
+		"gemini-3.6-flash-low",
+		"gemini-3.6-flash-tiered":
+		return normalized
+	case "gemini-3.6-flash":
+		// Suffixless picker → wire "-medium" (mirrors 3.5 flash base
+		// → -low default). Body thinkingLevel can still re-route via
+		// ResolveWireFromBody.
+		return "gemini-3.6-flash-medium"
 	// Gemini 3.5 Flash variants
 	case "gemini-3.5-flash-high":
 		return "gemini-3-flash-agent"
@@ -143,16 +164,18 @@ func extractThinkingLevel(body []byte) string {
 }
 
 // DefaultVariantThinkingLevel returns the implied thinking effort level for
-// public Gemini 3.5 Flash variant model IDs. Returns "" when the model
-// does not carry an implicit default (caller's explicit thinking config
-// wins regardless).
+// public Gemini 3.5/3.6 Flash variant model IDs. Returns "" when the
+// model does not carry an implicit default (caller's explicit thinking
+// config wins regardless).
 func DefaultVariantThinkingLevel(modelName string) string {
 	normalized := strings.ToLower(strings.TrimSpace(strings.TrimPrefix(modelName, "models/")))
 	switch normalized {
-	case "gemini-3.5-flash-high":
+	case "gemini-3.5-flash-high", "gemini-3.6-flash-high":
 		return "high"
-	case "gemini-3.5-flash-medium":
+	case "gemini-3.5-flash-medium", "gemini-3.6-flash-medium":
 		return "medium"
+	case "gemini-3.6-flash-low":
+		return "low"
 	default:
 		return ""
 	}

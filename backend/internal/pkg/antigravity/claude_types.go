@@ -183,10 +183,23 @@ var geminiModels = []modelDef{
 	{ID: "gemini-3.1-pro-high", DisplayName: "Gemini 3.1 Pro High", CreatedAt: "2026-02-19T00:00:00Z", IsReasoning: true},
 	{ID: "gemini-3.1-flash-image", DisplayName: "Gemini 3.1 Flash Image", CreatedAt: "2026-02-19T00:00:00Z"},
 	{ID: "gemini-3.1-flash-image-preview", DisplayName: "Gemini 3.1 Flash Image Preview", CreatedAt: "2026-02-19T00:00:00Z"},
+	{ID: "gemini-3.1-flash-lite", DisplayName: "Gemini 3.1 Flash Lite", CreatedAt: "2026-05-18T00:00:00Z"},
 	{ID: "gemini-3.5-flash", DisplayName: "Gemini 3.5 Flash", CreatedAt: "2026-05-18T00:00:00Z"},
 	{ID: "gemini-3.5-flash-high", DisplayName: "Gemini 3.5 Flash (High)", CreatedAt: "2026-11-10T00:00:00Z"},
 	{ID: "gemini-3.5-flash-medium", DisplayName: "Gemini 3.5 Flash (Medium)", CreatedAt: "2026-11-10T00:00:00Z"},
 	{ID: "gemini-3.5-flash-low", DisplayName: "Gemini 3.5 Flash (Low)", CreatedAt: "2026-11-10T00:00:00Z"},
+	// Gemini 3.6 Flash (verified 2026-07-21 via /v1internal:fetchAvailableModels
+	// against daily-cloudcode-pa.sandbox — currently DAILY-only; not yet in
+	// prod cloudcode-pa. Wire names match displayName tier labels verbatim
+	// (no rename trap like 3.5 flash-low↔extra-low). Suffixless base ID
+	// routes to -medium tier — mirrors 3.5 flash base → -low (mid) pattern.
+	// Google also exposes a `gemini-3.6-flash-tiered` dynamic-budget wire
+	// alias, kept internal (see wire_model.go); users needing it override
+	// via body thinkingConfig.thinkingBudget = -1.
+	{ID: "gemini-3.6-flash", DisplayName: "Gemini 3.6 Flash", CreatedAt: "2026-07-21T00:00:00Z"},
+	{ID: "gemini-3.6-flash-high", DisplayName: "Gemini 3.6 Flash (High)", CreatedAt: "2026-07-21T00:00:00Z", IsReasoning: true},
+	{ID: "gemini-3.6-flash-medium", DisplayName: "Gemini 3.6 Flash (Medium)", CreatedAt: "2026-07-21T00:00:00Z"},
+	{ID: "gemini-3.6-flash-low", DisplayName: "Gemini 3.6 Flash (Low)", CreatedAt: "2026-07-21T00:00:00Z"},
 	{ID: "gemini-3-pro-preview", DisplayName: "Gemini 3 Pro Preview", CreatedAt: "2025-06-01T00:00:00Z", IsReasoning: true},
 	{ID: "gemini-3-pro-image", DisplayName: "Gemini 3 Pro Image", CreatedAt: "2025-06-01T00:00:00Z"},
 }
