@@ -45,6 +45,9 @@
           style="border: 0"
           allow="clipboard-read; clipboard-write"
         ></iframe>
+        <p class="absolute bottom-1 left-2 rounded bg-black/70 px-2 py-1 text-[11px] text-gray-200">
+          Ctrl/Cmd shortcuts stay inside the remote browser. For device paste, use the noVNC clipboard panel.
+        </p>
       </div>
 
       <!-- Below the stream: the OAuth callback code (auto-captured or pasted) -->
@@ -78,11 +81,12 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, watch, onUnmounted } from 'vue'
+import { ref, computed, watch, onMounted, onUnmounted } from 'vue'
 import BaseDialog from '@/components/common/BaseDialog.vue'
 import { useAntigravityNativeOAuth } from '@/composables/useAntigravityNativeOAuth'
 import browserLoginAPI, { type BrowserLoginSession } from '@/api/admin/browserLogin'
 import { useAppStore } from '@/stores/app'
+import { buildApiUrl } from '@/api/client'
 
 const props = defineProps<{
   show: boolean
@@ -118,16 +122,23 @@ const generating = ref(false)
 const completing = ref(false)
 const statusText = ref('')
 let pollTimer: ReturnType<typeof setInterval> | null = null
+let lifecycleGeneration = 0
+let pollGeneration = 0
+let activePollRequest = 0
 
 const vncUrl = computed(() => {
-  if (!session.value) return ''
-  const host = window.location.hostname
-  return `http://${host}:6080/vnc.html?autoconnect=1&resize=scale&path=websockify&password=${encodeURIComponent(
-    session.value.vnc_token
-  )}`
+  const current = session.value
+  if (!current) return ''
+  const url = new URL('/vnc.html', current.vnc_url)
+  url.searchParams.set('autoconnect', '1')
+  url.searchParams.set('resize', 'scale')
+  url.searchParams.set('path', 'websockify')
+  url.searchParams.set('password', current.vnc_token)
+  return url.toString()
 })
 
 const stopPoll = () => {
+  pollGeneration++
   if (pollTimer) {
     clearInterval(pollTimer)
     pollTimer = null
@@ -150,35 +161,64 @@ const extractCode = (raw: string): string => {
   return trimmed
 }
 
+const errorText = (err: any): string => [
+  err?.message,
+  err?.response?.data?.message,
+  err?.response?.data?.detail
+].filter(Boolean).join(' ')
+
 const startPoll = () => {
   stopPoll()
+  const generation = ++pollGeneration
   pollTimer = setInterval(async () => {
+    const current = session.value
+    if (!current || activePollRequest === generation) return
+    activePollRequest = generation
     try {
-      const r = await browserLoginAPI.getResult()
-      // In launch mode the poll is only a keep-alive (refreshes the session's
-      // idle-TTL); no OAuth code capture.
+      const r = await browserLoginAPI.getResult(current.session_id)
+      if (generation !== pollGeneration || session.value?.session_id !== current.session_id) return
       if (!isLaunch.value && r.code && !authCode.value.trim()) {
         authCode.value = r.code
         statusText.value = 'Callback code captured automatically from the stream.'
         stopPoll()
       }
-    } catch {
-      /* session may not be active yet — keep polling */
+    } catch (err) {
+      if (generation !== pollGeneration || session.value?.session_id !== current.session_id) return
+      if (/stale or missing browser session|no active session/i.test(errorText(err))) {
+        stopPoll()
+        session.value = null
+        statusText.value = 'Browser session ended. Close and reopen this dialog to start a new one.'
+      }
+    } finally {
+      if (activePollRequest === generation) activePollRequest = 0
     }
   }, 1500)
 }
 
-const open = async () => {
+const isBusyError = (err: any): boolean => /session busy/i.test(errorText(err))
+
+
+const open = async (attempt = 0, generation = ++lifecycleGeneration) => {
+  let retryScheduled = false
   starting.value = true
-  statusText.value = ''
-  authCode.value = ''
-  session.value = null
-  resetState()
+  if (attempt === 0) {
+    statusText.value = ''
+    authCode.value = ''
+    session.value = null
+    generating.value = false
+    completing.value = false
+    resetState()
+  }
   try {
-    session.value = await browserLoginAPI.startSession({
+    const started = await browserLoginAPI.startSession({
       proxy_id: props.proxyId,
       profile_id: props.profileId
     })
+    if (generation !== lifecycleGeneration || !props.show) {
+      await browserLoginAPI.stopSession(started.session_id).catch(() => undefined)
+      return
+    }
+    session.value = started
     // Launch mode: persist a freshly-minted profile back to the account so a
     // later launch / re-login reuses the same signed-in profile.
     if (isLaunch.value && !props.profileId && session.value.profile_id) {
@@ -189,29 +229,46 @@ const open = async () => {
       : 'Stealth browser ready. Click "Open OAuth link", sign in inside the stream.'
     startPoll()
   } catch (err: any) {
+    if (generation !== lifecycleGeneration || !props.show) return
+    if (isBusyError(err) && attempt < 4) {
+      retryScheduled = true
+      statusText.value = 'Previous browser session is closing…'
+      window.setTimeout(() => {
+        if (generation === lifecycleGeneration && props.show) void open(attempt + 1, generation)
+      }, 2500)
+      return
+    }
     appStore.showError(
-      err.response?.data?.message || err.response?.data?.detail || 'Failed to start browser session'
+      err.response?.data?.message || err.response?.data?.detail || err.message || 'Failed to start browser session'
     )
     emit('close')
   } finally {
-    starting.value = false
+    if (generation === lifecycleGeneration && !retryScheduled) starting.value = false
   }
 }
 
 const openOAuthLink = async () => {
+  const generation = lifecycleGeneration
+  const browserSessionId = session.value?.session_id
+  if (!browserSessionId) return
   generating.value = true
   try {
     const ok = await generateAuthUrl(props.proxyId)
-    if (ok && authUrl.value) {
-      await browserLoginAPI.navigate({ url: authUrl.value })
-      statusText.value = 'OAuth page opened in the stream. Complete the Google login there.'
-    }
+    if (generation !== lifecycleGeneration || !props.show || session.value?.session_id !== browserSessionId) return
+    const targetUrl = authUrl.value
+    if (!ok || !targetUrl) return
+    const result = await browserLoginAPI.navigate(browserSessionId, { url: targetUrl })
+    if (generation !== lifecycleGeneration || !props.show || session.value?.session_id !== browserSessionId) return
+    statusText.value = result.warning
+      ? `Browser navigation warning: ${result.warning}`
+      : 'OAuth page opened in the stream. Complete the Google login there.'
   } catch (err: any) {
+    if (generation !== lifecycleGeneration || !props.show) return
     appStore.showError(
       err.response?.data?.message || err.response?.data?.detail || 'Failed to open OAuth link'
     )
   } finally {
-    generating.value = false
+    if (generation === lifecycleGeneration) generating.value = false
   }
 }
 
@@ -225,13 +282,16 @@ const copyUrl = async () => {
 }
 
 const cleanup = async () => {
+  lifecycleGeneration++
   stopPoll()
-  try {
-    await browserLoginAPI.stopSession()
-  } catch {
-    /* best-effort teardown */
-  }
+  const current = session.value
   session.value = null
+  if (!current) return
+  try {
+    await browserLoginAPI.stopSession(current.session_id)
+  } catch {
+    /* best-effort teardown; server lease reclaims abandoned sessions */
+  }
 }
 
 const handleClose = async () => {
@@ -241,38 +301,65 @@ const handleClose = async () => {
 
 const complete = async () => {
   const code = extractCode(authCode.value)
-  if (!code) return
+  const current = session.value
+  if (!code || !current) return
+  const generation = lifecycleGeneration
+  const browserSessionId = current.session_id
+  const profileId = current.profile_id || props.profileId || ''
+  const oauthSessionId = sessionId.value
+  const oauthState = state.value
+  const proxyId = props.proxyId
   completing.value = true
   try {
     const tokenInfo = await exchangeAuthCode({
       code,
-      sessionId: sessionId.value,
-      state: state.value,
-      proxyId: props.proxyId
+      sessionId: oauthSessionId,
+      state: oauthState,
+      proxyId
     })
-    if (!tokenInfo) return // composable already surfaced the error toast
+    if (
+      !tokenInfo ||
+      generation !== lifecycleGeneration ||
+      !props.show ||
+      session.value?.session_id !== browserSessionId
+    ) return
     const credentials = buildCredentials(tokenInfo)
-    const profileId = session.value?.profile_id || props.profileId || ''
     await cleanup()
+    if (lifecycleGeneration !== generation + 1 || !props.show) return
+    completing.value = false
     emit('authorized', { credentials, profileId })
   } finally {
-    completing.value = false
+    if (generation === lifecycleGeneration) completing.value = false
   }
 }
 
 watch(
   () => props.show,
   (val) => {
-    if (val) open()
-    // Modal hidden (incl. parent closing the whole account modal): tear the
-    // browser session down so it doesn't leak into a 409 "session busy".
-    else if (session.value) void cleanup()
-    else stopPoll()
+    if (val) void open()
+    else void cleanup()
   }
 )
 
+const releaseOnPageHide = (event: PageTransitionEvent) => {
+  if (event.persisted || !session.value) return
+  const token = localStorage.getItem('auth_token')
+  const headers: Record<string, string> = {
+    'X-Browser-Session-ID': session.value.session_id
+  }
+  if (token) headers.Authorization = `Bearer ${token}`
+  void fetch(buildApiUrl('/admin/browser-login/session'), {
+    method: 'DELETE',
+    headers,
+    credentials: 'include',
+    keepalive: true
+  }).catch(() => undefined)
+}
+
+onMounted(() => window.addEventListener('pagehide', releaseOnPageHide))
+
 onUnmounted(() => {
-  stopPoll()
-  if (session.value) void cleanup()
+  window.removeEventListener('pagehide', releaseOnPageHide)
+  void cleanup()
 })
 </script>

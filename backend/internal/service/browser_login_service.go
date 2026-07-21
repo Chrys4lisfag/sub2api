@@ -8,6 +8,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	neturl "net/url"
 	"strings"
 	"time"
 )
@@ -59,6 +60,7 @@ type BrowserLoginSession struct {
 	VNCToken  string `json:"vnc_token"`
 	VNCPath   string `json:"vnc_path"`
 	ProfileID string `json:"profile_id"`
+	VNCURL    string `json:"vnc_url"`
 }
 
 // BrowserLoginResult mirrors browser2webfront's GET /session/result response.
@@ -68,6 +70,12 @@ type BrowserLoginResult struct {
 	CurrentURL  string `json:"current_url"`
 }
 
+// BrowserLoginNavigateResult preserves non-fatal page.goto diagnostics.
+type BrowserLoginNavigateResult struct {
+	OK      bool   `json:"ok"`
+	Warning string `json:"warning,omitempty"`
+}
+
 // StartSession opens the single browser session, egressing through the account's
 // proxy (if any). Returns the VNC token the frontend needs to attach noVNC.
 func (s *BrowserLoginService) StartSession(ctx context.Context, input *BrowserLoginStartInput) (*BrowserLoginSession, error) {
@@ -75,12 +83,22 @@ func (s *BrowserLoginService) StartSession(ctx context.Context, input *BrowserLo
 	if err != nil {
 		return nil, err
 	}
+	vncURL := s.settingService.GetBrowserLoginVNCURL(ctx)
+	parsedVNCURL, parseErr := neturl.Parse(vncURL)
+	if parseErr != nil || parsedVNCURL.Host == "" || (parsedVNCURL.Scheme != "http" && parsedVNCURL.Scheme != "https") {
+		return nil, fmt.Errorf("browser login VNC URL is not configured or invalid")
+	}
 
 	var proxyURL string
 	if input.ProxyID != nil {
-		if p, err := s.proxyRepo.GetByID(ctx, *input.ProxyID); err == nil && p != nil {
-			proxyURL = p.URL()
+		p, err := s.proxyRepo.GetByID(ctx, *input.ProxyID)
+		if err != nil {
+			return nil, fmt.Errorf("load browser proxy %d: %w", *input.ProxyID, err)
 		}
+		if p == nil || strings.TrimSpace(p.URL()) == "" {
+			return nil, fmt.Errorf("browser proxy %d not found or invalid", *input.ProxyID)
+		}
+		proxyURL = p.URL()
 	}
 
 	startURL := input.StartURL
@@ -97,42 +115,47 @@ func (s *BrowserLoginService) StartSession(ctx context.Context, input *BrowserLo
 	}
 
 	var out BrowserLoginSession
-	if err := s.doJSON(ctx, creds, http.MethodPost, "/session", payload, &out); err != nil {
+	if err := s.doJSON(ctx, creds, http.MethodPost, "/session", "", payload, &out); err != nil {
 		return nil, err
 	}
+	out.VNCURL = vncURL
 	return &out, nil
 }
 
 // Navigate drives the streamed browser's active tab to url (e.g. the OAuth
 // consent URL) so the "Open OAuth link" button loads it inside the stream.
-func (s *BrowserLoginService) Navigate(ctx context.Context, url string) error {
+func (s *BrowserLoginService) Navigate(ctx context.Context, sessionID, url string) (*BrowserLoginNavigateResult, error) {
 	creds, err := s.browserLoginCreds(ctx)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	return s.doJSON(ctx, creds, http.MethodPost, "/session/navigate", map[string]any{"url": url}, nil)
+	var out BrowserLoginNavigateResult
+	if err := s.doJSON(ctx, creds, http.MethodPost, "/session/navigate", sessionID, map[string]any{"url": url}, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
 }
 
 // Result returns the latest captured OAuth callback code + the current URL.
-func (s *BrowserLoginService) Result(ctx context.Context) (*BrowserLoginResult, error) {
+func (s *BrowserLoginService) Result(ctx context.Context, sessionID string) (*BrowserLoginResult, error) {
 	creds, err := s.browserLoginCreds(ctx)
 	if err != nil {
 		return nil, err
 	}
 	var out BrowserLoginResult
-	if err := s.doJSON(ctx, creds, http.MethodGet, "/session/result", nil, &out); err != nil {
+	if err := s.doJSON(ctx, creds, http.MethodGet, "/session/result", sessionID, nil, &out); err != nil {
 		return nil, err
 	}
 	return &out, nil
 }
 
 // StopSession tears the browser session down (the profile dir is kept for reuse).
-func (s *BrowserLoginService) StopSession(ctx context.Context) error {
+func (s *BrowserLoginService) StopSession(ctx context.Context, sessionID string) error {
 	creds, err := s.browserLoginCreds(ctx)
 	if err != nil {
 		return err
 	}
-	return s.doJSON(ctx, creds, http.MethodDelete, "/session", nil, nil)
+	return s.doJSON(ctx, creds, http.MethodDelete, "/session", sessionID, nil, nil)
 }
 
 // browserLoginCreds resolves the base URL + Basic Auth creds from the `settings`
@@ -162,7 +185,7 @@ func (s *BrowserLoginService) browserLoginCreds(ctx context.Context) (browserLog
 // doJSON issues a Basic-Auth'd JSON request and, on a non-2xx response,
 // propagates the upstream status + body verbatim so a 409 "session busy" or a
 // launch error is legible to the admin.
-func (s *BrowserLoginService) doJSON(ctx context.Context, creds browserLoginCreds, method, path string, body any, out any) error {
+func (s *BrowserLoginService) doJSON(ctx context.Context, creds browserLoginCreds, method, path, sessionID string, body any, out any) error {
 	var reader io.Reader
 	if body != nil {
 		b, err := json.Marshal(body)
@@ -179,6 +202,9 @@ func (s *BrowserLoginService) doJSON(ctx context.Context, creds browserLoginCred
 		req.Header.Set("Content-Type", "application/json")
 	}
 	req.SetBasicAuth(creds.user, creds.pass)
+	if sessionID != "" {
+		req.Header.Set("X-Browser-Session-ID", sessionID)
+	}
 
 	resp, err := browserLoginHTTPClient().Do(req)
 	if err != nil {

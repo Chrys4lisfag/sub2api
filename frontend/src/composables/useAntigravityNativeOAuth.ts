@@ -27,8 +27,10 @@ export function useAntigravityNativeOAuth() {
   const state = ref('')
   const loading = ref(false)
   const error = ref('')
+  let operationGeneration = 0
 
   const resetState = () => {
+    operationGeneration++
     authUrl.value = ''
     sessionId.value = ''
     state.value = ''
@@ -37,6 +39,7 @@ export function useAntigravityNativeOAuth() {
   }
 
   const generateAuthUrl = async (proxyId: number | null | undefined): Promise<boolean> => {
+    const generation = ++operationGeneration
     loading.value = true
     authUrl.value = ''
     sessionId.value = ''
@@ -48,17 +51,19 @@ export function useAntigravityNativeOAuth() {
       if (proxyId) payload.proxy_id = proxyId
 
       const response = await adminAPI.antigravityNative.generateAuthUrl(payload as any)
+      if (generation !== operationGeneration) return false
       authUrl.value = response.auth_url
       sessionId.value = response.session_id
       state.value = response.state
       return true
     } catch (err: any) {
+      if (generation !== operationGeneration) return false
       error.value =
         err.response?.data?.detail || t('admin.accounts.oauth.antigravity.failedToGenerateUrl')
       appStore.showError(error.value)
       return false
     } finally {
-      loading.value = false
+      if (generation === operationGeneration) loading.value = false
     }
   }
 
@@ -73,6 +78,7 @@ export function useAntigravityNativeOAuth() {
       error.value = t('admin.accounts.oauth.antigravity.missingExchangeParams')
       return null
     }
+    const generation = ++operationGeneration
 
     loading.value = true
     error.value = ''
@@ -86,8 +92,10 @@ export function useAntigravityNativeOAuth() {
       if (params.proxyId) payload.proxy_id = params.proxyId
 
       const tokenInfo = await adminAPI.antigravityNative.exchangeCode(payload as any)
+      if (generation !== operationGeneration) return null
       return tokenInfo as AntigravityNativeTokenInfo
     } catch (err: any) {
+      if (generation !== operationGeneration) return null
       // Prefer the verbatim backend message — backend now ships the raw
       // upstream OAuth error body (e.g. {"error":"invalid_grant",...})
       // or the underlying transport failure (proxy refused / TLS / DNS)
@@ -101,7 +109,7 @@ export function useAntigravityNativeOAuth() {
       appStore.showError(error.value)
       return null
     } finally {
-      loading.value = false
+      if (generation === operationGeneration) loading.value = false
     }
   }
 
@@ -113,6 +121,7 @@ export function useAntigravityNativeOAuth() {
       error.value = t('admin.accounts.oauth.antigravity.pleaseEnterRefreshToken')
       return null
     }
+    const generation = ++operationGeneration
 
     loading.value = true
     error.value = ''
@@ -122,13 +131,15 @@ export function useAntigravityNativeOAuth() {
         refreshToken.trim(),
         proxyId
       )
+      if (generation !== operationGeneration) return null
       return tokenInfo as AntigravityNativeTokenInfo
     } catch (err: any) {
+      if (generation !== operationGeneration) return null
       error.value =
         err.response?.data?.detail || t('admin.accounts.oauth.antigravity.failedToValidateRT')
       return null
     } finally {
-      loading.value = false
+      if (generation === operationGeneration) loading.value = false
     }
   }
 

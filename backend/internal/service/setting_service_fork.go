@@ -97,6 +97,15 @@ func (s *SettingService) GetBrowserLoginConfig(ctx context.Context) (baseURL, us
 		strings.TrimSpace(values[SettingKeyBrowserLoginPass])
 }
 
+// GetBrowserLoginVNCURL returns the browser-reachable noVNC public origin.
+func (s *SettingService) GetBrowserLoginVNCURL(ctx context.Context) string {
+	values, err := s.settingRepo.GetMultiple(ctx, []string{SettingKeyBrowserLoginVNCURL})
+	if err != nil {
+		return ""
+	}
+	return strings.TrimRight(strings.TrimSpace(values[SettingKeyBrowserLoginVNCURL]), "/")
+}
+
 // Mcp discovery mode constants.
 const (
 	McpDiscoveryModePrompt   = "prompt"

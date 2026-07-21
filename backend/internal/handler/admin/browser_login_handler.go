@@ -18,6 +18,7 @@ import (
 	"github.com/Wei-Shaw/sub2api/internal/pkg/response"
 	"github.com/Wei-Shaw/sub2api/internal/service"
 	"github.com/gin-gonic/gin"
+	"strings"
 )
 
 type BrowserLoginHandler struct {
@@ -62,16 +63,17 @@ func (h *BrowserLoginHandler) Navigate(c *gin.Context) {
 		response.BadRequest(c, "请求无效: "+err.Error())
 		return
 	}
-	if err := h.svc.Navigate(c.Request.Context(), req.URL); err != nil {
+	res, err := h.svc.Navigate(c.Request.Context(), strings.TrimSpace(c.GetHeader("X-Browser-Session-ID")), req.URL)
+	if err != nil {
 		response.BadRequest(c, err.Error())
 		return
 	}
-	response.Success(c, gin.H{"ok": true})
+	response.Success(c, res)
 }
 
 // Result — GET /api/v1/admin/browser-login/result
 func (h *BrowserLoginHandler) Result(c *gin.Context) {
-	res, err := h.svc.Result(c.Request.Context())
+	res, err := h.svc.Result(c.Request.Context(), strings.TrimSpace(c.GetHeader("X-Browser-Session-ID")))
 	if err != nil {
 		response.BadRequest(c, err.Error())
 		return
@@ -81,7 +83,7 @@ func (h *BrowserLoginHandler) Result(c *gin.Context) {
 
 // StopSession — DELETE /api/v1/admin/browser-login/session
 func (h *BrowserLoginHandler) StopSession(c *gin.Context) {
-	if err := h.svc.StopSession(c.Request.Context()); err != nil {
+	if err := h.svc.StopSession(c.Request.Context(), strings.TrimSpace(c.GetHeader("X-Browser-Session-ID"))); err != nil {
 		response.BadRequest(c, err.Error())
 		return
 	}

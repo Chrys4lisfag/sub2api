@@ -647,8 +647,11 @@ func (s *SettingService) GetFrameSrcOrigins(ctx context.Context) ([]string, erro
 	}
 
 	// browser2webfront noVNC stream origin (iframe embedded in the browser-login
-	// modal). Derived from browser_login_url host + the fixed noVNC port 6080.
-	if blURL, _, _ := s.GetBrowserLoginConfig(ctx); blURL != "" {
+	// modal). Prefer the explicit browser-reachable URL; control URL may use a
+	// private Docker hostname. Keep legacy derivation for older installations.
+	if vncURL := s.GetBrowserLoginVNCURL(ctx); vncURL != "" {
+		addOrigin(vncURL)
+	} else if blURL, _, _ := s.GetBrowserLoginConfig(ctx); blURL != "" {
 		if u, err := url.Parse(blURL); err == nil && u.Hostname() != "" && (u.Scheme == "http" || u.Scheme == "https") {
 			addOrigin(u.Scheme + "://" + u.Hostname() + ":6080")
 		}

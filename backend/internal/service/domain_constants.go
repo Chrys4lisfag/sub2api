@@ -262,9 +262,10 @@ const (
 
 	// browser2webfront integration (self-hosted stealth-browser stream).
 	// Never in git — configured per-instance via admin UI, stored in DB.
-	SettingKeyBrowserLoginURL  = "browser_login_url"
-	SettingKeyBrowserLoginUser = "browser_login_user"
-	SettingKeyBrowserLoginPass = "browser_login_pass"
+	SettingKeyBrowserLoginURL    = "browser_login_url"
+	SettingKeyBrowserLoginUser   = "browser_login_user"
+	SettingKeyBrowserLoginPass   = "browser_login_pass"
+	SettingKeyBrowserLoginVNCURL = "browser_login_vnc_url"
 
 	// OEM设置
 	SettingKeySiteName                    = "site_name"                     // 网站名称

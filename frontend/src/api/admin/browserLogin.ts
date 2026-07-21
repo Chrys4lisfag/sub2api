@@ -11,6 +11,7 @@ export interface BrowserLoginSession {
   vnc_token: string
   vnc_path: string
   profile_id: string
+  vnc_url: string
 }
 
 export interface BrowserLoginResult {
@@ -24,25 +25,37 @@ export async function startSession(payload: {
   proxy_id?: number | null
   profile_id?: string
 }): Promise<BrowserLoginSession> {
-  const { data } = await apiClient.post<BrowserLoginSession>('/admin/browser-login/session', payload)
+  const { data } = await apiClient.post<BrowserLoginSession>('/admin/browser-login/session', payload, {
+    timeout: 130_000
+  })
   return data
 }
 
 /** Drive the streamed browser's active tab to a URL (e.g. the OAuth consent page). */
-export async function navigate(payload: { url: string }): Promise<{ ok: boolean }> {
-  const { data } = await apiClient.post<{ ok: boolean }>('/admin/browser-login/navigate', payload)
+export async function navigate(
+  sessionId: string,
+  payload: { url: string }
+): Promise<{ ok: boolean; warning?: string }> {
+  const { data } = await apiClient.post<{ ok: boolean; warning?: string }>('/admin/browser-login/navigate', payload, {
+    headers: { 'X-Browser-Session-ID': sessionId },
+    timeout: 70_000
+  })
   return data
 }
 
 /** Poll for the captured OAuth callback code + current URL. */
-export async function getResult(): Promise<BrowserLoginResult> {
-  const { data } = await apiClient.get<BrowserLoginResult>('/admin/browser-login/result')
+export async function getResult(sessionId: string): Promise<BrowserLoginResult> {
+  const { data } = await apiClient.get<BrowserLoginResult>('/admin/browser-login/result', {
+    headers: { 'X-Browser-Session-ID': sessionId }
+  })
   return data
 }
 
 /** Tear the session down (the profile dir is kept for later re-login). */
-export async function stopSession(): Promise<{ ok: boolean }> {
-  const { data } = await apiClient.delete<{ ok: boolean }>('/admin/browser-login/session')
+export async function stopSession(sessionId: string): Promise<{ ok: boolean }> {
+  const { data } = await apiClient.delete<{ ok: boolean }>('/admin/browser-login/session', {
+    headers: { 'X-Browser-Session-ID': sessionId }
+  })
   return data
 }
 
