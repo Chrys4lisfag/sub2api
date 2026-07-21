@@ -239,6 +239,78 @@ func TestResolveWireFromBody_SuffixedVariantsIgnoreBodyLevel(t *testing.T) {
 	}
 }
 
+func TestResolveWireFromBody_36FlashPicksWireFromThinkingLevel(t *testing.T) {
+	cases := []struct {
+		name     string
+		body     string
+		wantWire string
+	}{
+		// pre-wrap body (Gemini-format)
+		{
+			name:     "3.6 high → -high",
+			body:     `{"model":"gemini-3.6-flash","generationConfig":{"thinkingConfig":{"thinkingLevel":"high"}}}`,
+			wantWire: "gemini-3.6-flash-high",
+		},
+		{
+			name:     "3.6 medium → -medium",
+			body:     `{"model":"gemini-3.6-flash","generationConfig":{"thinkingConfig":{"thinkingLevel":"medium"}}}`,
+			wantWire: "gemini-3.6-flash-medium",
+		},
+		{
+			name:     "3.6 low → -low (NO extra-low trap, unlike 3.5)",
+			body:     `{"model":"gemini-3.6-flash","generationConfig":{"thinkingConfig":{"thinkingLevel":"low"}}}`,
+			wantWire: "gemini-3.6-flash-low",
+		},
+		{
+			name:     "3.6 minimal → -low",
+			body:     `{"model":"gemini-3.6-flash","generationConfig":{"thinkingConfig":{"thinkingLevel":"minimal"}}}`,
+			wantWire: "gemini-3.6-flash-low",
+		},
+		// post-wrap body
+		{
+			name:     "3.6 HIGH uppercase (post-wrap)",
+			body:     `{"model":"gemini-3.6-flash","request":{"generationConfig":{"thinkingConfig":{"thinkingLevel":"HIGH"}}}}`,
+			wantWire: "gemini-3.6-flash-high",
+		},
+		{
+			name:     "3.6 snake_case key honored",
+			body:     `{"model":"gemini-3.6-flash","request":{"generationConfig":{"thinkingConfig":{"thinking_level":"low"}}}}`,
+			wantWire: "gemini-3.6-flash-low",
+		},
+		// absent → medium (matches suffixless base default)
+		{
+			name:     "3.6 no thinkingLevel → -medium",
+			body:     `{"model":"gemini-3.6-flash","generationConfig":{}}`,
+			wantWire: "gemini-3.6-flash-medium",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := ResolveWireFromBody("gemini-3.6-flash", []byte(tc.body))
+			if got != tc.wantWire {
+				t.Errorf("got %q want %q", got, tc.wantWire)
+			}
+		})
+	}
+}
+
+func TestResolveWireFromBody_36NoBodyFallsBackToMedium(t *testing.T) {
+	if got := ResolveWireFromBody("gemini-3.6-flash", nil); got != "gemini-3.6-flash-medium" {
+		t.Errorf("nil body: got %q want gemini-3.6-flash-medium", got)
+	}
+	if got := ResolveWireFromBody("gemini-3.6-flash", []byte(`not json`)); got != "gemini-3.6-flash-medium" {
+		t.Errorf("invalid json: got %q want gemini-3.6-flash-medium", got)
+	}
+}
+
+func TestResolveWireFromBody_36SuffixedIgnoresBodyLevel(t *testing.T) {
+	// -high variant must pin -high regardless of body override.
+	body := []byte(`{"model":"gemini-3.6-flash-high","generationConfig":{"thinkingConfig":{"thinkingLevel":"low"}}}`)
+	if got := ResolveWireFromBody("gemini-3.6-flash-high", body); got != "gemini-3.6-flash-high" {
+		t.Errorf("suffix should win: got %q want gemini-3.6-flash-high", got)
+	}
+}
+
 func TestResolveWireFromBody_NoBodyFallsBackToWireModel(t *testing.T) {
 	if got := ResolveWireFromBody("gemini-3.5-flash", nil); got != "gemini-3.5-flash-low" {
 		t.Errorf("nil body fallback: got %q", got)

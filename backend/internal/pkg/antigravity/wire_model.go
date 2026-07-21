@@ -114,6 +114,30 @@ func ResolveWireFromBody(publicName string, body []byte) string {
 		default:
 			return AntigravityWireModel(publicName)
 		}
+	case "gemini-3.6-flash":
+		// 3.6 Flash slider — wire names are identity (no low↔extra-low
+		// rename trap like 3.5). Body's thinkingConfig.thinkingLevel
+		// picks the wire tier:
+		//
+		//   slider=low / minimal → wire gemini-3.6-flash-low     (tb=1000)
+		//   slider=medium / ""   → wire gemini-3.6-flash-medium  (tb=4000)
+		//   slider=high          → wire gemini-3.6-flash-high    (tb=10000)
+		//
+		// No body / no level: default to -medium (mirrors the flat
+		// AntigravityWireModel fallback for suffixless base ID).
+		if len(body) == 0 || !gjson.ValidBytes(body) {
+			return "gemini-3.6-flash-medium"
+		}
+		switch extractThinkingLevel(body) {
+		case "high":
+			return "gemini-3.6-flash-high"
+		case "minimal", "low":
+			return "gemini-3.6-flash-low"
+		case "medium", "":
+			return "gemini-3.6-flash-medium"
+		default:
+			return AntigravityWireModel(publicName)
+		}
 	case "gemini-3.1-pro":
 		// Pro tier only ships two flavors on agy: low + agent (high).
 		// Mirror Flash's slider-driven dispatch so omp can ship a single
