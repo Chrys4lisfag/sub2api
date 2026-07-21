@@ -1722,7 +1722,7 @@ func (r *accountRepository) SyncAntigravityDefaultModelMappings(
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	var updatedIDs []int64
 	if !rows.Next() {
