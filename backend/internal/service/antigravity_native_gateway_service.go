@@ -980,22 +980,25 @@ func (s *AntigravityNativeGatewayService) streamGeminiToClient(
 	var lastChunkPayload []byte // last unwrapped JSON payload, used for end-of-stream anomaly inspection
 	// Stream-wide signals — must be accumulated across all chunks because the
 	// final chunk almost always has empty `text` + a thoughtSignature + STOP.
-	// Inspecting that chunk alone would (and did) raise a false-positive
-	// `stop_without_content` even on perfectly-fine completions.
+	// Thought parts are not client-visible answer content: a STOP response that
+	// contains only thoughts must remain uncommitted so the handler can fail over.
 	streamSawText := false
 	streamSawFunctionCall := false
 	streamSawFinishReason := false
+	streamFinishReason := ""
 	streamEmptyArgsFn := ""
+	// Hold the thought-only prefix until usable answer text or a function call
+	// arrives. This is the only safe window for account failover: once any SSE
+	// byte reaches the client, retrying would splice two streams together.
+	// Bound the buffer so unusually large reasoning traces cannot consume
+	// unbounded memory; above the cap we preserve streaming and stop promising
+	// semantic-empty failover for that response.
+	const semanticPrecommitLimit = 1 << 20
+	var semanticPrecommit bytes.Buffer
 	// `first` tracks "any byte received from upstream" — drives the
 	// firstTokenMs latency metric. `headersCommitted` tracks "any byte
 	// written to the gin client" — the only semantic that matters for
-	// pre-flush failover decisions. The two were the same variable
-	// historically, which made the pre-write guards below (version
-	// rejection + 200-with-429-in-SSE) ineffective: by the time the
-	// inner SSE-line loop ran, the flag had already flipped on the
-	// outer `if n > 0`, so the `if first { return UpstreamFailoverError }`
-	// branch was unreachable. Failover stopped working for payload-
-	// level rejection cases, and the bad bytes leaked to the client.
+	// pre-flush failover decisions.
 	headersCommitted := false
 	for {
 		n, readErr := resp.Body.Read(chunkBuf)
@@ -1112,19 +1115,6 @@ func (s *AntigravityNativeGatewayService) streamGeminiToClient(
 					return s.finalizeResult(result, startTime), nil
 				}
 
-				if _, wErr := c.Writer.Write(out); wErr != nil {
-					result.ClientDisconnect = true
-					_, _ = io.Copy(io.Discard, resp.Body)
-					return s.finalizeResult(result, startTime), nil
-				}
-				// First successful Write — gin has now committed the
-				// 200 OK headers. From this point on, no failover-via-
-				// error-return is possible; only the synthetic-terminator
-				// path can recover.
-				headersCommitted = true
-				if flusher != nil {
-					flusher.Flush()
-				}
 				if payload := extractDataPayload(out); len(payload) > 0 {
 					lastChunkPayload = append(lastChunkPayload[:0], payload...)
 					sawText, sawFn, emptyArgsFn := inspectStreamChunk(payload)
@@ -1137,8 +1127,9 @@ func (s *AntigravityNativeGatewayService) streamGeminiToClient(
 					if emptyArgsFn != "" && streamEmptyArgsFn == "" {
 						streamEmptyArgsFn = emptyArgsFn
 					}
-					if payloadHasFinishReason(payload) {
+					if finishReason := payloadFinishReason(payload); finishReason != "" {
 						streamSawFinishReason = true
+						streamFinishReason = finishReason
 					}
 				}
 				if u := extractGeminiUsageFromSSELine(line); u != nil {
@@ -1148,16 +1139,40 @@ func (s *AntigravityNativeGatewayService) streamGeminiToClient(
 						result.UpstreamModel = u.ModelVersion
 					}
 				}
+
+				if !headersCommitted {
+					_, _ = semanticPrecommit.Write(out)
+					if !streamSawText && !streamSawFunctionCall && semanticPrecommit.Len() <= semanticPrecommitLimit {
+						continue
+					}
+					if !streamSawText && !streamSawFunctionCall {
+						slog.WarnContext(ctx, "native: semantic precommit buffer limit reached — preserving stream",
+							slog.Int64("account_id", accountID),
+							slog.String("model", originalModel),
+							slog.String("wire_model", wireModel),
+							slog.Int("buffered_bytes", semanticPrecommit.Len()))
+					}
+					out = append([]byte(nil), semanticPrecommit.Bytes()...)
+					semanticPrecommit.Reset()
+				}
+				if _, wErr := c.Writer.Write(out); wErr != nil {
+					result.ClientDisconnect = true
+					_, _ = io.Copy(io.Discard, resp.Body)
+					return s.finalizeResult(result, startTime), nil
+				}
+				// First successful Write — gin has now committed the
+				// 200 OK headers. From this point on, failover is unsafe.
+				headersCommitted = true
+				if flusher != nil {
+					flusher.Flush()
+				}
 			}
 		}
 		if readErr != nil {
 			if readErr == io.EOF {
 				if len(buf) > 0 {
 					tail := unwrapAgyResponseEnvelopeLine(buf)
-					_, _ = c.Writer.Write(tail)
-					if flusher != nil {
-						flusher.Flush()
-					}
+					tail = rewriteSSELineFunctionCalls(tail, toolReport)
 					if payload := extractDataPayload(tail); len(payload) > 0 {
 						lastChunkPayload = append(lastChunkPayload[:0], payload...)
 						sawText, sawFn, emptyArgsFn := inspectStreamChunk(payload)
@@ -1170,9 +1185,31 @@ func (s *AntigravityNativeGatewayService) streamGeminiToClient(
 						if emptyArgsFn != "" && streamEmptyArgsFn == "" {
 							streamEmptyArgsFn = emptyArgsFn
 						}
-						if payloadHasFinishReason(payload) {
+						if finishReason := payloadFinishReason(payload); finishReason != "" {
 							streamSawFinishReason = true
+							streamFinishReason = finishReason
 						}
+					}
+					if u := extractGeminiUsageFromSSELine(buf); u != nil {
+						result.Usage.InputTokens = u.PromptTokens
+						result.Usage.OutputTokens = u.CandidateTokens
+						if u.ModelVersion != "" {
+							result.UpstreamModel = u.ModelVersion
+						}
+					}
+					if !headersCommitted {
+						_, _ = semanticPrecommit.Write(tail)
+						if streamSawText || streamSawFunctionCall || semanticPrecommit.Len() > semanticPrecommitLimit {
+							tail = append([]byte(nil), semanticPrecommit.Bytes()...)
+							semanticPrecommit.Reset()
+							_, _ = c.Writer.Write(tail)
+							headersCommitted = true
+						}
+					} else {
+						_, _ = c.Writer.Write(tail)
+					}
+					if headersCommitted && flusher != nil {
+						flusher.Flush()
 					}
 				}
 				if first {
@@ -1214,6 +1251,36 @@ func (s *AntigravityNativeGatewayService) streamGeminiToClient(
 				slog.Bool("saw_finish_reason", streamSawFinishReason),
 			)
 			break
+		}
+	}
+	// Upstream completed without client-visible answer text or a tool call.
+	// STOP and truncated no-finish streams are retryable semantic empties.
+	// Other terminal reasons (SAFETY, RECITATION, etc.) are meaningful Gemini
+	// responses and must pass through unchanged.
+	if !headersCommitted && !streamSawText && !streamSawFunctionCall &&
+		(streamFinishReason == "" || strings.EqualFold(streamFinishReason, "STOP")) {
+		slog.WarnContext(ctx, "native: upstream STOP without usable content — failing over",
+			slog.Int64("account_id", accountID),
+			slog.String("model", originalModel),
+			slog.String("wire_model", wireModel),
+			slog.String("finish_reason", streamFinishReason),
+			slog.Int("buffered_bytes", semanticPrecommit.Len()))
+		logNativeRequestAnomaly(ctx, accountID, originalModel, wireModel, true, lastChunkPayload,
+			"stop_without_content", map[string]string{"reason": "no non-thought text and no function call seen across stream"})
+		return nil, &UpstreamFailoverError{
+			StatusCode:             http.StatusBadGateway,
+			ResponseBody:           []byte(`{"error":{"code":502,"message":"Antigravity native upstream returned STOP without usable content","status":"UNAVAILABLE"}}`),
+			ResponseHeaders:        http.Header{"Content-Type": []string{"application/json"}},
+			PassthroughVerbatim:    true,
+			RetryableOnSameAccount: false,
+		}
+	}
+	if !headersCommitted && semanticPrecommit.Len() > 0 {
+		_, _ = c.Writer.Write(semanticPrecommit.Bytes())
+		headersCommitted = true
+		semanticPrecommit.Reset()
+		if flusher != nil {
+			flusher.Flush()
 		}
 	}
 	// Synthetic finishReason terminator. omp / @google/genai treat a
@@ -1264,6 +1331,7 @@ func (s *AntigravityNativeGatewayService) streamGeminiToClient(
 func inspectStreamChunk(payload []byte) (sawText bool, sawFunctionCall bool, emptyArgsFn string) {
 	type part struct {
 		Text         *string        `json:"text,omitempty"`
+		Thought      bool           `json:"thought,omitempty"`
 		FunctionCall map[string]any `json:"functionCall,omitempty"`
 	}
 	type candidate struct {
@@ -1279,7 +1347,7 @@ func inspectStreamChunk(payload []byte) (sawText bool, sawFunctionCall bool, emp
 	}
 	for _, c := range env.Candidates {
 		for _, p := range c.Content.Parts {
-			if p.Text != nil && *p.Text != "" {
+			if p.Text != nil && *p.Text != "" && !p.Thought {
 				sawText = true
 			}
 			if p.FunctionCall != nil {
@@ -1315,19 +1383,16 @@ func extractDataPayload(line []byte) []byte {
 	return payload
 }
 
-// payloadHasFinishReason returns true when payload is a JSON object that
-// contains at least one candidates[].finishReason field with a non-empty
-// value. Used by streamGeminiToClient to decide whether to synthesize a
-// terminator before closing the SSE response.
+// payloadFinishReason returns the first non-empty
+// candidates[].finishReason value. Used by streamGeminiToClient both to
+// classify semantic-empty STOP responses and to decide whether a synthetic
+// terminator is needed.
 //
-// Tolerant parser: only the candidates[].finishReason path is checked,
-// anything else is ignored. Returns false on malformed JSON so the
-// caller still emits the synthetic terminator (safer default — adding
-// an extra finishReason event is harmless; missing one is a client UX
-// failure).
-func payloadHasFinishReason(payload []byte) bool {
+// Malformed JSON and payloads without a finish reason return "". This keeps
+// truncated streams eligible for pre-commit failover.
+func payloadFinishReason(payload []byte) string {
 	if len(payload) == 0 {
-		return false
+		return ""
 	}
 	var env struct {
 		Candidates []struct {
@@ -1335,14 +1400,14 @@ func payloadHasFinishReason(payload []byte) bool {
 		} `json:"candidates"`
 	}
 	if err := json.Unmarshal(payload, &env); err != nil {
-		return false
+		return ""
 	}
 	for _, c := range env.Candidates {
-		if strings.TrimSpace(c.FinishReason) != "" {
-			return true
+		if finishReason := strings.TrimSpace(c.FinishReason); finishReason != "" {
+			return finishReason
 		}
 	}
-	return false
+	return ""
 }
 
 // syntheticFinishReasonSSE returns a fully formed SSE event
@@ -1445,18 +1510,23 @@ func (s *AntigravityNativeGatewayService) passNonStreamingGemini(
 		}
 	}
 
+	anomaly, details := inspectGeminiResponseForAnomalies(out)
+	if anomaly != "" {
+		logNativeRequestAnomaly(ctx, accountID, originalModel, wireModel, false, out, anomaly, details)
+	}
+	if anomaly == "stop_without_content" {
+		return nil, &UpstreamFailoverError{
+			StatusCode:             http.StatusBadGateway,
+			ResponseBody:           []byte(`{"error":{"code":502,"message":"Antigravity native upstream returned STOP without usable content","status":"UNAVAILABLE"}}`),
+			ResponseHeaders:        http.Header{"Content-Type": []string{"application/json"}},
+			PassthroughVerbatim:    true,
+			RetryableOnSameAccount: false,
+		}
+	}
+
 	c.Header("Content-Type", "application/json")
 	c.Writer.WriteHeader(http.StatusOK)
 	_, _ = c.Writer.Write(out)
-
-	// Non-stream is the natural place to inspect for semantic anomalies —
-	// the full body is in hand. Streamed requests are checked at the SSE
-	// loop's end (best-effort, on the final chunk only). 200 with empty
-	// function-call args is the case that prompted this logging; see the
-	// inspectGeminiResponseForAnomalies docstring for the full set.
-	if anomaly, details := inspectGeminiResponseForAnomalies(out); anomaly != "" {
-		logNativeRequestAnomaly(ctx, accountID, originalModel, wireModel, false, out, anomaly, details)
-	}
 
 	result := &ForwardResult{
 		Model:         originalModel,
@@ -1518,6 +1588,20 @@ func (s *AntigravityNativeGatewayService) flushBufferedNativeResponse(
 		}
 	}
 
+	anomaly, details := inspectGeminiResponseForAnomalies(out)
+	if anomaly != "" {
+		logNativeRequestAnomaly(ctx, accountID, originalModel, wireModel, stream, out, anomaly, details)
+	}
+	if anomaly == "stop_without_content" {
+		return nil, &UpstreamFailoverError{
+			StatusCode:             http.StatusBadGateway,
+			ResponseBody:           []byte(`{"error":{"code":502,"message":"Antigravity native upstream returned STOP without usable content","status":"UNAVAILABLE"}}`),
+			ResponseHeaders:        http.Header{"Content-Type": []string{"application/json"}},
+			PassthroughVerbatim:    true,
+			RetryableOnSameAccount: false,
+		}
+	}
+
 	if stream {
 		c.Header("Content-Type", "text/event-stream")
 		c.Header("Cache-Control", "no-cache")
@@ -1531,10 +1615,6 @@ func (s *AntigravityNativeGatewayService) flushBufferedNativeResponse(
 		c.Header("Content-Type", "application/json")
 		c.Writer.WriteHeader(http.StatusOK)
 		_, _ = c.Writer.Write(out)
-	}
-
-	if anomaly, details := inspectGeminiResponseForAnomalies(out); anomaly != "" {
-		logNativeRequestAnomaly(ctx, accountID, originalModel, wireModel, stream, out, anomaly, details)
 	}
 
 	result := &ForwardResult{
@@ -1841,6 +1921,7 @@ func inspectGeminiResponseForAnomalies(body []byte) (string, map[string]string) 
 	}
 	type part struct {
 		Text         *string        `json:"text,omitempty"`
+		Thought      bool           `json:"thought,omitempty"`
 		FunctionCall map[string]any `json:"functionCall,omitempty"`
 	}
 	type candidate struct {
@@ -1864,7 +1945,7 @@ func inspectGeminiResponseForAnomalies(body []byte) (string, map[string]string) 
 	}
 	sawText := false
 	for _, p := range c.Content.Parts {
-		if p.Text != nil && *p.Text != "" {
+		if p.Text != nil && *p.Text != "" && !p.Thought {
 			sawText = true
 		}
 		if p.FunctionCall != nil {

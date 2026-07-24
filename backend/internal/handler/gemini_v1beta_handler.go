@@ -457,6 +457,7 @@ func (h *GatewayHandler) GeminiV1BetaModels(c *gin.Context) {
 
 		// 5) forward (根据平台分流)
 		var result *service.ForwardResult
+		writerSizeBeforeForward := c.Writer.Size()
 		requestCtx := c.Request.Context()
 		if fs.SwitchCount > 0 {
 			requestCtx = service.WithAccountSwitchCount(requestCtx, fs.SwitchCount, h.metadataBridgeEnabled())
@@ -496,6 +497,18 @@ func (h *GatewayHandler) GeminiV1BetaModels(c *gin.Context) {
 		if err != nil {
 			var failoverErr *service.UpstreamFailoverError
 			if errors.As(err, &failoverErr) {
+				// A streamed response cannot be retried after any bytes reached
+				// the client: switching accounts here would splice two SSE
+				// streams and corrupt the Gemini response. Native semantic-empty
+				// detection buffers its prefix so its failover error arrives
+				// before this guard is triggered.
+				if c.Writer.Size() != writerSizeBeforeForward {
+					reqLog.Warn("gemini.failover_aborted_after_stream_commit",
+						zap.Int64("account_id", account.ID),
+						zap.Int("upstream_status", failoverErr.StatusCode),
+					)
+					return
+				}
 				failoverAction := fs.HandleFailoverError(c.Request.Context(), h.gatewayService, account.ID, account.Platform, failoverErr)
 				switch failoverAction {
 				case FailoverContinue:

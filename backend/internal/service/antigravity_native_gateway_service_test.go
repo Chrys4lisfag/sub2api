@@ -1,9 +1,17 @@
 package service
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/gin-gonic/gin"
 )
 
 // TestWrapNativeV1Internal_BareGeminiBody verifies the common case: a plain
@@ -268,6 +276,14 @@ func TestInspectAnomalies_StopWithoutContent(t *testing.T) {
 	}
 }
 
+func TestInspectAnomalies_ThoughtOnlyStop(t *testing.T) {
+	in := []byte(`{"candidates":[{"content":{"role":"model","parts":[{"text":"private reasoning","thought":true}]},"finishReason":"STOP"}]}`)
+	a, _ := inspectGeminiResponseForAnomalies(in)
+	if a != "stop_without_content" {
+		t.Fatalf("expected thought-only STOP to be unusable content, got %q", a)
+	}
+}
+
 func TestInspectAnomalies_NoCandidates(t *testing.T) {
 	in := []byte(`{"candidates":[]}`)
 	a, _ := inspectGeminiResponseForAnomalies(in)
@@ -335,6 +351,14 @@ func TestInspectStreamChunk_FinalThoughtSignatureOnly(t *testing.T) {
 	saw, fn, empty := inspectStreamChunk(in)
 	if saw || fn || empty != "" {
 		t.Fatalf("final-tail chunk should report nothing: sawText=%v sawFn=%v emptyArgs=%q", saw, fn, empty)
+	}
+}
+
+func TestInspectStreamChunk_ThoughtTextIsNotAnswer(t *testing.T) {
+	in := []byte(`{"candidates":[{"content":{"role":"model","parts":[{"text":"private reasoning","thought":true}]}}]}`)
+	saw, fn, empty := inspectStreamChunk(in)
+	if saw || fn || empty != "" {
+		t.Fatalf("thought text must not count as answer content: sawText=%v sawFn=%v emptyArgs=%q", saw, fn, empty)
 	}
 }
 
@@ -500,5 +524,174 @@ func TestIsUpstreamRateLimitPayload(t *testing.T) {
 				t.Errorf("got %v want %v\nbody=%q", got, tc.want, tc.body)
 			}
 		})
+	}
+}
+
+func TestStreamGeminiToClient_ThoughtOnlyStopFailsOverBeforeWrite(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	resp := &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
+		Body: io.NopCloser(strings.NewReader(
+			"data: {\"response\":{\"candidates\":[{\"content\":{\"role\":\"model\",\"parts\":[{\"text\":\"private reasoning\",\"thought\":true}]},\"finishReason\":\"STOP\"}]}}\n\n",
+		)),
+	}
+
+	svc := &AntigravityNativeGatewayService{}
+	result, err := svc.streamGeminiToClient(
+		context.Background(), c, 39, resp, time.Now(),
+		"gemini-3.6-flash", "gemini-3.6-flash-high", toolPrepReport{},
+	)
+	if result != nil {
+		t.Fatalf("thought-only STOP result = %#v, want nil", result)
+	}
+	var failoverErr *UpstreamFailoverError
+	if !errors.As(err, &failoverErr) {
+		t.Fatalf("thought-only STOP error = %v, want UpstreamFailoverError", err)
+	}
+	if failoverErr.RetryableOnSameAccount {
+		t.Fatal("thought-only STOP should switch account, not retry same account")
+	}
+	if rec.Body.Len() != 0 {
+		t.Fatalf("thought-only STOP committed %d client bytes before failover: %q", rec.Body.Len(), rec.Body.String())
+	}
+}
+
+func TestStreamGeminiToClient_ThoughtThenAnswerFlushesOnce(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	upstream := strings.Join([]string{
+		`data: {"response":{"candidates":[{"content":{"role":"model","parts":[{"text":"private reasoning","thought":true}]}}]}}`,
+		"",
+		`data: {"response":{"candidates":[{"content":{"role":"model","parts":[{"text":"visible answer"}]},"finishReason":"STOP"}]}}`,
+		"",
+	}, "\n")
+	resp := &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
+		Body:       io.NopCloser(strings.NewReader(upstream)),
+	}
+
+	svc := &AntigravityNativeGatewayService{}
+	result, err := svc.streamGeminiToClient(
+		context.Background(), c, 39, resp, time.Now(),
+		"gemini-3.6-flash", "gemini-3.6-flash-high", toolPrepReport{},
+	)
+	if err != nil {
+		t.Fatalf("thought+answer stream returned error: %v", err)
+	}
+	if result == nil {
+		t.Fatal("thought+answer stream returned nil result")
+	}
+	out := rec.Body.String()
+	if strings.Count(out, "private reasoning") != 1 || strings.Count(out, "visible answer") != 1 {
+		t.Fatalf("buffered stream was not flushed exactly once: %q", out)
+	}
+	if strings.Index(out, "private reasoning") > strings.Index(out, "visible answer") {
+		t.Fatalf("buffered thought reordered after answer: %q", out)
+	}
+}
+
+func TestPassNonStreamingGemini_ThoughtOnlyStopFailsOverBeforeWrite(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	resp := &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     http.Header{"Content-Type": []string{"application/json"}},
+		Body: io.NopCloser(strings.NewReader(
+			`{"response":{"candidates":[{"content":{"role":"model","parts":[{"text":"private reasoning","thought":true}]},"finishReason":"STOP"}]}}`,
+		)),
+	}
+
+	svc := &AntigravityNativeGatewayService{}
+	result, err := svc.passNonStreamingGemini(
+		context.Background(), c, 39, resp, time.Now(),
+		"gemini-3.6-flash", "gemini-3.6-flash-high", toolPrepReport{},
+	)
+	if result != nil {
+		t.Fatalf("thought-only STOP result = %#v, want nil", result)
+	}
+	var failoverErr *UpstreamFailoverError
+	if !errors.As(err, &failoverErr) {
+		t.Fatalf("thought-only STOP error = %v, want UpstreamFailoverError", err)
+	}
+	if rec.Body.Len() != 0 {
+		t.Fatalf("non-streaming thought-only STOP committed %d client bytes: %q", rec.Body.Len(), rec.Body.String())
+	}
+}
+
+func TestStreamGeminiToClient_SafetyFinishPassesThrough(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	resp := &http.Response{
+		StatusCode: http.StatusOK,
+		Body: io.NopCloser(strings.NewReader(
+			"data: {\"response\":{\"candidates\":[{\"content\":{\"role\":\"model\",\"parts\":[]},\"finishReason\":\"SAFETY\"}]}}\n\n",
+		)),
+	}
+
+	svc := &AntigravityNativeGatewayService{}
+	result, err := svc.streamGeminiToClient(
+		context.Background(), c, 39, resp, time.Now(),
+		"gemini-3.6-flash", "gemini-3.6-flash-high", toolPrepReport{},
+	)
+	if err != nil || result == nil {
+		t.Fatalf("SAFETY finish result=%#v err=%v, want passthrough success", result, err)
+	}
+	if !strings.Contains(rec.Body.String(), `"finishReason":"SAFETY"`) {
+		t.Fatalf("SAFETY finish was not passed through: %q", rec.Body.String())
+	}
+}
+
+func TestStreamGeminiToClient_UnterminatedFinalAnswerIsFlushed(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	resp := &http.Response{
+		StatusCode: http.StatusOK,
+		Body: io.NopCloser(strings.NewReader(
+			`data: {"response":{"candidates":[{"content":{"role":"model","parts":[{"text":"final answer"}]},"finishReason":"STOP"}]}}`,
+		)),
+	}
+
+	svc := &AntigravityNativeGatewayService{}
+	result, err := svc.streamGeminiToClient(
+		context.Background(), c, 39, resp, time.Now(),
+		"gemini-3.6-flash", "gemini-3.6-flash-high", toolPrepReport{},
+	)
+	if err != nil || result == nil {
+		t.Fatalf("unterminated answer result=%#v err=%v", result, err)
+	}
+	if strings.Count(rec.Body.String(), "final answer") != 1 {
+		t.Fatalf("unterminated final chunk not flushed exactly once: %q", rec.Body.String())
+	}
+}
+
+func TestStreamGeminiToClient_MissingFinishSynthesizesOther(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	resp := &http.Response{
+		StatusCode: http.StatusOK,
+		Body: io.NopCloser(strings.NewReader(
+			"data: {\"response\":{\"candidates\":[{\"content\":{\"role\":\"model\",\"parts\":[{\"text\":\"answer\"}]}}]}}\n\n",
+		)),
+	}
+
+	svc := &AntigravityNativeGatewayService{}
+	result, err := svc.streamGeminiToClient(
+		context.Background(), c, 39, resp, time.Now(),
+		"gemini-3.6-flash", "gemini-3.6-flash-high", toolPrepReport{},
+	)
+	if err != nil || result == nil {
+		t.Fatalf("missing-finish stream result=%#v err=%v", result, err)
+	}
+	if !strings.Contains(rec.Body.String(), `"finishReason":"OTHER"`) {
+		t.Fatalf("missing-finish stream lacks synthetic OTHER terminator: %q", rec.Body.String())
 	}
 }
