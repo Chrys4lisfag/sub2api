@@ -1299,6 +1299,7 @@ func (s *AntigravityNativeGatewayService) streamGeminiToClient(
 			PassthroughVerbatim:    true,
 			RetryableOnSameAccount: false,
 			Kind:                   FailoverKindSemanticEmpty,
+			DiagnosticResponseBody: append([]byte(nil), semanticPrecommit.Bytes()...),
 		}
 	}
 	if !headersCommitted && semanticPrecommit.Len() > 0 {
@@ -1586,6 +1587,7 @@ func (s *AntigravityNativeGatewayService) passNonStreamingGemini(
 			PassthroughVerbatim:    true,
 			RetryableOnSameAccount: false,
 			Kind:                   FailoverKindSemanticEmpty,
+			DiagnosticResponseBody: append([]byte(nil), out...),
 		}
 	}
 
@@ -1696,6 +1698,7 @@ func (s *AntigravityNativeGatewayService) flushBufferedNativeResponse(
 			PassthroughVerbatim:    true,
 			RetryableOnSameAccount: false,
 			Kind:                   FailoverKindSemanticEmpty,
+			DiagnosticResponseBody: append([]byte(nil), out...),
 		}
 	}
 

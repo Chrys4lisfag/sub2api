@@ -183,6 +183,13 @@ func (h *GatewayHandler) GeminiV1BetaModels(c *gin.Context) {
 		googleError(c, http.StatusBadRequest, "Request body is empty")
 		return
 	}
+	var semanticCaptureBody []byte
+	if semanticEmptyCaptureEnabled() {
+		// CleanGeminiNativeThoughtSignatures returns a new buffer when it
+		// changes the body, so this alias preserves immutable original bytes
+		// without doubling large request allocations.
+		semanticCaptureBody = body
+	}
 
 	setOpsRequestContext(c, modelName, stream)
 	setOpsEndpointContext(c, "", int16(service.RequestTypeFromLegacy(stream, false)))
@@ -503,6 +510,7 @@ func (h *GatewayHandler) GeminiV1BetaModels(c *gin.Context) {
 		if err != nil {
 			var failoverErr *service.UpstreamFailoverError
 			if errors.As(err, &failoverErr) {
+				captureSemanticEmptyRequest(c, semanticCaptureBody, reqModel, action, stream, account.ID, failoverErr)
 				// A streamed response cannot be retried after any bytes reached
 				// the client: switching accounts here would splice two SSE
 				// streams and corrupt the Gemini response. Native semantic-empty

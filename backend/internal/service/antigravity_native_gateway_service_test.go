@@ -616,6 +616,9 @@ func TestStreamGeminiToClient_ThoughtOnlyStopFailsOverBeforeWrite(t *testing.T) 
 	if failoverErr.RetryableOnSameAccount {
 		t.Fatal("thought-only STOP should switch account, not retry same account")
 	}
+	if diagnostic := string(failoverErr.DiagnosticResponseBody); !strings.Contains(diagnostic, "private reasoning") || !strings.Contains(diagnostic, `"finishReason":"STOP"`) {
+		t.Fatalf("thought-only STOP diagnostic response missing upstream payload: %q", diagnostic)
+	}
 	if rec.Body.Len() != 0 {
 		t.Fatalf("thought-only STOP committed %d client bytes before failover: %q", rec.Body.Len(), rec.Body.String())
 	}

@@ -129,6 +129,11 @@ services:
       - GEMINI_CLI_OAUTH_CLIENT_SECRET=${GEMINI_CLI_OAUTH_CLIENT_SECRET:-}
       - ANTIGRAVITY_OAUTH_CLIENT_SECRET=${ANTIGRAVITY_OAUTH_CLIENT_SECRET:-}
       - ANTIGRAVITY_USER_AGENT_VERSION=${ANTIGRAVITY_USER_AGENT_VERSION:-}
+      # Opt-in forensic capture for semantic-empty Gemini responses.
+      # Captures contain full prompts; keep directory private and retention bounded.
+      - SEMANTIC_EMPTY_CAPTURE_DIR=${SEMANTIC_EMPTY_CAPTURE_DIR:-}
+      - SEMANTIC_EMPTY_CAPTURE_MAX_FILES=${SEMANTIC_EMPTY_CAPTURE_MAX_FILES:-100}
+      - SEMANTIC_EMPTY_CAPTURE_MAX_BYTES=${SEMANTIC_EMPTY_CAPTURE_MAX_BYTES:-4194304}
 
       # =======================================================================
       # Security Configuration (URL Allowlist)

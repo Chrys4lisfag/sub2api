@@ -624,6 +624,9 @@ type UpstreamFailoverError struct {
 	// backoff profile without inspecting StatusCode / ResponseBody. Zero value
 	// = FailoverKindUnspecified, which preserves the legacy backoff paths.
 	Kind FailoverKind
+	// DiagnosticResponseBody retains the semantic response that caused failover
+	// for opt-in forensic capture. It is never forwarded to clients.
+	DiagnosticResponseBody []byte
 }
 
 func (e *UpstreamFailoverError) Error() string {
