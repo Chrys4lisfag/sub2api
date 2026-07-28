@@ -226,6 +226,22 @@ func (s *GatewayService) SelectAccountWithLoadAwareness(ctx context.Context, gro
 		return excluded
 	}
 
+	thoughtSignaturePresent, thoughtSignatureKnown := ThoughtSignaturePresentFromContext(ctx)
+	nativeScheduling := isSchedulingForNativePlatform(platform, useMixed) && thoughtSignatureKnown
+	nativeQualityModel := requestedModel
+	if qualityModel, ok := NativeQualityModelFromContext(ctx); ok {
+		nativeQualityModel = qualityModel
+	}
+	nativeStickyEligible := true
+	if nativeScheduling && stickyAccountID > 0 {
+		if !thoughtSignaturePresent {
+			nativeStickyEligible = false
+		} else if escape, _ := nativeStickyEscape(stickyAccountID, nativeQualityModel); escape {
+			nativeStickyEligible = false
+		}
+	}
+	nativeFreshSelection := nativeScheduling && (!thoughtSignaturePresent || stickyAccountID == 0 || !nativeStickyEligible)
+
 	// 获取模型路由配置（仅 anthropic 平台）
 	var routingAccountIDs []int64
 	if group != nil && requestedModel != "" && group.Platform == PlatformAnthropic {
@@ -309,7 +325,7 @@ func (s *GatewayService) SelectAccountWithLoadAwareness(ctx context.Context, gro
 
 		if len(routingCandidates) > 0 {
 			// 1.5. 在路由账号范围内检查粘性会话
-			if sessionHash != "" && stickyAccountID > 0 {
+			if sessionHash != "" && stickyAccountID > 0 && nativeStickyEligible {
 				slog.Debug("sticky.layer1_5_checking",
 					"sticky_account_id", stickyAccountID,
 					"in_routing_list", containsInt64(routingAccountIDs, stickyAccountID),
@@ -352,6 +368,9 @@ func (s *GatewayService) SelectAccountWithLoadAwareness(ctx context.Context, gro
 								}
 							}
 
+							if stickyCacheMissReason == "" && nativeScheduling {
+								stickyCacheMissReason = "native_sticky_saturated"
+							}
 							if stickyCacheMissReason == "" {
 								waitingCount, _ := s.concurrencyService.GetAccountWaitingCount(ctx, stickyAccountID)
 								if waitingCount < cfg.StickySessionMaxWaiting {
@@ -491,7 +510,7 @@ func (s *GatewayService) SelectAccountWithLoadAwareness(ctx context.Context, gro
 	}
 
 	// ============ Layer 1.5: 粘性会话（仅在无模型路由配置时生效） ============
-	if len(routingAccountIDs) == 0 && sessionHash != "" && stickyAccountID > 0 && !isExcluded(stickyAccountID) {
+	if len(routingAccountIDs) == 0 && sessionHash != "" && stickyAccountID > 0 && nativeStickyEligible && !isExcluded(stickyAccountID) {
 		accountID := stickyAccountID
 		if accountID > 0 && !isExcluded(accountID) {
 			account, ok := accountByID[accountID]
@@ -560,23 +579,25 @@ func (s *GatewayService) SelectAccountWithLoadAwareness(ctx context.Context, gro
 						)
 					}
 
-					waitingCount, _ := s.concurrencyService.GetAccountWaitingCount(ctx, accountID)
-					if waitingCount < cfg.StickySessionMaxWaiting {
-						// 会话数量限制检查（等待计划也需要占用会话配额）
-						if !s.checkAndRegisterSession(ctx, account, sessionHash) {
-							// 会话限制已满，继续到 Layer 2
-						} else {
-							slog.Debug("sticky.layer1_5_no_routing_hit",
-								"account_id", accountID,
-								"session", shortSessionHash(sessionHash),
-								"result", "wait_plan",
-							)
-							return s.newSelectionResult(ctx, account, false, nil, &AccountWaitPlan{
-								AccountID:      accountID,
-								MaxConcurrency: account.Concurrency,
-								Timeout:        cfg.StickySessionWaitTimeout,
-								MaxWaiting:     cfg.StickySessionMaxWaiting,
-							})
+					if !nativeScheduling {
+						waitingCount, _ := s.concurrencyService.GetAccountWaitingCount(ctx, accountID)
+						if waitingCount < cfg.StickySessionMaxWaiting {
+							// 会话数量限制检查（等待计划也需要占用会话配额）
+							if !s.checkAndRegisterSession(ctx, account, sessionHash) {
+								// 会话限制已满，继续到 Layer 2
+							} else {
+								slog.Debug("sticky.layer1_5_no_routing_hit",
+									"account_id", accountID,
+									"session", shortSessionHash(sessionHash),
+									"result", "wait_plan",
+								)
+								return s.newSelectionResult(ctx, account, false, nil, &AccountWaitPlan{
+									AccountID:      accountID,
+									MaxConcurrency: account.Concurrency,
+									Timeout:        cfg.StickySessionWaitTimeout,
+									MaxWaiting:     cfg.StickySessionMaxWaiting,
+								})
+							}
 						}
 					}
 				} else if !clearSticky {
@@ -685,7 +706,7 @@ func (s *GatewayService) SelectAccountWithLoadAwareness(ctx context.Context, gro
 			}
 		}
 
-		// 分层过滤选择：优先级 →（可选）最早重置 → 负载率 → LRU
+		// 分层过滤选择：优先级 →（可选）最早重置 → 负载率 → Native freshness/quality → LRU
 		for len(available) > 0 {
 			// 1. 取优先级最小的集合
 			candidates := filterByMinPriority(available)
@@ -695,8 +716,12 @@ func (s *GatewayService) SelectAccountWithLoadAwareness(ctx context.Context, gro
 			}
 			// 3. 取负载率最低的集合
 			candidates = filterByMinLoadRate(candidates)
-			// 4. LRU 选择最久未用的账号
+			// 4. New Native sessions claim a recently-unused account, ordered by
+			// account-model quality. Existing signature continuations retain LRU.
 			selected := selectByLRU(candidates, preferOAuth)
+			if nativeFreshSelection {
+				selected = s.selectNativeFreshCandidate(ctx, candidates, nativeQualityModel, cfg.NativeRecentSelectionWindow, preferOAuth)
+			}
 			if selected == nil {
 				break
 			}
@@ -771,15 +796,20 @@ func (s *GatewayService) tryAcquireByLegacyOrder(ctx context.Context, candidates
 
 func (s *GatewayService) schedulingConfig() config.GatewaySchedulingConfig {
 	if s.cfg != nil {
-		return s.cfg.Gateway.Scheduling
+		cfg := s.cfg.Gateway.Scheduling
+		if cfg.NativeRecentSelectionWindow <= 0 {
+			cfg.NativeRecentSelectionWindow = DefaultNativeRecentSelectionWindow
+		}
+		return cfg
 	}
 	return config.GatewaySchedulingConfig{
-		StickySessionMaxWaiting:  3,
-		StickySessionWaitTimeout: 45 * time.Second,
-		FallbackWaitTimeout:      30 * time.Second,
-		FallbackMaxWaiting:       100,
-		LoadBatchEnabled:         true,
-		SlotCleanupInterval:      30 * time.Second,
+		StickySessionMaxWaiting:     3,
+		StickySessionWaitTimeout:    45 * time.Second,
+		FallbackWaitTimeout:         30 * time.Second,
+		FallbackMaxWaiting:          100,
+		LoadBatchEnabled:            true,
+		SlotCleanupInterval:         30 * time.Second,
+		NativeRecentSelectionWindow: DefaultNativeRecentSelectionWindow,
 	}
 }
 
@@ -1409,6 +1439,9 @@ func (s *GatewayService) hydrateSelectedAccount(ctx context.Context, account *Ac
 func (s *GatewayService) newSelectionResult(ctx context.Context, account *Account, acquired bool, release func(), waitPlan *AccountWaitPlan) (*AccountSelectionResult, error) {
 	hydrated, err := s.hydrateSelectedAccount(ctx, account)
 	if err != nil {
+		if acquired && release != nil {
+			release()
+		}
 		return nil, err
 	}
 	return &AccountSelectionResult{

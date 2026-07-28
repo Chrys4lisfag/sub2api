@@ -128,6 +128,29 @@ func TestWrapReleaseOnDone_ConcurrentCalls(t *testing.T) {
 	}
 }
 
+func TestWrapReleaseOnDone_PreCanceledContext(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	var releaseCount atomic.Int32
+	released := make(chan struct{}, 1)
+	release := wrapReleaseOnDone(ctx, func() {
+		if releaseCount.Add(1) == 1 {
+			released <- struct{}{}
+		}
+	})
+	release()
+
+	select {
+	case <-released:
+	case <-time.After(time.Second):
+		t.Fatal("release callback did not run")
+	}
+	if count := releaseCount.Load(); count != 1 {
+		t.Fatalf("expected release count 1, got %d", count)
+	}
+}
+
 // BenchmarkWrapReleaseOnDone 性能基准测试
 func BenchmarkWrapReleaseOnDone(b *testing.B) {
 	ctx, cancel := context.WithCancel(context.Background())

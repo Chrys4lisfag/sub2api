@@ -4,10 +4,12 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -289,6 +291,66 @@ func TestInspectAnomalies_NoCandidates(t *testing.T) {
 	a, _ := inspectGeminiResponseForAnomalies(in)
 	if a != "no_candidates" {
 		t.Fatalf("expected no_candidates, got %q", a)
+	}
+}
+
+func TestInspectAnomalies_UsesUsableLaterCandidate(t *testing.T) {
+	in := []byte(`{"candidates":[{"content":{"parts":[{"text":""}]},"finishReason":"STOP"},{"content":{"parts":[{"text":"usable"}]},"finishReason":"STOP"}]}`)
+	anomaly, _ := inspectGeminiResponseForAnomalies(in)
+	if anomaly != "" {
+		t.Fatalf("usable later candidate flagged: %q", anomaly)
+	}
+}
+
+func TestInspectAnomalies_UsesValidLaterFunctionCall(t *testing.T) {
+	in := []byte(`{"candidates":[{"content":{"parts":[]},"finishReason":"STOP"},{"content":{"parts":[{"functionCall":{"name":"tool","args":{"x":1}}}]},"finishReason":"STOP"}]}`)
+	anomaly, _ := inspectGeminiResponseForAnomalies(in)
+	if anomaly != "" {
+		t.Fatalf("valid later function call flagged: %q", anomaly)
+	}
+}
+
+func TestInspectAnomalies_SafetyWithoutPartsPassesThrough(t *testing.T) {
+	in := []byte(`{"candidates":[{"content":{"parts":[]},"finishReason":"SAFETY"}]}`)
+	anomaly, _ := inspectGeminiResponseForAnomalies(in)
+	if anomaly != "" {
+		t.Fatalf("SAFETY terminal flagged: %q", anomaly)
+	}
+}
+
+func TestNativeSemanticEmptyCompletion(t *testing.T) {
+	tests := []struct {
+		name         string
+		sawText      bool
+		sawFunction  bool
+		finishReason string
+		want         bool
+	}{
+		{name: "empty STOP", finishReason: "STOP", want: true},
+		{name: "empty lowercase stop", finishReason: "stop", want: true},
+		{name: "truncated no reason", want: true},
+		{name: "safety refusal", finishReason: "SAFETY", want: false},
+		{name: "recitation refusal", finishReason: "RECITATION", want: false},
+		{name: "answer text", sawText: true, finishReason: "STOP", want: false},
+		{name: "function call", sawFunction: true, finishReason: "STOP", want: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := isNativeSemanticEmptyCompletion(tt.sawText, tt.sawFunction, tt.finishReason); got != tt.want {
+				t.Fatalf("isNativeSemanticEmptyCompletion() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestNativeSemanticEmptyAnomaly(t *testing.T) {
+	for _, anomaly := range []string{"stop_without_content", "no_candidates"} {
+		if !isNativeSemanticEmptyAnomaly(anomaly) {
+			t.Fatalf("%q should trigger semantic-empty failover", anomaly)
+		}
+	}
+	if isNativeSemanticEmptyAnomaly("empty_function_args") {
+		t.Fatal("empty function args should be logged but not classified as semantic-empty")
 	}
 }
 
@@ -693,5 +755,159 @@ func TestStreamGeminiToClient_MissingFinishSynthesizesOther(t *testing.T) {
 	}
 	if !strings.Contains(rec.Body.String(), `"finishReason":"OTHER"`) {
 		t.Fatalf("missing-finish stream lacks synthetic OTHER terminator: %q", rec.Body.String())
+	}
+}
+
+func TestNativeMarkFamilyExhaustedInCache_ConcurrentCopyOnWrite(t *testing.T) {
+	cache := &UsageCache{}
+	initialQuota := map[string]*AntigravityModelQuota{
+		"existing-model": {Utilization: 50},
+	}
+	initialInfo := &UsageInfo{AntigravityQuota: initialQuota}
+	cache.antigravityCache.Store(int64(77), &antigravityUsageCache{
+		usageInfo: initialInfo,
+		timestamp: time.Now(),
+	})
+	service := &AntigravityNativeGatewayService{usageCache: cache}
+	account := &Account{ID: 77}
+
+	const workers = 32
+	var wg sync.WaitGroup
+	wg.Add(workers)
+	for i := 0; i < workers; i++ {
+		model := fmt.Sprintf("gemini-test-%d", i)
+		go func() {
+			defer wg.Done()
+			service.nativeMarkFamilyExhaustedInCache(context.Background(), account, model, nil)
+		}()
+	}
+	wg.Wait()
+
+	raw, ok := cache.antigravityCache.Load(account.ID)
+	if !ok {
+		t.Fatal("updated cache entry missing")
+	}
+	updated := raw.(*antigravityUsageCache)
+	if got, want := len(updated.usageInfo.AntigravityQuota), workers+1; got != want {
+		t.Fatalf("quota model count = %d, want %d", got, want)
+	}
+	for i := 0; i < workers; i++ {
+		model := fmt.Sprintf("gemini-test-%d", i)
+		if quota := updated.usageInfo.AntigravityQuota[model]; quota == nil || quota.Utilization != 100 {
+			t.Fatalf("missing exhausted quota for %s: %+v", model, quota)
+		}
+	}
+	if got := len(initialInfo.AntigravityQuota); got != 1 {
+		t.Fatalf("published old quota map mutated in place: len=%d", got)
+	}
+}
+
+func TestNativeGetClient_RebuildsWhenCredentialsRotate(t *testing.T) {
+	service := NewAntigravityNativeGatewayService(nil, nil, nil, nil, nil, nil)
+	account := &Account{
+		ID:          88,
+		Credentials: map[string]any{"access_token": "first-token", "refresh_token": "refresh"},
+	}
+
+	first, err := service.getClient(context.Background(), account)
+	if err != nil {
+		t.Fatalf("first getClient() error = %v", err)
+	}
+	reused, err := service.getClient(context.Background(), account)
+	if err != nil {
+		t.Fatalf("cached getClient() error = %v", err)
+	}
+	if reused != first {
+		t.Fatal("unchanged credentials should reuse cached client")
+	}
+
+	account.Credentials = map[string]any{"access_token": "second-token", "refresh_token": "refresh"}
+	rotated, err := service.getClient(context.Background(), account)
+	if err != nil {
+		t.Fatalf("rotated getClient() error = %v", err)
+	}
+	if rotated == first {
+		t.Fatal("credential rotation reused stale native client")
+	}
+}
+
+func TestNativeCredentialFingerprint_IsStableAcrossMapOrder(t *testing.T) {
+	left, err := nativeCredentialFingerprint(map[string]any{"access_token": "token", "nested": map[string]any{"b": 2, "a": 1}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	right, err := nativeCredentialFingerprint(map[string]any{"nested": map[string]any{"a": 1, "b": 2}, "access_token": "token"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if left != right {
+		t.Fatal("equivalent credential maps produced different fingerprints")
+	}
+}
+
+func TestFlushBufferedNativeResponse_EmptyBodyFailsOver(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	recorder := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(recorder)
+	service := &AntigravityNativeGatewayService{}
+
+	result, err := service.flushBufferedNativeResponse(
+		context.Background(), ctx, &Account{ID: 99}, nil, []byte("  \n"),
+		time.Now(), "gemini-3.6-flash", "gemini-3.6-flash", toolPrepReport{}, false, 1,
+	)
+	if result != nil {
+		t.Fatalf("result = %+v, want nil", result)
+	}
+	var failoverErr *UpstreamFailoverError
+	if !errors.As(err, &failoverErr) {
+		t.Fatalf("error = %T %v, want UpstreamFailoverError", err, err)
+	}
+	if failoverErr.Kind != FailoverKindSemanticEmpty {
+		t.Fatalf("failover kind = %v, want semantic empty", failoverErr.Kind)
+	}
+	if recorder.Body.Len() != 0 {
+		t.Fatalf("empty upstream response was committed to client: %q", recorder.Body.String())
+	}
+}
+
+type nativeConditionalPauseRepo struct {
+	AccountRepository
+	updated           bool
+	observedUpdatedAt time.Time
+	message           string
+}
+
+func (r *nativeConditionalPauseRepo) SetErrorIfUnchanged(_ context.Context, _ int64, observedUpdatedAt time.Time, message string) (bool, error) {
+	r.observedUpdatedAt = observedUpdatedAt
+	r.message = message
+	return r.updated, nil
+}
+
+func TestNativeSetAccountErrorIfCurrent_RejectsStalePause(t *testing.T) {
+	observed := time.Unix(1234, 0).UTC()
+	repo := &nativeConditionalPauseRepo{updated: false}
+	service := &AntigravityNativeGatewayService{accountRepo: repo}
+
+	updated, err := service.setAccountErrorIfCurrent(context.Background(), &Account{ID: 7, UpdatedAt: observed}, "reauth")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updated {
+		t.Fatal("stale account snapshot should not be paused")
+	}
+	if !repo.observedUpdatedAt.Equal(observed) || repo.message != "reauth" {
+		t.Fatalf("conditional snapshot not forwarded: observed=%v message=%q", repo.observedUpdatedAt, repo.message)
+	}
+}
+
+func TestNativeSetAccountErrorIfCurrent_AcceptsCurrentPause(t *testing.T) {
+	repo := &nativeConditionalPauseRepo{updated: true}
+	service := &AntigravityNativeGatewayService{accountRepo: repo}
+	updated, err := service.setAccountErrorIfCurrent(context.Background(), &Account{ID: 7, UpdatedAt: time.Now()}, "violation")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !updated {
+		t.Fatal("current account snapshot should be paused")
 	}
 }

@@ -49,27 +49,27 @@ func TestCleanGeminiNativeThoughtSignatures_InvalidJSONReturnsOriginal(t *testin
 	require.Equal(t, input, cleaned)
 }
 
-func TestReplaceThoughtSignaturesRecursive_OnlyReplacesTargetField(t *testing.T) {
-	input := map[string]any{
-		"thoughtSignature": "sig_root",
-		"signature":        "keep_signature",
-		"nested": []any{
-			map[string]any{
-				"thoughtSignature": "sig_nested",
-				"signature":        "keep_nested_signature",
-			},
-		},
-	}
+func TestCleanGeminiNativeThoughtSignatures_PreservesToolArguments(t *testing.T) {
+	input := []byte(`{"contents":[{"parts":[{"functionCall":{"name":"tool","args":{"thoughtSignature":"user-data"}},"thoughtSignature":"stale-part"}]}],"metadata":{"thoughtSignature":"metadata-value"}}`)
+	cleaned := CleanGeminiNativeThoughtSignatures(input)
 
-	got, ok := replaceThoughtSignaturesRecursive(input).(map[string]any)
-	require.True(t, ok)
-	require.Equal(t, antigravity.DummyThoughtSignature, got["thoughtSignature"])
-	require.Equal(t, "keep_signature", got["signature"])
+	var got map[string]any
+	require.NoError(t, json.Unmarshal(cleaned, &got))
+	contents := got["contents"].([]any)
+	part := contents[0].(map[string]any)["parts"].([]any)[0].(map[string]any)
+	require.Equal(t, antigravity.DummyThoughtSignature, part["thoughtSignature"])
+	args := part["functionCall"].(map[string]any)["args"].(map[string]any)
+	require.Equal(t, "user-data", args["thoughtSignature"])
+	require.Equal(t, "metadata-value", got["metadata"].(map[string]any)["thoughtSignature"])
+}
 
-	nested, ok := got["nested"].([]any)
-	require.True(t, ok)
-	nestedMap, ok := nested[0].(map[string]any)
-	require.True(t, ok)
-	require.Equal(t, antigravity.DummyThoughtSignature, nestedMap["thoughtSignature"])
-	require.Equal(t, "keep_nested_signature", nestedMap["signature"])
+func TestCleanGeminiNativeThoughtSignatures_ReplacesEscapedPartKey(t *testing.T) {
+	input := []byte(`{"contents":[{"parts":[{"\u0074houghtSignature":"stale"}]}]}`)
+	cleaned := CleanGeminiNativeThoughtSignatures(input)
+	require.Contains(t, string(cleaned), `"thoughtSignature":"`+antigravity.DummyThoughtSignature+`"`)
+}
+
+func TestCleanGeminiNativeThoughtSignatures_NoSchemaSignatureReturnsOriginal(t *testing.T) {
+	input := []byte(`{"functionCall":{"args":{"thoughtSignature":"user-data"}}}`)
+	require.Equal(t, input, CleanGeminiNativeThoughtSignatures(input))
 }

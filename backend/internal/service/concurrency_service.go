@@ -107,7 +107,14 @@ type ConcurrencyService struct {
 	accountLoadCacheTTL atomic.Int64
 	accountLoadCacheMu  sync.RWMutex
 	accountLoadCache    map[string]cachedAccountLoadBatch
-	accountLoadGroup    singleflight.Group
+	// accountLoadCacheIndex reverses accountID → set of cache keys that
+	// contain that account, so a slot acquire/release can invalidate every
+	// stale batch entry in O(candidate-set-size). Prevents the 200ms
+	// batch cache from repeatedly re-selecting a saturated account under
+	// barrier-parallel new sessions.
+	accountLoadCacheIndex      map[int64]map[string]struct{}
+	accountLoadCacheGeneration map[int64]uint64
+	accountLoadGroup           singleflight.Group
 }
 
 type cachedAccountLoadBatch struct {
@@ -118,8 +125,10 @@ type cachedAccountLoadBatch struct {
 // NewConcurrencyService 创建并发控制服务。
 func NewConcurrencyService(cache ConcurrencyCache) *ConcurrencyService {
 	svc := &ConcurrencyService{
-		cache:            cache,
-		accountLoadCache: make(map[string]cachedAccountLoadBatch),
+		cache:                      cache,
+		accountLoadCache:           make(map[string]cachedAccountLoadBatch),
+		accountLoadCacheIndex:      make(map[int64]map[string]struct{}),
+		accountLoadCacheGeneration: make(map[int64]uint64),
 	}
 	svc.SetAccountLoadBatchCacheTTL(defaultAccountLoadBatchCacheTTL)
 	return svc
@@ -134,8 +143,33 @@ func (s *ConcurrencyService) SetAccountLoadBatchCacheTTL(ttl time.Duration) {
 	if ttl <= 0 {
 		s.accountLoadCacheMu.Lock()
 		s.accountLoadCache = make(map[string]cachedAccountLoadBatch)
+		s.accountLoadCacheIndex = make(map[int64]map[string]struct{})
 		s.accountLoadCacheMu.Unlock()
 	}
+}
+
+// InvalidateAccountLoadCacheForAccount removes every cached batch entry
+// that contains accountID from the reverse index. Called on successful
+// slot acquire and on release so the next scheduling round sees the
+// current concurrency count instead of a 200ms stale snapshot.
+// Safe on the nil receiver / uninitialised index.
+func (s *ConcurrencyService) InvalidateAccountLoadCacheForAccount(accountID int64) {
+	if s == nil || accountID == 0 {
+		return
+	}
+	s.accountLoadCacheMu.Lock()
+	if s.accountLoadCacheGeneration == nil {
+		s.accountLoadCacheGeneration = make(map[int64]uint64)
+	}
+	s.accountLoadCacheGeneration[accountID]++
+	keys := make([]string, 0, len(s.accountLoadCacheIndex[accountID]))
+	for key := range s.accountLoadCacheIndex[accountID] {
+		keys = append(keys, key)
+	}
+	for _, key := range keys {
+		s.dropCacheKeyLocked(key)
+	}
+	s.accountLoadCacheMu.Unlock()
 }
 
 // AcquireResult represents the result of acquiring a concurrency slot
@@ -189,6 +223,9 @@ func (s *ConcurrencyService) AcquireAccountSlot(ctx context.Context, accountID i
 	}
 
 	if acquired {
+		// Invalidate before returning so subsequent scheduler passes see the
+		// current concurrency count instead of a 200ms stale batch snapshot.
+		s.InvalidateAccountLoadCacheForAccount(accountID)
 		return &AcquireResult{
 			Acquired: true,
 			ReleaseFunc: func() {
@@ -197,6 +234,9 @@ func (s *ConcurrencyService) AcquireAccountSlot(ctx context.Context, accountID i
 				if err := s.cache.ReleaseAccountSlot(bgCtx, accountID, requestID); err != nil {
 					logger.LegacyPrintf("service.concurrency", "Warning: failed to release account slot for %d (req=%s): %v", accountID, requestID, err)
 				}
+				// Freeing a slot changes load rate; drop stale batch entries
+				// so the next request sees the account as available again.
+				s.InvalidateAccountLoadCacheForAccount(accountID)
 			},
 		}, nil
 	}
@@ -433,12 +473,15 @@ func (s *ConcurrencyService) getAccountsLoadBatch(ctx context.Context, accounts 
 		if cached, ok := s.getCachedAccountLoadBatch(key, now); ok {
 			return cached, nil
 		}
+		generations := s.snapshotAccountLoadGenerations(accounts)
 		loadMap, fetchErr := s.fetchAccountsLoadBatch(ctx, accounts)
 		if fetchErr != nil {
 			return nil, fetchErr
 		}
 		cached := cloneAccountLoadMap(loadMap)
-		s.storeCachedAccountLoadBatch(key, cached, now.Add(ttl))
+		if s.accountLoadGenerationsMatch(generations) {
+			s.storeCachedAccountLoadBatch(key, cached, now.Add(ttl))
+		}
 		return cached, nil
 	})
 	if err != nil {
@@ -449,6 +492,27 @@ func (s *ConcurrencyService) getAccountsLoadBatch(ctx context.Context, accounts 
 		return map[int64]*AccountLoadInfo{}, nil
 	}
 	return loadMap, nil
+}
+
+func (s *ConcurrencyService) snapshotAccountLoadGenerations(accounts []AccountWithConcurrency) map[int64]uint64 {
+	s.accountLoadCacheMu.RLock()
+	defer s.accountLoadCacheMu.RUnlock()
+	snapshot := make(map[int64]uint64, len(accounts))
+	for _, account := range accounts {
+		snapshot[account.ID] = s.accountLoadCacheGeneration[account.ID]
+	}
+	return snapshot
+}
+
+func (s *ConcurrencyService) accountLoadGenerationsMatch(snapshot map[int64]uint64) bool {
+	s.accountLoadCacheMu.RLock()
+	defer s.accountLoadCacheMu.RUnlock()
+	for accountID, generation := range snapshot {
+		if s.accountLoadCacheGeneration[accountID] != generation {
+			return false
+		}
+	}
+	return true
 }
 
 func (s *ConcurrencyService) fetchAccountsLoadBatch(ctx context.Context, accounts []AccountWithConcurrency) (map[int64]*AccountLoadInfo, error) {
@@ -474,7 +538,7 @@ func (s *ConcurrencyService) getCachedAccountLoadBatch(key string, now time.Time
 	if !now.Before(cached.expiresAt) {
 		s.accountLoadCacheMu.Lock()
 		if current, exists := s.accountLoadCache[key]; exists && !now.Before(current.expiresAt) {
-			delete(s.accountLoadCache, key)
+			s.dropCacheKeyLocked(key)
 		}
 		s.accountLoadCacheMu.Unlock()
 		return nil, false
@@ -487,16 +551,19 @@ func (s *ConcurrencyService) storeCachedAccountLoadBatch(key string, loadMap map
 	if s.accountLoadCache == nil {
 		s.accountLoadCache = make(map[string]cachedAccountLoadBatch)
 	}
+	if s.accountLoadCacheIndex == nil {
+		s.accountLoadCacheIndex = make(map[int64]map[string]struct{})
+	}
 	if len(s.accountLoadCache) >= maxAccountLoadBatchCacheEntries {
 		now := time.Now()
 		for cacheKey, cached := range s.accountLoadCache {
 			if !now.Before(cached.expiresAt) {
-				delete(s.accountLoadCache, cacheKey)
+				s.dropCacheKeyLocked(cacheKey)
 			}
 		}
 		for len(s.accountLoadCache) >= maxAccountLoadBatchCacheEntries {
 			for cacheKey := range s.accountLoadCache {
-				delete(s.accountLoadCache, cacheKey)
+				s.dropCacheKeyLocked(cacheKey)
 				break
 			}
 		}
@@ -505,7 +572,33 @@ func (s *ConcurrencyService) storeCachedAccountLoadBatch(key string, loadMap map
 		loadMap:   loadMap,
 		expiresAt: expiresAt,
 	}
+	for accountID := range loadMap {
+		set, ok := s.accountLoadCacheIndex[accountID]
+		if !ok {
+			set = make(map[string]struct{})
+			s.accountLoadCacheIndex[accountID] = set
+		}
+		set[key] = struct{}{}
+	}
 	s.accountLoadCacheMu.Unlock()
+}
+
+// dropCacheKeyLocked removes cacheKey from both the primary cache and the
+// reverse index. Caller MUST hold s.accountLoadCacheMu (write).
+func (s *ConcurrencyService) dropCacheKeyLocked(cacheKey string) {
+	entry, ok := s.accountLoadCache[cacheKey]
+	if !ok {
+		return
+	}
+	for accountID := range entry.loadMap {
+		if set, ok := s.accountLoadCacheIndex[accountID]; ok {
+			delete(set, cacheKey)
+			if len(set) == 0 {
+				delete(s.accountLoadCacheIndex, accountID)
+			}
+		}
+	}
+	delete(s.accountLoadCache, cacheKey)
 }
 
 func accountLoadBatchCacheKey(accounts []AccountWithConcurrency) string {

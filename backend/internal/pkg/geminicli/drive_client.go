@@ -4,9 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"math/rand"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/pkg/httpclient"
@@ -14,8 +16,30 @@ import (
 
 // DriveStorageInfo represents Google Drive storage quota information
 type DriveStorageInfo struct {
-	Limit int64 `json:"limit"` // Storage limit in bytes
-	Usage int64 `json:"usage"` // Current usage in bytes
+	Limit     int64 `json:"limit"`     // Storage limit in bytes; zero when Unlimited is true
+	Usage     int64 `json:"usage"`     // Current usage in bytes
+	Unlimited bool  `json:"unlimited"` // Drive omits limit for unlimited-storage accounts
+}
+
+// DriveAPIError preserves HTTP status and bounded Google error payload so
+// callers can distinguish missing OAuth scope from unrelated 403 responses.
+type DriveAPIError struct {
+	StatusCode int
+	Body       string
+}
+
+func (e *DriveAPIError) Error() string {
+	return fmt.Sprintf("drive API error: status %d", e.StatusCode)
+}
+
+func (e *DriveAPIError) IsScopeUnavailable() bool {
+	if e == nil || e.StatusCode != http.StatusForbidden {
+		return false
+	}
+	body := strings.ToLower(e.Body)
+	return strings.Contains(body, "access_token_scope_insufficient") ||
+		strings.Contains(body, "insufficient authentication scopes") ||
+		strings.Contains(body, "insufficientpermissions")
 }
 
 // DriveClient interface for Google Drive API operations
@@ -113,45 +137,69 @@ func (c *driveClient) GetStorageQuota(ctx context.Context, accessToken, proxyURL
 	}
 
 	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 8<<10))
 		_ = resp.Body.Close()
 		statusText := http.StatusText(resp.StatusCode)
 		if statusText == "" {
 			statusText = resp.Status
 		}
 		fmt.Printf("[DriveClient] Drive API error: status=%d, msg=%s\n", resp.StatusCode, statusText)
-		// 只返回通用错误
-		return nil, fmt.Errorf("drive API error: status %d", resp.StatusCode)
+		return nil, &DriveAPIError{StatusCode: resp.StatusCode, Body: string(body)}
 	}
 
 	defer func() { _ = resp.Body.Close() }()
 
-	// Parse response
+	return decodeDriveStorageQuota(resp.Body)
+}
+
+func decodeDriveStorageQuota(r io.Reader) (*DriveStorageInfo, error) {
+	type storageQuota struct {
+		Limit json.RawMessage `json:"limit"`
+		Usage json.RawMessage `json:"usage"`
+	}
 	var result struct {
-		StorageQuota struct {
-			Limit string `json:"limit"` // Can be string or number
-			Usage string `json:"usage"`
-		} `json:"storageQuota"`
+		StorageQuota *storageQuota `json:"storageQuota"`
+	}
+	if err := json.NewDecoder(r).Decode(&result); err != nil {
+		return nil, fmt.Errorf("failed to decode Drive storage quota: %w", err)
+	}
+	if result.StorageQuota == nil {
+		return nil, fmt.Errorf("Drive response missing storageQuota object")
 	}
 
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return nil, fmt.Errorf("failed to decode response: %w", err)
+	usage, err := parseDriveQuotaValue("usage", result.StorageQuota.Usage)
+	if err != nil {
+		return nil, err
+	}
+	if len(result.StorageQuota.Limit) == 0 {
+		return &DriveStorageInfo{Usage: usage, Unlimited: true}, nil
+	}
+	limit, err := parseDriveQuotaValue("limit", result.StorageQuota.Limit)
+	if err != nil {
+		return nil, err
+	}
+	return &DriveStorageInfo{Limit: limit, Usage: usage}, nil
+}
+
+func parseDriveQuotaValue(field string, raw json.RawMessage) (int64, error) {
+	if len(raw) == 0 {
+		return 0, fmt.Errorf("Drive storage quota missing %s", field)
 	}
 
-	// Parse limit and usage (handle both string and number formats)
-	var limit, usage int64
-	if result.StorageQuota.Limit != "" {
-		if val, err := strconv.ParseInt(result.StorageQuota.Limit, 10, 64); err == nil {
-			limit = val
+	value := strings.TrimSpace(string(raw))
+	if len(value) >= 2 && value[0] == '"' && value[len(value)-1] == '"' {
+		var quoted string
+		if err := json.Unmarshal(raw, &quoted); err != nil {
+			return 0, fmt.Errorf("Drive storage quota %s is malformed: %w", field, err)
 		}
+		value = quoted
 	}
-	if result.StorageQuota.Usage != "" {
-		if val, err := strconv.ParseInt(result.StorageQuota.Usage, 10, 64); err == nil {
-			usage = val
-		}
+	parsed, err := strconv.ParseInt(value, 10, 64)
+	if err != nil {
+		return 0, fmt.Errorf("Drive storage quota %s is invalid: %w", field, err)
 	}
-
-	return &DriveStorageInfo{
-		Limit: limit,
-		Usage: usage,
-	}, nil
+	if parsed < 0 {
+		return 0, fmt.Errorf("Drive storage quota %s must be non-negative", field)
+	}
+	return parsed, nil
 }

@@ -1159,6 +1159,11 @@ type GatewaySchedulingConfig struct {
 	// 全量重建周期配置
 	// 全量重建周期（秒），0 表示禁用
 	FullRebuildIntervalSeconds int `mapstructure:"full_rebuild_interval_seconds"`
+
+	// NativeRecentSelectionWindow is the short per-account claim TTL used to
+	// spread new Native sessions. Non-positive values use the 2s default.
+	// Claims only affect ordering; every account remains eligible fallback.
+	NativeRecentSelectionWindow time.Duration `mapstructure:"native_recent_selection_window"`
 }
 
 func (s *ServerConfig) Address() string {
@@ -2036,6 +2041,7 @@ func setDefaults() {
 	viper.SetDefault("gateway.scheduling.snapshot_mget_chunk_size", 128)
 	viper.SetDefault("gateway.scheduling.snapshot_write_chunk_size", 256)
 	viper.SetDefault("gateway.scheduling.slot_cleanup_interval", 30*time.Second)
+	viper.SetDefault("gateway.scheduling.native_recent_selection_window", 2*time.Second)
 	viper.SetDefault("gateway.scheduling.db_fallback_enabled", true)
 	viper.SetDefault("gateway.scheduling.db_fallback_timeout_seconds", 0)
 	viper.SetDefault("gateway.scheduling.db_fallback_max_qps", 0)

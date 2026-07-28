@@ -163,20 +163,18 @@ func wrapReleaseOnDone(ctx context.Context, releaseFunc func()) func() {
 		return nil
 	}
 	var once sync.Once
-	var stop func() bool
-
 	release := func() {
-		once.Do(func() {
-			if stop != nil {
-				_ = stop()
-			}
-			releaseFunc()
-		})
+		once.Do(releaseFunc)
 	}
 
-	stop = context.AfterFunc(ctx, release)
-
-	return release
+	// The cancellation callback must not read the stop handle: an already
+	// canceled context may run it before context.AfterFunc returns, which
+	// otherwise races with assigning that handle.
+	stop := context.AfterFunc(ctx, release)
+	return func() {
+		_ = stop()
+		release()
+	}
 }
 
 // IncrementWaitCount increments the wait count for a user

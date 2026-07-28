@@ -50,12 +50,13 @@ const (
 )
 
 type GeminiOAuthService struct {
-	sessionStore *geminicli.SessionStore
-	proxyRepo    ProxyRepository
-	oauthClient  GeminiOAuthClient
-	codeAssist   GeminiCliCodeAssistClient
-	driveClient  geminicli.DriveClient
-	cfg          *config.Config
+	sessionStore  *geminicli.SessionStore
+	proxyRepo     ProxyRepository
+	oauthClient   GeminiOAuthClient
+	codeAssist    GeminiCliCodeAssistClient
+	driveClient   geminicli.DriveClient
+	cfg           *config.Config
+	driveScope403 *driveScope403Suppressor
 }
 
 type GeminiOAuthCapabilities struct {
@@ -71,12 +72,13 @@ func NewGeminiOAuthService(
 	cfg *config.Config,
 ) *GeminiOAuthService {
 	return &GeminiOAuthService{
-		sessionStore: geminicli.NewSessionStore(),
-		proxyRepo:    proxyRepo,
-		oauthClient:  oauthClient,
-		codeAssist:   codeAssist,
-		driveClient:  driveClient,
-		cfg:          cfg,
+		sessionStore:  geminicli.NewSessionStore(),
+		proxyRepo:     proxyRepo,
+		oauthClient:   oauthClient,
+		codeAssist:    codeAssist,
+		driveClient:   driveClient,
+		cfg:           cfg,
+		driveScope403: newDriveScope403Suppressor(),
 	}
 }
 
@@ -355,6 +357,11 @@ func inferGoogleOneTier(storageBytes int64) string {
 	return GeminiTierGoogleOneUnknown
 }
 
+func isDriveScopeUnavailable(err error) bool {
+	var driveErr *geminicli.DriveAPIError
+	return errors.As(err, &driveErr) && driveErr.IsScopeUnavailable()
+}
+
 // FetchGoogleOneTier fetches Google One tier from Drive API.
 // Note: LoadCodeAssist API is NOT called for Google One accounts because:
 // 1. It's designed for GCP IAM (enterprise), not personal Google accounts
@@ -362,29 +369,32 @@ func inferGoogleOneTier(storageBytes int64) string {
 // 3. Google consumer (Google One) and enterprise (GCP) systems are physically isolated
 func (s *GeminiOAuthService) FetchGoogleOneTier(ctx context.Context, accessToken, proxyURL string) (string, *geminicli.DriveStorageInfo, error) {
 	logger.LegacyPrintf("service.gemini_oauth", "[GeminiOAuth] Starting FetchGoogleOneTier (Google One personal account)")
-
-	// Use Drive API to infer tier from storage quota (requires drive.readonly scope)
+	fingerprint := driveScope403Fingerprint(accessToken, proxyURL)
 	logger.LegacyPrintf("service.gemini_oauth", "[GeminiOAuth] Calling Drive API for storage quota...")
-
 	storageInfo, err := s.driveClient.GetStorageQuota(ctx, accessToken, proxyURL)
 	if err != nil {
-		// Check if it's a 403 (scope not granted)
-		if strings.Contains(err.Error(), "status 403") {
-			logger.LegacyPrintf("service.gemini_oauth", "[GeminiOAuth] Drive API scope not available (403): %v", err)
+		if isDriveScopeUnavailable(err) {
+			if s.driveScope403.record403(fingerprint) {
+				logger.LegacyPrintf("service.gemini_oauth", "[GeminiOAuth] Drive API scope not available (403): %v", err)
+			}
 			return GeminiTierGoogleOneUnknown, nil, err
 		}
-		// Other errors
 		logger.LegacyPrintf("service.gemini_oauth", "[GeminiOAuth] Failed to fetch Drive storage: %v", err)
 		return GeminiTierGoogleOneUnknown, nil, err
+	}
+	s.driveScope403.invalidate(fingerprint)
+	if storageInfo == nil {
+		return GeminiTierGoogleOneUnknown, nil, fmt.Errorf("Drive API returned empty storage quota")
 	}
 
 	logger.LegacyPrintf("service.gemini_oauth", "[GeminiOAuth] Drive API response - Limit: %d bytes (%.2f TB), Usage: %d bytes (%.2f GB)",
 		storageInfo.Limit, float64(storageInfo.Limit)/float64(TB),
 		storageInfo.Usage, float64(storageInfo.Usage)/float64(GB))
-
 	tierID := inferGoogleOneTier(storageInfo.Limit)
+	if storageInfo.Unlimited {
+		tierID = GeminiTierGoogleAIUltra
+	}
 	logger.LegacyPrintf("service.gemini_oauth", "[GeminiOAuth] Inferred tier from storage: %s", tierID)
-
 	return tierID, storageInfo, nil
 }
 
@@ -429,6 +439,7 @@ func (s *GeminiOAuthService) RefreshAccountGoogleOneTier(
 	if storageInfo != nil {
 		extra["drive_storage_limit"] = storageInfo.Limit
 		extra["drive_storage_usage"] = storageInfo.Usage
+		extra["drive_storage_unlimited"] = storageInfo.Unlimited
 		extra["drive_tier_updated_at"] = time.Now().Format(time.RFC3339)
 	}
 
@@ -596,9 +607,12 @@ func (s *GeminiOAuthService) ExchangeCode(ctx context.Context, input *GeminiExch
 		var err error
 		tierID, storageInfo, err = s.FetchGoogleOneTier(ctx, tokenResp.AccessToken, proxyURL)
 		if err != nil {
-			// Log warning but don't block - use fallback
-			fmt.Printf("[GeminiOAuth] Warning: Failed to fetch Drive tier: %v\n", err)
-			logger.LegacyPrintf("service.gemini_oauth", "[GeminiOAuth] WARNING: Failed to fetch Drive tier: %v", err)
+			// FetchGoogleOneTier logs a confirmed scope 403 once per token/TTL.
+			// Keep generic warnings for all other failures.
+			if !isDriveScopeUnavailable(err) || !s.driveScope403.suppressed(driveScope403Fingerprint(tokenResp.AccessToken, proxyURL)) {
+				fmt.Printf("[GeminiOAuth] Warning: Failed to fetch Drive tier: %v\n", err)
+				logger.LegacyPrintf("service.gemini_oauth", "[GeminiOAuth] WARNING: Failed to fetch Drive tier: %v", err)
+			}
 			tierID = ""
 		} else {
 			logger.LegacyPrintf("service.gemini_oauth", "[GeminiOAuth] Successfully fetched Drive tier: %s", tierID)
@@ -633,9 +647,10 @@ func (s *GeminiOAuthService) ExchangeCode(ctx context.Context, input *GeminiExch
 				TierID:       tierID,
 				OAuthType:    oauthType,
 				Extra: map[string]any{
-					"drive_storage_limit":   storageInfo.Limit,
-					"drive_storage_usage":   storageInfo.Usage,
-					"drive_tier_updated_at": time.Now().Format(time.RFC3339),
+					"drive_storage_limit":     storageInfo.Limit,
+					"drive_storage_usage":     storageInfo.Usage,
+					"drive_storage_unlimited": storageInfo.Unlimited,
+					"drive_tier_updated_at":   time.Now().Format(time.RFC3339),
 				},
 			}
 			logger.LegacyPrintf("service.gemini_oauth", "[GeminiOAuth] ========== ExchangeCode END (google_one with storage info) ==========")
@@ -856,9 +871,10 @@ func (s *GeminiOAuthService) RefreshAccountToken(ctx context.Context, account *A
 				}
 				if storageInfo != nil {
 					tokenInfo.Extra = map[string]any{
-						"drive_storage_limit":   storageInfo.Limit,
-						"drive_storage_usage":   storageInfo.Usage,
-						"drive_tier_updated_at": time.Now().Format(time.RFC3339),
+						"drive_storage_limit":     storageInfo.Limit,
+						"drive_storage_usage":     storageInfo.Usage,
+						"drive_storage_unlimited": storageInfo.Unlimited,
+						"drive_tier_updated_at":   time.Now().Format(time.RFC3339),
 					}
 				}
 			}

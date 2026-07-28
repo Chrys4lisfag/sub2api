@@ -2,6 +2,7 @@ package handler
 
 import (
 	"context"
+	"math/rand/v2"
 	"net/http"
 	"time"
 
@@ -37,7 +38,29 @@ const (
 	// Service 层在 SingleAccountRetry 模式下已做充分原地重试（最多 3 次、总等待 30s），
 	// Handler 层只需短暂间隔后重新进入 Service 层即可。
 	singleAccountBackoffDelay = 2 * time.Second
+	// semanticEmptyMaxJitter caps the jitter used for
+	// FailoverKindSemanticEmpty account switches. The goal is to spread
+	// concurrent semantic-empty failovers a tiny amount (so we don't
+	// pile onto the same next-in-line account on the very same
+	// microsecond) WITHOUT paying the multi-second linear escalation
+	// used for rate-limit / network / auth classes. 25 ms is
+	// comfortably below the ~50 ms slog-render granularity of the
+	// gateway request log, so the switch looks instantaneous to
+	// operators reading `docker logs sub2api`.
+	semanticEmptyMaxJitter = 25 * time.Millisecond
 )
+
+// semanticEmptyBackoffFn returns the bounded jitter for a
+// FailoverKindSemanticEmpty account switch. Overridable in tests to make
+// timing assertions deterministic.
+var semanticEmptyBackoffFn = func() time.Duration {
+	if semanticEmptyMaxJitter <= 0 {
+		return 0
+	}
+	// rand.N returns [0, semanticEmptyMaxJitter); tolerate the exclusive
+	// upper bound — 24.999… ms is indistinguishable from 25 ms in prod.
+	return rand.N(semanticEmptyMaxJitter)
+}
 
 // FailoverState 跨循环迭代共享的 failover 状态
 type FailoverState struct {
@@ -113,9 +136,25 @@ func (s *FailoverState) HandleFailoverError(
 		zap.Int("max_switches", s.MaxSwitches),
 	)
 
-	// Antigravity 平台换号线性递增延时
+	// Antigravity 平台换号退避策略：
+	//   - FailoverKindSemanticEmpty (upstream 200 + STOP-without-content):
+	//     tiny bounded jitter only. The old linear (SwitchCount-1) * 1s
+	//     schedule penalized clients for what is effectively a soft
+	//     schema failure on the upstream side — a healthy next account
+	//     usually responds immediately, so the delay is pure user-visible
+	//     latency with zero recovery benefit. Bounded jitter (≤25 ms)
+	//     keeps concurrent failovers from cocooning on the same account
+	//     without escalating.
+	//   - all other kinds (rate-limit / network / auth / unspecified):
+	//     keep the historical linear escalation. Real 429/5xx classes
+	//     benefit from spreading load across time as accounts recover.
 	if service.IsAntigravityFamily(platform) {
-		delay := time.Duration(s.SwitchCount-1) * time.Second
+		var delay time.Duration
+		if failoverErr != nil && failoverErr.Kind == service.FailoverKindSemanticEmpty {
+			delay = semanticEmptyBackoffFn()
+		} else {
+			delay = time.Duration(s.SwitchCount-1) * time.Second
+		}
 		if !sleepWithContext(ctx, delay) {
 			return FailoverCanceled
 		}

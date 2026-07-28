@@ -1,7 +1,6 @@
 package handler
 
 import (
-	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -347,6 +346,13 @@ func (h *GatewayHandler) GeminiV1BetaModels(c *gin.Context) {
 		c.Request = c.Request.WithContext(ctx)
 	}
 
+	ctx := service.WithThoughtSignaturePresent(
+		c.Request.Context(),
+		service.GeminiBodyContainsThoughtSignature(body),
+	)
+	ctx = service.WithNativeQualityModel(ctx, reqModel)
+	c.Request = c.Request.WithContext(ctx)
+
 	for {
 		selection, err := h.gatewayService.SelectAccountWithLoadAwareness(c.Request.Context(), apiKey.GroupID, sessionKey, modelName, fs.FailedAccountIDs, "", int64(0)) // Gemini 不使用会话限制
 		if err != nil {
@@ -388,7 +394,7 @@ func (h *GatewayHandler) GeminiV1BetaModels(c *gin.Context) {
 			)
 			body = service.CleanGeminiNativeThoughtSignatures(body)
 			sessionBoundAccountID = account.ID
-		} else if sessionKey != "" && sessionBoundAccountID == 0 && !cleanedForUnknownBinding && bytes.Contains(body, []byte(`"thoughtSignature"`)) {
+		} else if sessionKey != "" && sessionBoundAccountID == 0 && !cleanedForUnknownBinding && service.GeminiBodyContainsThoughtSignature(body) {
 			// 无缓存绑定但请求里已有 thoughtSignature：常见于缓存丢失/TTL 过期后，客户端继续携带旧签名。
 			// 为避免第一次转发就 400，这里做一次确定性清理，让新账号重新生成签名链路。
 			reqLog.Info("gemini.sticky_session_binding_missing",

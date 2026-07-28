@@ -19,6 +19,7 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -71,12 +72,15 @@ type AntigravityNativeGatewayService struct {
 	// driven by Stop() at shutdown and Invalidate() on credential change.
 	metricsCacheMu sync.Mutex
 	metricsCache   map[int64]*nativeMetricsEntry
+
+	usageCacheMu sync.Mutex
 }
 
 type nativeCacheEntry struct {
-	client    *api.Client
-	proxyURL  string // empty = no proxy
-	updatedAt time.Time
+	client                *api.Client
+	proxyURL              string // empty = no proxy
+	credentialFingerprint [sha256.Size]byte
+	updatedAt             time.Time
 }
 
 // nativeMetricsEntry tracks one per-account Unleash mimic-loop client.
@@ -269,6 +273,14 @@ func (s *AntigravityNativeGatewayService) resolveProxyURL(ctx context.Context, a
 	return p.URL()
 }
 
+func nativeCredentialFingerprint(credentials map[string]any) ([sha256.Size]byte, error) {
+	raw, err := json.Marshal(credentials)
+	if err != nil {
+		return [sha256.Size]byte{}, err
+	}
+	return sha256.Sum256(raw), nil
+}
+
 // getClient returns a cached or freshly-built agymimic Client for an account.
 // Rebuilds if the proxy URL or credentials changed since last build.
 func (s *AntigravityNativeGatewayService) getClient(ctx context.Context, account *Account) (*api.Client, error) {
@@ -276,11 +288,15 @@ func (s *AntigravityNativeGatewayService) getClient(ctx context.Context, account
 		return nil, fmt.Errorf("native: nil account")
 	}
 	proxyURL := s.resolveProxyURL(ctx, account)
+	credentialFingerprint, err := nativeCredentialFingerprint(account.Credentials)
+	if err != nil {
+		return nil, fmt.Errorf("native: fingerprint credentials: %w", err)
+	}
 
 	s.clientCacheMu.RLock()
 	entry, ok := s.clientCache[account.ID]
 	s.clientCacheMu.RUnlock()
-	if ok && entry.proxyURL == proxyURL {
+	if ok && entry.proxyURL == proxyURL && entry.credentialFingerprint == credentialFingerprint {
 		return entry.client, nil
 	}
 
@@ -295,9 +311,10 @@ func (s *AntigravityNativeGatewayService) getClient(ctx context.Context, account
 
 	s.clientCacheMu.Lock()
 	s.clientCache[account.ID] = &nativeCacheEntry{
-		client:    cli,
-		proxyURL:  proxyURL,
-		updatedAt: time.Now(),
+		client:                cli,
+		proxyURL:              proxyURL,
+		credentialFingerprint: credentialFingerprint,
+		updatedAt:             time.Now(),
 	}
 	s.clientCacheMu.Unlock()
 	return cli, nil
@@ -1223,12 +1240,14 @@ func (s *AntigravityNativeGatewayService) streamGeminiToClient(
 						slog.String("model", originalModel),
 						slog.String("wire_model", wireModel),
 					)
+					recordNativeAccountQuality(ctx, accountID, originalModel, time.Since(startTime), true)
 					return nil, &UpstreamFailoverError{
 						StatusCode:             http.StatusBadGateway,
 						ResponseBody:           []byte(`{"error":{"code":502,"message":"Antigravity native upstream returned 200 with empty stream body","status":"UNAVAILABLE"}}`),
 						ResponseHeaders:        http.Header{"Content-Type": []string{"application/json"}},
 						PassthroughVerbatim:    true,
 						RetryableOnSameAccount: true,
+						Kind:                   FailoverKindSemanticEmpty,
 					}
 				}
 				break
@@ -1257,22 +1276,29 @@ func (s *AntigravityNativeGatewayService) streamGeminiToClient(
 	// STOP and truncated no-finish streams are retryable semantic empties.
 	// Other terminal reasons (SAFETY, RECITATION, etc.) are meaningful Gemini
 	// responses and must pass through unchanged.
-	if !headersCommitted && !streamSawText && !streamSawFunctionCall &&
-		(streamFinishReason == "" || strings.EqualFold(streamFinishReason, "STOP")) {
+	if !headersCommitted && isNativeSemanticEmptyCompletion(streamSawText, streamSawFunctionCall, streamFinishReason) {
 		slog.WarnContext(ctx, "native: upstream STOP without usable content — failing over",
 			slog.Int64("account_id", accountID),
 			slog.String("model", originalModel),
 			slog.String("wire_model", wireModel),
 			slog.String("finish_reason", streamFinishReason),
-			slog.Int("buffered_bytes", semanticPrecommit.Len()))
+			slog.Int("buffered_bytes", semanticPrecommit.Len()),
+			slog.String("failover_kind", FailoverKindSemanticEmpty.String()))
 		logNativeRequestAnomaly(ctx, accountID, originalModel, wireModel, true, lastChunkPayload,
 			"stop_without_content", map[string]string{"reason": "no non-thought text and no function call seen across stream"})
+		// Feed the semantic-empty EWMA with the observed elapsed time so
+		// downstream schedulers can see BOTH the empty-rate and the
+		// latency the account cost the client. Requested model
+		// (`originalModel`) is the key — 3.6 / 3.1 remain distinct rows
+		// from any wire-remapped variant.
+		recordNativeAccountQuality(ctx, accountID, originalModel, time.Since(startTime), true)
 		return nil, &UpstreamFailoverError{
 			StatusCode:             http.StatusBadGateway,
 			ResponseBody:           []byte(`{"error":{"code":502,"message":"Antigravity native upstream returned STOP without usable content","status":"UNAVAILABLE"}}`),
 			ResponseHeaders:        http.Header{"Content-Type": []string{"application/json"}},
 			PassthroughVerbatim:    true,
 			RetryableOnSameAccount: false,
+			Kind:                   FailoverKindSemanticEmpty,
 		}
 	}
 	if !headersCommitted && semanticPrecommit.Len() > 0 {
@@ -1319,6 +1345,21 @@ func (s *AntigravityNativeGatewayService) streamGeminiToClient(
 		logNativeRequestAnomaly(ctx, accountID, originalModel, wireModel, true, lastChunkPayload,
 			"stop_without_content", map[string]string{"reason": "no text and no function call seen across stream"})
 	}
+	// End-of-stream quality sample. Semantic-empty here is the residual
+	// "headers already committed" path: the failover branch at line 1260
+	// couldn't fire because bytes went out to the client before we
+	// realised the stream carried no usable answer. Recording it keeps
+	// the tracker's view of the account honest (client saw an empty
+	// response) without a second failover attempt. Requested model is
+	// the EWMA key; wire model is metadata only.
+	semanticEmpty := isNativeSemanticEmptyCompletion(streamSawText, streamSawFunctionCall, streamFinishReason)
+	recordNativeAccountQuality(ctx, accountID, originalModel, time.Since(startTime), semanticEmpty)
+	slog.DebugContext(ctx, "native.quality.stream_complete",
+		slog.Int64("account_id", accountID),
+		slog.String("model", originalModel),
+		slog.String("wire_model", wireModel),
+		slog.Bool("semantic_empty", semanticEmpty),
+		slog.Int64("latency_ms", time.Since(startTime).Milliseconds()))
 	return s.finalizeResult(result, startTime), nil
 }
 
@@ -1328,6 +1369,15 @@ func (s *AntigravityNativeGatewayService) streamGeminiToClient(
 // not valid JSON. The empty-args check fires on a per-chunk basis because
 // once a function call is emitted streaming concludes immediately — there's
 // no "later chunk" to redeem an args={} call.
+func isNativeSemanticEmptyCompletion(sawText, sawFunctionCall bool, finishReason string) bool {
+	return !sawText && !sawFunctionCall &&
+		(finishReason == "" || strings.EqualFold(finishReason, "STOP"))
+}
+
+func isNativeSemanticEmptyAnomaly(anomaly string) bool {
+	return anomaly == "stop_without_content" || anomaly == "no_candidates"
+}
+
 func inspectStreamChunk(payload []byte) (sawText bool, sawFunctionCall bool, emptyArgsFn string) {
 	type part struct {
 		Text         *string        `json:"text,omitempty"`
@@ -1453,7 +1503,13 @@ func (s *AntigravityNativeGatewayService) passNonStreamingGemini(
 ) (*ForwardResult, error) {
 	raw, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return nil, err
+		return nil, &UpstreamFailoverError{
+			StatusCode:             http.StatusBadGateway,
+			ResponseBody:           []byte(`{"error":{"code":502,"message":"Antigravity native upstream response body could not be read","status":"UNAVAILABLE"}}`),
+			ResponseHeaders:        http.Header{"Content-Type": []string{"application/json"}},
+			PassthroughVerbatim:    true,
+			RetryableOnSameAccount: true,
+		}
 	}
 	// Standard Gemini SDKs read `candidates` / `usageMetadata` at the top
 	// level. The agymimic upstream wraps them inside a `response` field;
@@ -1483,12 +1539,14 @@ func (s *AntigravityNativeGatewayService) passNonStreamingGemini(
 		logNativeRequestAnomaly(ctx, accountID, originalModel, wireModel, false, raw, "empty_body", map[string]string{
 			"raw_bytes": fmt.Sprintf("%d", len(raw)),
 		})
+		recordNativeAccountQuality(ctx, accountID, originalModel, time.Since(startTime), true)
 		return nil, &UpstreamFailoverError{
 			StatusCode:             http.StatusBadGateway,
 			ResponseBody:           []byte(`{"error":{"code":502,"message":"Antigravity native upstream returned 200 with empty body","status":"UNAVAILABLE"}}`),
 			ResponseHeaders:        http.Header{"Content-Type": []string{"application/json"}},
 			PassthroughVerbatim:    true,
 			RetryableOnSameAccount: true,
+			Kind:                   FailoverKindSemanticEmpty,
 		}
 	}
 
@@ -1514,13 +1572,20 @@ func (s *AntigravityNativeGatewayService) passNonStreamingGemini(
 	if anomaly != "" {
 		logNativeRequestAnomaly(ctx, accountID, originalModel, wireModel, false, out, anomaly, details)
 	}
-	if anomaly == "stop_without_content" {
+	if isNativeSemanticEmptyAnomaly(anomaly) {
+		slog.WarnContext(ctx, "native: non-stream response without usable content — failing over",
+			slog.Int64("account_id", accountID),
+			slog.String("model", originalModel),
+			slog.String("wire_model", wireModel),
+			slog.String("failover_kind", FailoverKindSemanticEmpty.String()))
+		recordNativeAccountQuality(ctx, accountID, originalModel, time.Since(startTime), true)
 		return nil, &UpstreamFailoverError{
 			StatusCode:             http.StatusBadGateway,
 			ResponseBody:           []byte(`{"error":{"code":502,"message":"Antigravity native upstream returned STOP without usable content","status":"UNAVAILABLE"}}`),
 			ResponseHeaders:        http.Header{"Content-Type": []string{"application/json"}},
 			PassthroughVerbatim:    true,
 			RetryableOnSameAccount: false,
+			Kind:                   FailoverKindSemanticEmpty,
 		}
 	}
 
@@ -1539,6 +1604,16 @@ func (s *AntigravityNativeGatewayService) passNonStreamingGemini(
 			result.UpstreamModel = u.ModelVersion
 		}
 	}
+	// Success sample: usable body reached client without the semantic-
+	// empty failover branch firing. Requested model is the EWMA key —
+	// wire model (post ResolveWireFromBody) is metadata only, so
+	// gemini-3.6-flash and gemini-3.6-flash-high stay distinct rows.
+	recordNativeAccountQuality(ctx, accountID, originalModel, time.Since(startTime), false)
+	slog.DebugContext(ctx, "native.quality.non_stream_complete",
+		slog.Int64("account_id", accountID),
+		slog.String("model", originalModel),
+		slog.String("wire_model", wireModel),
+		slog.Int64("latency_ms", time.Since(startTime).Milliseconds()))
 	return s.finalizeResult(result, startTime), nil
 }
 
@@ -1573,6 +1648,20 @@ func (s *AntigravityNativeGatewayService) flushBufferedNativeResponse(
 	}
 	// Unwrap agymimic's {response: {...}} envelope so client sees canonical Gemini shape.
 	out := unwrapAgyResponseEnvelopeBody(body)
+	if len(bytes.TrimSpace(out)) == 0 {
+		logNativeRequestAnomaly(ctx, accountID, originalModel, wireModel, stream, body, "empty_body", map[string]string{
+			"raw_bytes": fmt.Sprintf("%d", len(body)),
+		})
+		recordNativeAccountQuality(ctx, accountID, originalModel, time.Since(startTime), true)
+		return nil, &UpstreamFailoverError{
+			StatusCode:             http.StatusBadGateway,
+			ResponseBody:           []byte(`{"error":{"code":502,"message":"Antigravity native upstream returned 200 with empty buffered body","status":"UNAVAILABLE"}}`),
+			ResponseHeaders:        http.Header{"Content-Type": []string{"application/json"}},
+			PassthroughVerbatim:    true,
+			RetryableOnSameAccount: true,
+			Kind:                   FailoverKindSemanticEmpty,
+		}
+	}
 
 	// Same anomaly check + version-rejection guard as passNonStreamingGemini.
 	if isVersionRejectionPayload(out) {
@@ -1592,13 +1681,21 @@ func (s *AntigravityNativeGatewayService) flushBufferedNativeResponse(
 	if anomaly != "" {
 		logNativeRequestAnomaly(ctx, accountID, originalModel, wireModel, stream, out, anomaly, details)
 	}
-	if anomaly == "stop_without_content" {
+	if isNativeSemanticEmptyAnomaly(anomaly) {
+		slog.WarnContext(ctx, "native: buffered response without usable content — failing over",
+			slog.Int64("account_id", accountID),
+			slog.String("model", originalModel),
+			slog.String("wire_model", wireModel),
+			slog.Bool("stream", stream),
+			slog.String("failover_kind", FailoverKindSemanticEmpty.String()))
+		recordNativeAccountQuality(ctx, accountID, originalModel, time.Since(startTime), true)
 		return nil, &UpstreamFailoverError{
 			StatusCode:             http.StatusBadGateway,
 			ResponseBody:           []byte(`{"error":{"code":502,"message":"Antigravity native upstream returned STOP without usable content","status":"UNAVAILABLE"}}`),
 			ResponseHeaders:        http.Header{"Content-Type": []string{"application/json"}},
 			PassthroughVerbatim:    true,
 			RetryableOnSameAccount: false,
+			Kind:                   FailoverKindSemanticEmpty,
 		}
 	}
 
@@ -1631,6 +1728,17 @@ func (s *AntigravityNativeGatewayService) flushBufferedNativeResponse(
 	s.maybeLogChatHistory(ctx, account, requestBody, body, originalModel, wireModel,
 		toolReport.DiscoveryMode, toolReport.AggregatorName, stream, startTime,
 		0, agyListToolsIterations, "")
+	// Success sample for the agy_list_tools-buffered path. Same rules
+	// as the direct-stream/non-stream success recorders: requested model
+	// is the EWMA key; wire model rides in slog metadata only.
+	recordNativeAccountQuality(ctx, accountID, originalModel, time.Since(startTime), false)
+	slog.DebugContext(ctx, "native.quality.buffered_complete",
+		slog.Int64("account_id", accountID),
+		slog.String("model", originalModel),
+		slog.String("wire_model", wireModel),
+		slog.Bool("stream", stream),
+		slog.Int("agy_list_tools_iterations", agyListToolsIterations),
+		slog.Int64("latency_ms", time.Since(startTime).Milliseconds()))
 	return s.finalizeResult(result, startTime), nil
 }
 
@@ -1917,7 +2025,7 @@ func logNativeRequestAnomaly(
 // Returns "" + empty detail map when the response is well-formed.
 func inspectGeminiResponseForAnomalies(body []byte) (string, map[string]string) {
 	if len(body) == 0 {
-		return "", nil
+		return "no_candidates", nil
 	}
 	type part struct {
 		Text         *string        `json:"text,omitempty"`
@@ -1939,31 +2047,51 @@ func inspectGeminiResponseForAnomalies(body []byte) (string, map[string]string) 
 	if len(env.Candidates) == 0 {
 		return "no_candidates", nil
 	}
-	c := env.Candidates[0]
-	if len(c.Content.Parts) == 0 {
-		return "no_candidates", nil
-	}
-	sawText := false
-	for _, p := range c.Content.Parts {
-		if p.Text != nil && *p.Text != "" && !p.Thought {
-			sawText = true
+
+	var firstEmptyFunction map[string]string
+	sawStop := false
+	sawMeaningfulTerminal := false
+	for _, candidate := range env.Candidates {
+		finishReason := strings.TrimSpace(candidate.FinishReason)
+		if strings.EqualFold(finishReason, "STOP") {
+			sawStop = true
+		} else if finishReason != "" {
+			sawMeaningfulTerminal = true
 		}
-		if p.FunctionCall != nil {
+		for _, p := range candidate.Content.Parts {
+			if p.Text != nil && *p.Text != "" && !p.Thought {
+				return "", nil
+			}
+			if p.FunctionCall == nil {
+				continue
+			}
 			name, _ := p.FunctionCall["name"].(string)
 			args, hasArgs := p.FunctionCall["args"]
 			if !hasArgs || args == nil {
-				return "empty_function_args", map[string]string{"function": name, "reason": "args missing"}
+				if firstEmptyFunction == nil {
+					firstEmptyFunction = map[string]string{"function": name, "reason": "args missing"}
+				}
+				continue
 			}
 			if m, ok := args.(map[string]any); ok && len(m) == 0 {
-				return "empty_function_args", map[string]string{"function": name, "reason": "args is empty object"}
+				if firstEmptyFunction == nil {
+					firstEmptyFunction = map[string]string{"function": name, "reason": "args is empty object"}
+				}
+				continue
 			}
-			return "", nil // function call with args is fine
+			return "", nil
 		}
 	}
-	if !sawText && (c.FinishReason == "STOP" || c.FinishReason == "stop") {
-		return "stop_without_content", map[string]string{"finish_reason": c.FinishReason}
+	if firstEmptyFunction != nil {
+		return "empty_function_args", firstEmptyFunction
 	}
-	return "", nil
+	if sawMeaningfulTerminal {
+		return "", nil
+	}
+	if sawStop {
+		return "stop_without_content", map[string]string{"finish_reason": "STOP"}
+	}
+	return "no_candidates", nil
 }
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -2438,6 +2566,19 @@ func (s *AntigravityNativeGatewayService) TestConnection(
 	}, nil
 }
 
+func (s *AntigravityNativeGatewayService) setAccountErrorIfCurrent(ctx context.Context, account *Account, message string) (bool, error) {
+	if account == nil || s.accountRepo == nil {
+		return false, nil
+	}
+	if conditional, ok := s.accountRepo.(ConditionalAccountErrorRepository); ok {
+		return conditional.SetErrorIfUnchanged(ctx, account.ID, account.UpdatedAt, message)
+	}
+	if err := s.accountRepo.SetError(ctx, account.ID, message); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
 // pauseAccountForValidation sets the account to error status with a
 // human-readable reason that includes the upstream validation URL when
 // available. Called from both TestConnection and ForwardGemini's 403
@@ -2461,9 +2602,14 @@ func (s *AntigravityNativeGatewayService) pauseAccountForValidation(
 	if validationURL != "" {
 		msg += " | validation_url: " + validationURL
 	}
-	if err := s.accountRepo.SetError(ctx, account.ID, msg); err != nil {
+	updated, err := s.setAccountErrorIfCurrent(ctx, account, msg)
+	if err != nil {
 		slog.WarnContext(ctx, "native: SetError(validation_required) failed",
 			slog.Int64("account_id", account.ID), slog.String("error", err.Error()))
+		return
+	}
+	if !updated {
+		slog.InfoContext(ctx, "native: ignored stale validation pause", slog.Int64("account_id", account.ID))
 		return
 	}
 	slog.WarnContext(ctx, "native: account paused — validation required",
@@ -2489,9 +2635,14 @@ func (s *AntigravityNativeGatewayService) pauseAccountForViolation(
 	if upstreamMsg != "" {
 		msg += " | upstream: " + upstreamMsg
 	}
-	if err := s.accountRepo.SetError(ctx, account.ID, msg); err != nil {
+	updated, err := s.setAccountErrorIfCurrent(ctx, account, msg)
+	if err != nil {
 		slog.WarnContext(ctx, "native: SetError(violation) failed",
 			slog.Int64("account_id", account.ID), slog.String("error", err.Error()))
+		return
+	}
+	if !updated {
+		slog.InfoContext(ctx, "native: ignored stale violation pause", slog.Int64("account_id", account.ID))
 		return
 	}
 	slog.WarnContext(ctx, "native: account paused — TOS violation",
@@ -2526,9 +2677,14 @@ func (s *AntigravityNativeGatewayService) pauseAccountForReauth(
 	if upstreamMsg != "" {
 		msg += " | upstream: " + upstreamMsg
 	}
-	if err := s.accountRepo.SetError(ctx, account.ID, msg); err != nil {
+	updated, err := s.setAccountErrorIfCurrent(ctx, account, msg)
+	if err != nil {
 		slog.WarnContext(ctx, "native: SetError(reauth_required) failed",
 			slog.Int64("account_id", account.ID), slog.String("error", err.Error()))
+		return
+	}
+	if !updated {
+		slog.InfoContext(ctx, "native: ignored stale reauth pause", slog.Int64("account_id", account.ID))
 		return
 	}
 	slog.WarnContext(ctx, "native: account paused — re-auth required",
@@ -2797,27 +2953,32 @@ func (s *AntigravityNativeGatewayService) nativeMarkFamilyExhaustedInCache(
 	// 1) Update the USAGE WINDOWS in-memory cache so dashboard renders
 	//    the exhaustion (family bar goes red) — same cache the proactive
 	//    check reads.
+	s.usageCacheMu.Lock()
 	raw, _ := s.usageCache.antigravityCache.Load(account.ID)
 	entry, _ := raw.(*antigravityUsageCache)
-	if entry == nil || entry.usageInfo == nil {
-		now := time.Now()
-		entry = &antigravityUsageCache{
-			usageInfo: &UsageInfo{
-				UpdatedAt:        &now,
-				AntigravityQuota: map[string]*AntigravityModelQuota{},
-			},
-			timestamp: now,
+	now := time.Now()
+	usageInfo := &UsageInfo{UpdatedAt: &now}
+	timestamp := now
+	if entry != nil {
+		timestamp = entry.timestamp
+		if entry.usageInfo != nil {
+			copied := *entry.usageInfo
+			usageInfo = &copied
 		}
 	}
-	if entry.usageInfo.AntigravityQuota == nil {
-		entry.usageInfo.AntigravityQuota = map[string]*AntigravityModelQuota{}
+	quota := make(map[string]*AntigravityModelQuota, len(usageInfo.AntigravityQuota)+1)
+	for name, modelQuota := range usageInfo.AntigravityQuota {
+		quota[name] = modelQuota
 	}
-	entry.usageInfo.AntigravityQuota[modelKey] = &AntigravityModelQuota{
+	quota[modelKey] = &AntigravityModelQuota{
 		Utilization: 100,
 		ResetTime:   resetAt.UTC().Format(time.RFC3339),
 	}
-	entry.timestamp = time.Now()
-	s.usageCache.antigravityCache.Store(account.ID, entry)
+	usageInfo.AntigravityQuota = quota
+	updated := &antigravityUsageCache{usageInfo: usageInfo, timestamp: timestamp}
+	updated.timestamp = now
+	s.usageCache.antigravityCache.Store(account.ID, updated)
+	s.usageCacheMu.Unlock()
 
 	// 2) Mark the account rate-limited at the DB level so
 	//    Account.IsSchedulable() naturally skips it on the NEXT select.

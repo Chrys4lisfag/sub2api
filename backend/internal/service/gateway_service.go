@@ -558,6 +558,53 @@ type ForwardResult struct {
 	ImageSizeBreakdown map[string]int
 }
 
+// FailoverKind is a coarse discriminator for the failure class that produced
+// this failover error. Kept as a small enum so gateway/handler code can
+// branch on failure semantics without string-matching status codes or bodies.
+// Zero value is FailoverKindUnspecified — callers that predate the
+// discriminator keep their previous backoff/retry behavior.
+type FailoverKind uint8
+
+const (
+	// FailoverKindUnspecified — legacy path; discriminator not set.
+	FailoverKindUnspecified FailoverKind = iota
+	// FailoverKindSemanticEmpty — upstream returned an HTTP-successful response
+	// (200 stream or 200 body) that carried no usable content. Prime example:
+	// finishReason=STOP with only thought text / no functionCall. Account
+	// switch is warranted, but rate-limit-style linear backoff would only
+	// worsen client latency for what is effectively a soft schema failure.
+	FailoverKindSemanticEmpty
+	// FailoverKindRateLimit — HTTP 429 / RESOURCE_EXHAUSTED (in body or headers).
+	FailoverKindRateLimit
+	// FailoverKindNetwork — transport / TLS / DNS / read-EOF; safe to retry.
+	FailoverKindNetwork
+	// FailoverKindAuth — invalid_grant / 401 / re-auth required.
+	FailoverKindAuth
+	// FailoverKindUpstream — generic upstream 5xx / 4xx that doesn't fit the
+	// buckets above; kept last so future callers pick a specific bucket first.
+	FailoverKindUpstream
+)
+
+// String returns a stable slog-friendly label for the kind. Used in log
+// fields (`failover_kind=semantic_empty`) so operators can grep without
+// depending on int values.
+func (k FailoverKind) String() string {
+	switch k {
+	case FailoverKindSemanticEmpty:
+		return "semantic_empty"
+	case FailoverKindRateLimit:
+		return "rate_limit"
+	case FailoverKindNetwork:
+		return "network"
+	case FailoverKindAuth:
+		return "auth"
+	case FailoverKindUpstream:
+		return "upstream"
+	default:
+		return "unspecified"
+	}
+}
+
 // UpstreamFailoverError indicates an upstream error that should trigger account failover.
 type UpstreamFailoverError struct {
 	StatusCode             int
@@ -573,6 +620,10 @@ type UpstreamFailoverError struct {
 	// antigravity gateway is the first user; agymimic talks the canonical
 	// Gemini protocol so its 4xx/5xx bodies are already Gemini-shaped).
 	PassthroughVerbatim bool
+	// Kind classifies the failure so the failover loop can pick an appropriate
+	// backoff profile without inspecting StatusCode / ResponseBody. Zero value
+	// = FailoverKindUnspecified, which preserves the legacy backoff paths.
+	Kind FailoverKind
 }
 
 func (e *UpstreamFailoverError) Error() string {

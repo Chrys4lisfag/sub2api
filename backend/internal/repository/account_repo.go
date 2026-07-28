@@ -858,6 +858,35 @@ func (r *accountRepository) SetError(ctx context.Context, id int64, errorMsg str
 	return nil
 }
 
+// SetErrorIfUnchanged atomically persists an upstream auth/validation error
+// only if no account update (notably OAuth recovery) occurred after the
+// request selected its credential snapshot.
+func (r *accountRepository) SetErrorIfUnchanged(ctx context.Context, id int64, observedUpdatedAt time.Time, errorMsg string) (bool, error) {
+	if observedUpdatedAt.IsZero() {
+		return false, nil
+	}
+	updated, err := r.client.Account.Update().
+		Where(
+			dbaccount.IDEQ(id),
+			dbaccount.UpdatedAtEQ(observedUpdatedAt),
+		).
+		SetStatus(service.StatusError).
+		SetErrorMessage(errorMsg).
+		SetSchedulable(false).
+		Save(ctx)
+	if err != nil {
+		return false, err
+	}
+	if updated == 0 {
+		return false, nil
+	}
+	if err := enqueueSchedulerOutbox(ctx, r.sql, service.SchedulerOutboxEventAccountChanged, &id, nil, nil); err != nil {
+		logger.LegacyPrintf("repository.account", "[SchedulerOutbox] enqueue conditional set error failed: account=%d err=%v", id, err)
+	}
+	r.syncSchedulerAccountSnapshot(ctx, id)
+	return true, nil
+}
+
 // syncSchedulerAccountSnapshot 在账号状态变更时主动同步快照到调度器缓存。
 // 当账号被设置为错误、禁用、不可调度或临时不可调度时调用，
 // 确保调度器和粘性会话逻辑能及时感知账号的最新状态，避免继续使用不可用账号。

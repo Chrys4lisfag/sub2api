@@ -776,12 +776,26 @@ func (h *GatewayHandler) Messages(c *gin.Context) {
 			if channelMapping.Mapped {
 				attemptParsedReq.Model = channelMapping.MappedModel
 				if err := attemptParsedReq.ReplaceBody(h.gatewayService.ReplaceModelInBody(attemptParsedReq.Body.Bytes(), channelMapping.MappedModel)); err != nil {
+					if queueRelease != nil {
+						queueRelease()
+					}
+					attemptParsedReq.OnUpstreamAccepted = nil
+					if accountReleaseFunc != nil {
+						accountReleaseFunc()
+					}
 					h.errorResponse(c, http.StatusBadRequest, "invalid_request_error", "Failed to parse request body")
 					return
 				}
 			}
 			// Bedrock CC 兼容：清理 body 专有字段 + 过滤 anthropic-beta header，适用于所有转发路径
 			if err := attemptParsedReq.ReplaceBody(h.gatewayService.ApplyBedrockCCCompat(c, attemptParsedReq.Body.Bytes(), attemptParsedReq.Model, account, apiKey.GroupID)); err != nil {
+				if queueRelease != nil {
+					queueRelease()
+				}
+				attemptParsedReq.OnUpstreamAccepted = nil
+				if accountReleaseFunc != nil {
+					accountReleaseFunc()
+				}
 				h.errorResponse(c, http.StatusBadRequest, "invalid_request_error", "Failed to parse request body")
 				return
 			}

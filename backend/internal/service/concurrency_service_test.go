@@ -27,6 +27,8 @@ type stubConcurrencyCacheForTest struct {
 	waitCountErr         error
 	loadBatch            map[int64]*AccountLoadInfo
 	loadBatchErr         error
+	loadBatchEntered     chan struct{}
+	loadBatchRelease     chan struct{}
 	usersLoadBatch       map[int64]*UserLoadInfo
 	usersLoadErr         error
 	cleanupErr           error
@@ -114,6 +116,15 @@ func (c *stubConcurrencyCacheForTest) DecrementWaitCount(_ context.Context, _ in
 }
 func (c *stubConcurrencyCacheForTest) GetAccountsLoadBatch(_ context.Context, _ []AccountWithConcurrency) (map[int64]*AccountLoadInfo, error) {
 	c.loadBatchCalls.Add(1)
+	if c.loadBatchEntered != nil {
+		select {
+		case c.loadBatchEntered <- struct{}{}:
+		default:
+		}
+	}
+	if c.loadBatchRelease != nil {
+		<-c.loadBatchRelease
+	}
 	return c.loadBatch, c.loadBatchErr
 }
 func (c *stubConcurrencyCacheForTest) GetUsersLoadBatch(_ context.Context, _ []UserWithConcurrency) (map[int64]*UserLoadInfo, error) {
@@ -368,6 +379,65 @@ func TestGetAccountsLoadBatchFresh_BypassesShortTTLCache(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, 4, fresh[int64(1)].CurrentConcurrency)
 	require.Equal(t, int64(2), cache.loadBatchCalls.Load())
+}
+
+func TestGetAccountsLoadBatch_DoesNotStoreFetchInvalidatedInFlight(t *testing.T) {
+	entered := make(chan struct{}, 1)
+	release := make(chan struct{})
+	cache := &stubConcurrencyCacheForTest{
+		loadBatch:        map[int64]*AccountLoadInfo{1: {AccountID: 1, CurrentConcurrency: 1}},
+		loadBatchEntered: entered,
+		loadBatchRelease: release,
+	}
+	svc := NewConcurrencyService(cache)
+	svc.SetAccountLoadBatchCacheTTL(time.Second)
+	accounts := []AccountWithConcurrency{{ID: 1, MaxConcurrency: 5}}
+	done := make(chan error, 1)
+	go func() {
+		_, err := svc.GetAccountsLoadBatch(context.Background(), accounts)
+		done <- err
+	}()
+	<-entered
+	svc.InvalidateAccountLoadCacheForAccount(1)
+	close(release)
+	require.NoError(t, <-done)
+
+	cache.loadBatchRelease = nil
+	_, err := svc.GetAccountsLoadBatch(context.Background(), accounts)
+	require.NoError(t, err)
+	require.Equal(t, int64(2), cache.loadBatchCalls.Load(), "invalidated in-flight result must not repopulate cache")
+}
+
+func TestAcquireAccountSlot_InvalidatesEveryCachedBatchContainingAccount(t *testing.T) {
+	cache := &stubConcurrencyCacheForTest{
+		acquireResult: true,
+		loadBatch: map[int64]*AccountLoadInfo{
+			1: {AccountID: 1, CurrentConcurrency: 1, LoadRate: 20},
+			2: {AccountID: 2, CurrentConcurrency: 0, LoadRate: 0},
+		},
+	}
+	svc := NewConcurrencyService(cache)
+	svc.SetAccountLoadBatchCacheTTL(time.Second)
+	one := []AccountWithConcurrency{{ID: 1, MaxConcurrency: 5}}
+	two := []AccountWithConcurrency{{ID: 1, MaxConcurrency: 5}, {ID: 2, MaxConcurrency: 5}}
+	_, err := svc.GetAccountsLoadBatch(context.Background(), one)
+	require.NoError(t, err)
+	_, err = svc.GetAccountsLoadBatch(context.Background(), two)
+	require.NoError(t, err)
+	require.Equal(t, int64(2), cache.loadBatchCalls.Load())
+
+	cache.loadBatch[1] = &AccountLoadInfo{AccountID: 1, CurrentConcurrency: 4, LoadRate: 80}
+	result, err := svc.AcquireAccountSlot(context.Background(), 1, 5)
+	require.NoError(t, err)
+	require.True(t, result.Acquired)
+	freshOne, err := svc.GetAccountsLoadBatch(context.Background(), one)
+	require.NoError(t, err)
+	freshTwo, err := svc.GetAccountsLoadBatch(context.Background(), two)
+	require.NoError(t, err)
+	require.Equal(t, 4, freshOne[int64(1)].CurrentConcurrency)
+	require.Equal(t, 4, freshTwo[int64(1)].CurrentConcurrency)
+	require.Equal(t, int64(4), cache.loadBatchCalls.Load())
+	result.ReleaseFunc()
 }
 
 func TestIncrementWaitCount_Success(t *testing.T) {

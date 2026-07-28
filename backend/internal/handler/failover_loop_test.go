@@ -175,6 +175,24 @@ func TestHandleFailoverError_BasicSwitch(t *testing.T) {
 		require.Less(t, elapsed, 3*time.Second)
 	})
 
+	t.Run("semantic empty switch bypasses linear delay", func(t *testing.T) {
+		originalBackoff := semanticEmptyBackoffFn
+		semanticEmptyBackoffFn = func() time.Duration { return 0 }
+		t.Cleanup(func() { semanticEmptyBackoffFn = originalBackoff })
+
+		mock := &mockTempUnscheduler{}
+		fs := NewFailoverState(20, false)
+		fs.SwitchCount = 10
+		err := newTestFailoverErr(502, false, false)
+		err.Kind = service.FailoverKindSemanticEmpty
+
+		start := time.Now()
+		action := fs.HandleFailoverError(context.Background(), mock, 201, service.PlatformAntigravityNative, err)
+		require.Equal(t, FailoverContinue, action)
+		require.Less(t, time.Since(start), 100*time.Millisecond)
+		require.Equal(t, 11, fs.SwitchCount)
+	})
+
 	t.Run("连续切换直到耗尽", func(t *testing.T) {
 		mock := &mockTempUnscheduler{}
 		fs := NewFailoverState(2, false)

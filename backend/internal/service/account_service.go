@@ -90,6 +90,14 @@ type AccountRepository interface {
 	ListShadowsByParent(ctx context.Context, parentID int64) ([]*Account, error)
 }
 
+// ConditionalAccountErrorRepository atomically pauses an account only when
+// the caller's credential/status snapshot is still current. OAuth recovery
+// updates UpdatedAt, so delayed upstream failures cannot re-disable a
+// recovered account.
+type ConditionalAccountErrorRepository interface {
+	SetErrorIfUnchanged(ctx context.Context, id int64, observedUpdatedAt time.Time, errorMsg string) (bool, error)
+}
+
 // AccountBulkUpdate describes the fields that can be updated in a bulk operation.
 // Nil pointers mean "do not change".
 type AccountBulkUpdate struct {

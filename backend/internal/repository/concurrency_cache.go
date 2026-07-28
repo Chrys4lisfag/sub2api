@@ -44,8 +44,9 @@ const (
 	userActiveIndexKey    = "concurrency:user:active_index"    // ZSET member=userID, score=expireAtUnixSeconds
 
 	// 后台清理只按批处理索引候选，避免单次任务占用 Redis 太久。
-	activeIndexCleanupBatchSize  = 1000
-	activeIndexPipelineChunkSize = 500
+	activeIndexCleanupBatchSize    = 1000
+	activeIndexPipelineChunkSize   = 500
+	maxStaleSlotWarningsPerCleanup = 20
 
 	// 一次性迁移 marker：活跃索引机制上线前遗留的等待计数键无法被索引发现，
 	// 且有流量时 TTL 会被不断刷新，必须清扫一次。marker 存在即代表已完成。
@@ -320,9 +321,12 @@ func (c *concurrencyCache) touchActiveIndexAt(ctx context.Context, indexKey stri
 	if c == nil || c.rdb == nil || id <= 0 || expireAt <= 0 {
 		return
 	}
-	if err := c.rdb.ZAdd(ctx, indexKey, redis.Z{
-		Score:  float64(expireAt),
-		Member: strconv.FormatInt(id, 10),
+	if err := c.rdb.ZAddArgs(ctx, indexKey, redis.ZAddArgs{
+		GT: true,
+		Members: []redis.Z{{
+			Score:  float64(expireAt),
+			Member: strconv.FormatInt(id, 10),
+		}},
 	}).Err(); err != nil {
 		logger.LegacyPrintf("repository.concurrency", "Warning: touch active index %s for %d failed: %v", indexKey, id, err)
 	}
@@ -349,16 +353,21 @@ func (c *concurrencyCache) refreshActiveIndex(ctx context.Context, indexKey stri
 		return
 	}
 
+	// Remove first, then rebuild from current load. This ordering is race-safe:
+	// an acquire before removal is observed by the following read and re-added;
+	// an acquire after removal performs its own monotonic touch. Reading zero
+	// before ZREM would let a concurrent acquire's fresh touch be erased.
+	member := strconv.FormatInt(id, 10)
+	if err := c.rdb.ZRem(ctx, indexKey, member).Err(); err != nil {
+		logger.LegacyPrintf("repository.concurrency", "Warning: remove active index member %s from %s failed: %v", member, indexKey, err)
+		return
+	}
 	load, err := c.readActiveLoadForKey(ctx, id, slotKey, waitKey, now)
 	if err != nil {
 		logger.LegacyPrintf("repository.concurrency", "Warning: refresh active index %s for %d failed: %v", indexKey, id, err)
 		return
 	}
-	member := strconv.FormatInt(id, 10)
 	if load.slotCount == 0 && load.waitCount <= 0 {
-		if err := c.rdb.ZRem(ctx, indexKey, member).Err(); err != nil {
-			logger.LegacyPrintf("repository.concurrency", "Warning: remove active index member %s from %s failed: %v", member, indexKey, err)
-		}
 		return
 	}
 
@@ -428,6 +437,7 @@ func (c *concurrencyCache) readIndexLoads(ctx context.Context, spec slotIndexSpe
 	}
 
 	cutoffTime := now - int64(c.slotTTLSeconds)
+	staleAlertCount := 0
 	for start := 0; start < len(candidates); start += activeIndexPipelineChunkSize {
 		end := start + activeIndexPipelineChunkSize
 		if end > len(candidates) {
@@ -438,16 +448,21 @@ func (c *concurrencyCache) readIndexLoads(ctx context.Context, spec slotIndexSpe
 		pipe := c.rdb.Pipeline()
 		type loadCmd struct {
 			activeIndexLoad
-			zcardCmd *redis.IntCmd
-			getCmd   *redis.StringCmd
+			oldestCmd  *redis.ZSliceCmd
+			removedCmd *redis.IntCmd
+			zcardCmd   *redis.IntCmd
+			getCmd     *redis.StringCmd
 		}
 		cmds := make([]loadCmd, 0, len(chunk))
 		for _, candidate := range chunk {
 			slotKey := spec.slotKey(candidate.id)
 			waitKey := spec.waitKey(candidate.id)
-			pipe.ZRemRangeByScore(ctx, slotKey, "-inf", strconv.FormatInt(cutoffTime, 10))
+			oldestCmd := pipe.ZRangeWithScores(ctx, slotKey, 0, 0)
+			removedCmd := pipe.ZRemRangeByScore(ctx, slotKey, "-inf", strconv.FormatInt(cutoffTime, 10))
 			cmds = append(cmds, loadCmd{
 				activeIndexLoad: candidate,
+				oldestCmd:       oldestCmd,
+				removedCmd:      removedCmd,
 				zcardCmd:        pipe.ZCard(ctx, slotKey),
 				getCmd:          pipe.Get(ctx, waitKey),
 			})
@@ -456,6 +471,16 @@ func (c *concurrencyCache) readIndexLoads(ctx context.Context, spec slotIndexSpe
 			return nil, nil, fmt.Errorf("pipeline exec: %w", err)
 		}
 		for _, cmd := range cmds {
+			if spec.indexKey == accountActiveIndexKey && cmd.removedCmd.Val() > 0 {
+				oldestAgeSeconds := int64(c.slotTTLSeconds)
+				if oldest := cmd.oldestCmd.Val(); len(oldest) > 0 {
+					oldestAgeSeconds = now - int64(oldest[0].Score)
+				}
+				if staleAlertCount < maxStaleSlotWarningsPerCleanup {
+					logger.LegacyPrintf("repository.concurrency", "Warning: cleaned stale account slots account_id=%d removed=%d oldest_age_seconds=%d slot_ttl_seconds=%d", cmd.id, cmd.removedCmd.Val(), oldestAgeSeconds, c.slotTTLSeconds)
+				}
+				staleAlertCount++
+			}
 			waitCount := 0
 			if v, err := cmd.getCmd.Int(); err == nil && v > 0 {
 				waitCount = v
@@ -467,6 +492,9 @@ func (c *concurrencyCache) readIndexLoads(ctx context.Context, spec slotIndexSpe
 				waitCount: waitCount,
 			})
 		}
+	}
+	if spec.indexKey == accountActiveIndexKey && staleAlertCount > maxStaleSlotWarningsPerCleanup {
+		logger.LegacyPrintf("repository.concurrency", "Warning: cleaned stale account slots for %d additional accounts (per-cycle detail limit=%d)", staleAlertCount-maxStaleSlotWarningsPerCleanup, maxStaleSlotWarningsPerCleanup)
 	}
 
 	return loads, staleMembers, nil
@@ -904,36 +932,13 @@ func (c *concurrencyCache) reconcileExpiredIndexCandidates(ctx context.Context, 
 	return nil
 }
 
-// CleanupStaleProcessSlots 启动时清理非当前进程前缀的槽位。
-// 清理范围来自活跃索引（含 score 已过期的成员——它们往往正是崩溃进程留下的残留），
-// 避免在 Redis 上 SCAN 全部 concurrency:* 键；另有一次性迁移清扫兜底索引机制上线前的遗留等待计数。
-// API Key 槽位（concurrency:api_key:*）是 stats-only 数据：每次 Track/读取都会按分数
-// 裁剪过期成员，key 自带 TTL，可在一个 slot TTL 内自愈，因此不参与启动清理。
-func (c *concurrencyCache) CleanupStaleProcessSlots(ctx context.Context, activeRequestPrefix string) error {
-	if activeRequestPrefix == "" {
-		return nil
-	}
-	if err := c.sweepLegacyWaitKeysOnce(ctx); err != nil {
-		return err
-	}
-	now, err := c.redisUnixSeconds(ctx)
-	if err != nil {
-		return err
-	}
-
-	accountMembers, err := c.allIndexMembers(ctx, accountActiveIndexKey)
-	if err != nil {
-		return err
-	}
-	if err := c.cleanupStaleProcessSlotsForIndex(ctx, accountSlotIndex, accountMembers, activeRequestPrefix, now); err != nil {
-		return err
-	}
-
-	userMembers, err := c.allIndexMembers(ctx, userActiveIndexKey)
-	if err != nil {
-		return err
-	}
-	return c.cleanupStaleProcessSlotsForIndex(ctx, userSlotIndex, userMembers, activeRequestPrefix, now)
+// CleanupStaleProcessSlots performs expiration-based startup reconciliation.
+// Request prefixes identify processes but do not prove that another process is
+// dead; deleting a different prefix can remove live slots in a multi-instance
+// deployment and violate the concurrency cap. Slot timestamps/TTL are the sole
+// safe ownership-independent cleanup evidence.
+func (c *concurrencyCache) CleanupStaleProcessSlots(ctx context.Context, _ string) error {
+	return c.CleanupExpiredAccountSlotKeys(ctx)
 }
 
 // sweepLegacyWaitKeysOnce 一次性清扫活跃索引机制上线前遗留的等待计数键。
