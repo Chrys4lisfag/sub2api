@@ -413,7 +413,19 @@
     <AccountStatsModal :show="showStats" :account="statsAcc" @close="closeStatsModal" />
     <ScheduledTestsPanel :show="showSchedulePanel" :account-id="scheduleAcc?.id ?? null" :model-options="scheduleModelOptions" @close="closeSchedulePanel" />
     <AccountActionMenu :show="menu.show" :account="menu.acc" :position="menu.pos" @close="menu.show = false" @test="handleTest" @stats="handleViewStats" @schedule="handleSchedule" @reauth="handleReAuth" @refresh-token="handleRefresh" @recover-state="handleRecoverState" @reset-quota="handleResetQuota" @set-privacy="handleSetPrivacy" @launch-browser="handleLaunchBrowser" @create-spark-shadow="handleCreateSparkShadow" />
-    <BrowserLoginModal :show="showLaunchBrowser" mode="launch" :proxy-id="launchAcc?.proxy_id ?? null" :profile-id="launchProfileId" :account-name="launchAcc?.name" @profile-created="onLaunchProfileCreated" @close="showLaunchBrowser = false" />
+    <BrowserLoginModal
+      :show="showLaunchBrowser"
+      mode="launch"
+      :proxy-id="launchAcc?.proxy_id ?? null"
+      :profile-id="launchProfileId"
+      :account-name="launchAcc?.name"
+      :account-id="launchAcc?.id"
+      :initial-google-login="launchGoogleCredential('google_login')"
+      :initial-google-password="launchGoogleCredential('google_password')"
+      :initial-google-2fa-import-code="launchGoogleCredential('google_2fa_import_code')"
+      @profile-created="onLaunchProfileCreated"
+      @close="showLaunchBrowser = false"
+    />
     <SyncFromCrsModal :show="showSync" @close="showSync = false" @synced="reload" />
     <ImportDataModal :show="showImportData" @close="showImportData = false" @imported="handleDataImported" />
     <BulkEditAccountModal
@@ -558,6 +570,10 @@ const launchAcc = ref<Account | null>(null)
 const launchProfileId = computed(
   () => (launchAcc.value?.extra as Record<string, unknown> | undefined)?.browser_profile_id as string | undefined
 )
+const launchGoogleCredential = (key: string): string => {
+  const value = launchAcc.value?.credentials?.[key]
+  return typeof value === 'string' ? value : ''
+}
 const showSchedulePanel = ref(false)
 const scheduleAcc = ref<Account | null>(null)
 const scheduleModelOptions = ref<SelectOption[]>([])

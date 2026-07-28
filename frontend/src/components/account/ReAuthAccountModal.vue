@@ -191,6 +191,10 @@
     :show="showBrowserLogin"
     :proxy-id="account?.proxy_id ?? null"
     :profile-id="savedBrowserProfileId"
+    :account-id="account?.id"
+    :initial-google-login="accountGoogleCredential('google_login')"
+    :initial-google-password="accountGoogleCredential('google_password')"
+    :initial-google-2fa-import-code="accountGoogleCredential('google_2fa_import_code')"
     @authorized="onBrowserReauthorized"
     @close="showBrowserLogin = false"
   />
@@ -253,6 +257,10 @@ const savedBrowserProfileId = computed(() => {
   const v = extra?.browser_profile_id
   return typeof v === 'string' ? v : undefined
 })
+const accountGoogleCredential = (key: string): string => {
+  const value = props.account?.credentials?.[key]
+  return typeof value === 'string' ? value : ''
+}
 
 // Refs
 const oauthFlowRef = ref<OAuthFlowExposed | null>(null)

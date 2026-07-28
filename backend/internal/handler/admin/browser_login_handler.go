@@ -34,6 +34,13 @@ type BrowserLoginStartRequest struct {
 	ProfileID string `json:"profile_id"`
 }
 
+type GoogleAutologinRequest struct {
+	AccountID           *int64 `json:"account_id"`
+	Login               string `json:"login" binding:"required"`
+	Password            string `json:"password" binding:"required"`
+	TwoFactorImportCode string `json:"two_factor_import_code"`
+}
+
 // StartSession — POST /api/v1/admin/browser-login/session
 func (h *BrowserLoginHandler) StartSession(c *gin.Context) {
 	var req BrowserLoginStartRequest
@@ -79,6 +86,46 @@ func (h *BrowserLoginHandler) Result(c *gin.Context) {
 		return
 	}
 	response.Success(c, res)
+}
+
+// RunGoogleAutologin — POST /api/v1/admin/browser-login/google-autologin
+func (h *BrowserLoginHandler) RunGoogleAutologin(c *gin.Context) {
+	sessionID := strings.TrimSpace(c.GetHeader("X-Browser-Session-ID"))
+	if sessionID == "" {
+		response.BadRequest(c, "X-Browser-Session-ID header is required")
+		return
+	}
+	var req GoogleAutologinRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		response.BadRequest(c, "请求无效")
+		return
+	}
+	status, err := h.svc.RunGoogleAutologin(c.Request.Context(), sessionID, &service.GoogleAutologinInput{
+		AccountID:           req.AccountID,
+		Login:               req.Login,
+		Password:            req.Password,
+		TwoFactorImportCode: req.TwoFactorImportCode,
+	})
+	if err != nil {
+		response.BadRequest(c, err.Error())
+		return
+	}
+	response.Success(c, status)
+}
+
+// GetGoogleAutologinStatus — GET /api/v1/admin/browser-login/google-autologin
+func (h *BrowserLoginHandler) GetGoogleAutologinStatus(c *gin.Context) {
+	sessionID := strings.TrimSpace(c.GetHeader("X-Browser-Session-ID"))
+	if sessionID == "" {
+		response.BadRequest(c, "X-Browser-Session-ID header is required")
+		return
+	}
+	status, err := h.svc.GoogleAutologinStatus(c.Request.Context(), sessionID)
+	if err != nil {
+		response.BadRequest(c, err.Error())
+		return
+	}
+	response.Success(c, status)
 }
 
 // StopSession — DELETE /api/v1/admin/browser-login/session

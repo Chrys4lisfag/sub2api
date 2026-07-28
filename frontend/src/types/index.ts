@@ -842,6 +842,11 @@ export interface GeminiCredentials {
   scope?: string
   expires_at?: string
   model_mapping?: Record<string, string>
+
+  // Browser-assisted Google activation (intentionally returned for admin reuse)
+  google_login?: string
+  google_password?: string
+  google_2fa_import_code?: string
 }
 
 export interface TempUnschedulableRule {
@@ -871,10 +876,10 @@ export interface Account {
   notes?: string | null
   platform: AccountPlatform
   type: AccountType
-  // 后端响应里 credentials 已脱敏：access_token / refresh_token / id_token /
-  // api_key / session_key / cookie / aws_secret_access_key / aws_session_token /
-  // service_account_json / service_account / private_key 不会出现，
-  // 改为通过 credentials_status.has_<key> 暴露存在性。
+  // Backend responses redact bearer/API/session secrets and expose their presence
+  // through credentials_status. Browser-assisted Google activation values
+  // (google_login/google_password/google_2fa_import_code) intentionally round-trip
+  // so an admin can reopen the VNC workflow and view/reuse them.
   credentials?: Record<string, unknown>
   credentials_status?: Record<string, boolean>
   // Extra fields including Codex usage, OpenAI compact capability, and model-level rate limits.

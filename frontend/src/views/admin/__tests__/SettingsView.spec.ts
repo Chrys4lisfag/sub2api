@@ -315,6 +315,7 @@ const baseSettingsResponse = {
   password_reset_enabled: false,
   totp_enabled: false,
   totp_encryption_key_configured: false,
+  herosms_api_key_configured: false,
   default_balance: 0,
   default_concurrency: 1,
   default_subscriptions: [],
@@ -594,6 +595,32 @@ describe("admin SettingsView payment visible method controls", () => {
     });
     fetchPublicSettings.mockResolvedValue(undefined);
     adminSettingsFetch.mockResolvedValue(undefined);
+  });
+
+  it("shows configured HeroSMS state and only submits a newly entered key", async () => {
+    localeRef.value = "en-US";
+    getSettings.mockResolvedValueOnce({
+      ...baseSettingsResponse,
+      herosms_api_key_configured: true,
+    });
+    const wrapper = mountView();
+    await flushPromises();
+    await openSecurityTab(wrapper);
+
+    const input = wrapper.get("#herosms-api-key");
+    expect((input.element as HTMLInputElement).value).toBe("");
+    expect(input.attributes("placeholder")).toBe(
+      "Key configured. Leave empty to keep the current value.",
+    );
+
+    await wrapper.find("form").trigger("submit.prevent");
+    await flushPromises();
+    expect(updateSettings.mock.calls.at(-1)?.[0]?.herosms_api_key).toBeUndefined();
+
+    await input.setValue("hero-secret");
+    await wrapper.find("form").trigger("submit.prevent");
+    await flushPromises();
+    expect(updateSettings.mock.calls.at(-1)?.[0]?.herosms_api_key).toBe("hero-secret");
   });
 
   it("does not render legacy visible payment method controls", async () => {

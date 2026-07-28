@@ -38,6 +38,8 @@ type SystemSettings struct {
 	TurnstileSiteKey             string
 	TurnstileSecretKey           string
 	TurnstileSecretKeyConfigured bool
+	HeroSMSAPIKey                string
+	HeroSMSAPIKeyConfigured      bool
 	APIKeyACLTrustForwardedIP    bool
 
 	// LinuxDo Connect OAuth 登录

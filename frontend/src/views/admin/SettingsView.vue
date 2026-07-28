@@ -1580,6 +1580,40 @@
             </div>
           </div>
 
+          <!-- Browser-assisted Google activation settings -->
+          <div class="card">
+            <div class="border-b border-gray-100 px-6 py-4 dark:border-dark-700">
+              <h2 class="text-lg font-semibold text-gray-900 dark:text-white">
+                {{ localText("Google 激活自动化", "Google activation automation") }}
+              </h2>
+              <p class="mt-1 text-sm text-gray-500 dark:text-gray-400">
+                {{ localText("配置 HeroSMS 以处理自动登录中的短信验证。", "Configure HeroSMS for SMS verification during automated Google login.") }}
+              </p>
+            </div>
+            <div class="p-6">
+              <label for="herosms-api-key" class="input-label">HeroSMS API key</label>
+              <input
+                id="herosms-api-key"
+                v-model="form.herosms_api_key"
+                type="password"
+                class="input font-mono text-sm"
+                autocomplete="new-password"
+                :placeholder="
+                  form.herosms_api_key_configured
+                    ? localText('密钥已配置，留空以保留当前值。', 'Key configured. Leave empty to keep the current value.')
+                    : localText('输入 HeroSMS API 密钥', 'Enter HeroSMS API key')
+                "
+              />
+              <p class="mt-1.5 text-xs text-gray-500 dark:text-gray-400">
+                {{
+                  form.herosms_api_key_configured
+                    ? localText('现有密钥不会返回到浏览器。', 'Existing key is not returned to the browser.')
+                    : localText('密钥仅在保存时发送。', 'Key is sent only when saving.')
+                }}
+              </p>
+            </div>
+          </div>
+
           <!-- API Key IP ACL Settings -->
           <div class="card">
             <div
@@ -8131,6 +8165,7 @@ type SettingsForm = Omit<
   | "wechat_connect_mobile_enabled"
 > & {
   smtp_password: string;
+  herosms_api_key: string;
   turnstile_secret_key: string;
   linuxdo_connect_client_secret: string;
   dingtalk_connect_client_secret: string;
@@ -8171,6 +8206,8 @@ const form = reactive<SettingsForm>({
   password_reset_enabled: false,
   totp_enabled: false,
   totp_encryption_key_configured: false,
+  herosms_api_key: "",
+  herosms_api_key_configured: false,
   login_agreement_enabled: false,
   login_agreement_mode: "modal",
   login_agreement_updated_at: "2026-03-31",
@@ -9212,6 +9249,7 @@ async function loadSettings() {
     );
     registrationEmailSuffixWhitelistDraft.value = "";
     form.smtp_password = "";
+    form.herosms_api_key = "";
     smtpPasswordManuallyEdited.value = false;
     form.turnstile_secret_key = "";
     form.linuxdo_connect_client_secret = "";
@@ -9564,6 +9602,7 @@ async function saveSettings() {
       smtp_port: form.smtp_port,
       smtp_username: form.smtp_username,
       smtp_password: form.smtp_password || undefined,
+      herosms_api_key: form.herosms_api_key || undefined,
       smtp_from_email: form.smtp_from_email,
       smtp_from_name: form.smtp_from_name,
       smtp_use_tls: form.smtp_use_tls,
@@ -9842,6 +9881,7 @@ async function saveSettings() {
     );
     registrationEmailSuffixWhitelistDraft.value = "";
     form.smtp_password = "";
+    form.herosms_api_key = "";
     smtpPasswordManuallyEdited.value = false;
     form.turnstile_secret_key = "";
     form.linuxdo_connect_client_secret = "";

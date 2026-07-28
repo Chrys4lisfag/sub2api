@@ -266,6 +266,7 @@ const (
 	SettingKeyBrowserLoginUser   = "browser_login_user"
 	SettingKeyBrowserLoginPass   = "browser_login_pass"
 	SettingKeyBrowserLoginVNCURL = "browser_login_vnc_url"
+	SettingKeyHeroSMSAPIKey      = "herosms_api_key"
 
 	// OEM设置
 	SettingKeySiteName                    = "site_name"                     // 网站名称

@@ -41,10 +41,11 @@ type browserLoginCreds struct {
 type BrowserLoginService struct {
 	settingService *SettingService
 	proxyRepo      ProxyRepository
+	accountRepo    AccountRepository
 }
 
-func NewBrowserLoginService(settingService *SettingService, proxyRepo ProxyRepository) *BrowserLoginService {
-	return &BrowserLoginService{settingService: settingService, proxyRepo: proxyRepo}
+func NewBrowserLoginService(settingService *SettingService, proxyRepo ProxyRepository, accountRepo AccountRepository) *BrowserLoginService {
+	return &BrowserLoginService{settingService: settingService, proxyRepo: proxyRepo, accountRepo: accountRepo}
 }
 
 // BrowserLoginStartInput describes the admin's ask when opening the modal.
@@ -74,6 +75,23 @@ type BrowserLoginResult struct {
 type BrowserLoginNavigateResult struct {
 	OK      bool   `json:"ok"`
 	Warning string `json:"warning,omitempty"`
+}
+
+// GoogleAutologinInput contains private credentials used by browser2webfront.
+// Values are intentionally never included in errors or logs.
+type GoogleAutologinInput struct {
+	AccountID           *int64
+	Login               string
+	Password            string
+	TwoFactorImportCode string
+}
+
+// GoogleAutologinStatus is the only upstream state exposed to admin callers.
+// Unknown upstream fields are discarded during JSON decoding.
+type GoogleAutologinStatus struct {
+	Status  string `json:"status"`
+	Message string `json:"message,omitempty"`
+	Error   string `json:"error,omitempty"`
 }
 
 // StartSession opens the single browser session, egressing through the account's
@@ -144,6 +162,84 @@ func (s *BrowserLoginService) Result(ctx context.Context, sessionID string) (*Br
 	}
 	var out BrowserLoginResult
 	if err := s.doJSON(ctx, creds, http.MethodGet, "/session/result", sessionID, nil, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+// RunGoogleAutologin persists reusable account credentials, then starts the
+// private browser2webfront automation run.
+func (s *BrowserLoginService) RunGoogleAutologin(ctx context.Context, sessionID string, input *GoogleAutologinInput) (*GoogleAutologinStatus, error) {
+	sessionID = strings.TrimSpace(sessionID)
+	if sessionID == "" {
+		return nil, fmt.Errorf("browser session header is required")
+	}
+	if input == nil || strings.TrimSpace(input.Login) == "" || strings.TrimSpace(input.Password) == "" {
+		return nil, fmt.Errorf("login and password are required")
+	}
+	if s.settingService == nil {
+		return nil, fmt.Errorf("HeroSMS API key is not configured")
+	}
+	heroSMSAPIKey := strings.TrimSpace(s.settingService.GetHeroSMSAPIKey(ctx))
+	if heroSMSAPIKey == "" {
+		return nil, fmt.Errorf("HeroSMS API key is not configured")
+	}
+
+	if input.AccountID != nil {
+		if *input.AccountID <= 0 {
+			return nil, fmt.Errorf("account_id must be positive")
+		}
+		if s.accountRepo == nil {
+			return nil, fmt.Errorf("account persistence is unavailable")
+		}
+		account, err := s.accountRepo.GetByID(ctx, *input.AccountID)
+		if err != nil {
+			return nil, fmt.Errorf("load account: %w", err)
+		}
+		if account == nil {
+			return nil, fmt.Errorf("account not found")
+		}
+		credentials := shallowCopyMap(account.Credentials)
+		if credentials == nil {
+			credentials = make(map[string]any)
+		}
+		credentials["google_login"] = input.Login
+		credentials["google_password"] = input.Password
+		credentials["google_2fa_import_code"] = input.TwoFactorImportCode
+		if err := persistAccountCredentials(ctx, s.accountRepo, account, credentials); err != nil {
+			return nil, fmt.Errorf("save account credentials: %w", err)
+		}
+	}
+
+	creds, err := s.browserLoginCreds(ctx)
+	if err != nil {
+		return nil, err
+	}
+	payload := map[string]any{
+		"login":                  input.Login,
+		"password":               input.Password,
+		"two_factor_import_code": input.TwoFactorImportCode,
+		"herosms_api_key":        heroSMSAPIKey,
+	}
+	var out GoogleAutologinStatus
+	if err := s.doJSON(ctx, creds, http.MethodPost, "/session/google-autologin", sessionID, payload, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+// GoogleAutologinStatus returns sanitized automation state only.
+func (s *BrowserLoginService) GoogleAutologinStatus(ctx context.Context, sessionID string) (*GoogleAutologinStatus, error) {
+	sessionID = strings.TrimSpace(sessionID)
+	if sessionID == "" {
+		return nil, fmt.Errorf("browser session header is required")
+	}
+	creds, err := s.browserLoginCreds(ctx)
+	if err != nil {
+		return nil, err
+	}
+	var out GoogleAutologinStatus
+	if err := s.doJSON(ctx, creds, http.MethodGet, "/session/google-autologin", sessionID, nil, &out); err != nil {
 		return nil, err
 	}
 	return &out, nil

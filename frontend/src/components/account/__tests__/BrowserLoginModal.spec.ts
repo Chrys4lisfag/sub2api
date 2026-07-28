@@ -7,6 +7,8 @@ const api = vi.hoisted(() => ({
   startSession: vi.fn(),
   getResult: vi.fn(),
   stopSession: vi.fn(),
+  runGoogleAutologin: vi.fn(),
+  getGoogleAutologinStatus: vi.fn(),
   navigate: vi.fn()
 }))
 
@@ -65,9 +67,19 @@ function deferred<T>() {
   return { promise, resolve, reject }
 }
 
-function mountModal() {
+type ModalOverrides = Partial<{
+  profileId: string
+  mode: 'login' | 'launch'
+  accountName: string
+  accountId: number
+  initialGoogleLogin: string
+  initialGooglePassword: string
+  initialGoogle2faImportCode: string
+}>
+
+function mountModal(props: ModalOverrides = {}) {
   return mount(BrowserLoginModal, {
-    props: { show: false, proxyId: null },
+    props: { show: false, proxyId: null, ...props },
     global: { stubs: { BaseDialog: BaseDialogStub } }
   })
 }
@@ -78,6 +90,8 @@ describe('BrowserLoginModal lifecycle', () => {
     api.startSession.mockResolvedValue(session)
     api.getResult.mockResolvedValue({ callback_url: null, code: null, current_url: 'about:blank' })
     api.stopSession.mockResolvedValue({ ok: true })
+    api.runGoogleAutologin.mockResolvedValue({ status: 'running' })
+    api.getGoogleAutologinStatus.mockResolvedValue({ status: 'succeeded' })
     oauth.generateAuthUrl.mockResolvedValue(false)
     oauth.exchangeAuthCode.mockResolvedValue(null)
     oauth.buildCredentials.mockReturnValue({})
@@ -202,6 +216,96 @@ describe('BrowserLoginModal lifecycle', () => {
 
     expect(wrapper.emitted('authorized')).toBeUndefined()
     expect(wrapper.emitted('close')).toHaveLength(1)
+    wrapper.unmount()
+  })
+
+  it('prefills and reveals saved Google credentials', async () => {
+    const wrapper = mountModal({
+      initialGoogleLogin: 'saved@example.com',
+      initialGooglePassword: 'saved-password',
+      initialGoogle2faImportCode: 'JBSWY3DPEHPK3PXP'
+    })
+
+    await wrapper.setProps({ show: true })
+    await flushPromises()
+
+    const login = wrapper.get('#browser-google-login')
+    const password = wrapper.get('#browser-google-password')
+    const importCode = wrapper.get('#browser-google-2fa')
+    expect((login.element as HTMLInputElement).value).toBe('saved@example.com')
+    expect((password.element as HTMLInputElement).value).toBe('saved-password')
+    expect(password.attributes('type')).toBe('password')
+    expect((importCode.element as HTMLInputElement).value).toBe('JBSWY3DPEHPK3PXP')
+    expect(importCode.attributes('type')).toBe('password')
+
+    await wrapper.get('[aria-label="Show Google password"]').trigger('click')
+    await wrapper.get('[aria-label="Show 2FA import code"]').trigger('click')
+    expect(password.attributes('type')).toBe('text')
+    expect(importCode.attributes('type')).toBe('text')
+    wrapper.unmount()
+  })
+
+  it('posts the account-scoped autologin body and polls sanitized status', async () => {
+    vi.useFakeTimers()
+    const wrapper = mountModal({ accountId: 42 })
+    await wrapper.setProps({ show: true })
+    await flushPromises()
+    await wrapper.get('#browser-google-login').setValue('admin@example.com')
+    await wrapper.get('#browser-google-password').setValue('secret-password')
+    await wrapper.get('#browser-google-2fa').setValue('IMPORT-CODE')
+
+    const run = wrapper.findAll('button').find((button) => button.text() === 'Run Google activation')
+    await run!.trigger('click')
+    await flushPromises()
+
+    expect(api.runGoogleAutologin).toHaveBeenCalledWith('session-a', {
+      account_id: 42,
+      login: 'admin@example.com',
+      password: 'secret-password',
+      two_factor_import_code: 'IMPORT-CODE'
+    })
+    expect(wrapper.get('[data-testid="google-autologin-status"]').text()).toBe(
+      'Google activation running.'
+    )
+
+    await vi.advanceTimersByTimeAsync(1500)
+    await flushPromises()
+    expect(api.getGoogleAutologinStatus).toHaveBeenCalledWith('session-a')
+    expect(wrapper.get('[data-testid="google-autologin-status"]').text()).toBe(
+      'Google activation succeeded.'
+    )
+    expect(wrapper.text()).not.toContain('secret-password')
+    expect(wrapper.text()).not.toContain('IMPORT-CODE')
+    wrapper.unmount()
+    vi.useRealTimers()
+  })
+
+  it('merges Google fields into credentials emitted after OAuth completion', async () => {
+    oauth.exchangeAuthCode.mockResolvedValue({ access_token: 'token' })
+    oauth.buildCredentials.mockReturnValue({ access_token: 'token', project_id: 'project' })
+    const wrapper = mountModal({
+      initialGoogleLogin: 'admin@example.com',
+      initialGooglePassword: 'secret-password',
+      initialGoogle2faImportCode: 'IMPORT-CODE'
+    })
+    await wrapper.setProps({ show: true })
+    await flushPromises()
+    await wrapper.get('input.font-mono').setValue('oauth-code')
+
+    const complete = wrapper.findAll('button').find((button) => button.text() === 'Complete')
+    await complete!.trigger('click')
+    await flushPromises()
+
+    expect(wrapper.emitted('authorized')?.[0]?.[0]).toEqual({
+      credentials: {
+        access_token: 'token',
+        project_id: 'project',
+        google_login: 'admin@example.com',
+        google_password: 'secret-password',
+        google_2fa_import_code: 'IMPORT-CODE'
+      },
+      profileId: 'profile-a'
+    })
     wrapper.unmount()
   })
 

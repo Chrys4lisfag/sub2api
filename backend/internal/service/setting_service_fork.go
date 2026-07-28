@@ -106,6 +106,15 @@ func (s *SettingService) GetBrowserLoginVNCURL(ctx context.Context) string {
 	return strings.TrimRight(strings.TrimSpace(values[SettingKeyBrowserLoginVNCURL]), "/")
 }
 
+// GetHeroSMSAPIKey returns the private HeroSMS credential used by browser automation.
+func (s *SettingService) GetHeroSMSAPIKey(ctx context.Context) string {
+	value, err := s.settingRepo.GetValue(ctx, SettingKeyHeroSMSAPIKey)
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(value)
+}
+
 // Mcp discovery mode constants.
 const (
 	McpDiscoveryModePrompt   = "prompt"

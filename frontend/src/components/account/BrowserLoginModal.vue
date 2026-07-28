@@ -27,6 +27,80 @@
         <button v-if="authUrl" type="button" class="btn btn-secondary" @click="copyUrl">Copy</button>
       </div>
 
+      <div class="rounded-lg border border-gray-200 p-3 dark:border-dark-600">
+        <div class="grid gap-3 md:grid-cols-3">
+          <div>
+            <label for="browser-google-login" class="input-label">Google login</label>
+            <input
+              id="browser-google-login"
+              v-model="googleLogin"
+              type="text"
+              class="input"
+              autocomplete="username"
+              placeholder="Email or phone"
+            />
+          </div>
+          <div>
+            <label for="browser-google-password" class="input-label">Google password</label>
+            <div class="relative">
+              <input
+                id="browser-google-password"
+                v-model="googlePassword"
+                :type="showGooglePassword ? 'text' : 'password'"
+                class="input pr-16"
+                autocomplete="current-password"
+              />
+              <button
+                type="button"
+                class="absolute inset-y-0 right-0 px-3 text-xs text-gray-500 hover:text-gray-800 dark:text-gray-400 dark:hover:text-gray-100"
+                :aria-label="showGooglePassword ? 'Hide Google password' : 'Show Google password'"
+                @click="showGooglePassword = !showGooglePassword"
+              >
+                {{ showGooglePassword ? 'Hide' : 'Show' }}
+              </button>
+            </div>
+          </div>
+          <div>
+            <label for="browser-google-2fa" class="input-label">2FA import code (optional)</label>
+            <div class="relative">
+              <input
+                id="browser-google-2fa"
+                v-model="googleTwoFactorImportCode"
+                :type="showGoogleTwoFactorImportCode ? 'text' : 'password'"
+                class="input pr-16"
+                autocomplete="off"
+              />
+              <button
+                type="button"
+                class="absolute inset-y-0 right-0 px-3 text-xs text-gray-500 hover:text-gray-800 dark:text-gray-400 dark:hover:text-gray-100"
+                :aria-label="showGoogleTwoFactorImportCode ? 'Hide 2FA import code' : 'Show 2FA import code'"
+                @click="showGoogleTwoFactorImportCode = !showGoogleTwoFactorImportCode"
+              >
+                {{ showGoogleTwoFactorImportCode ? 'Hide' : 'Show' }}
+              </button>
+            </div>
+          </div>
+        </div>
+        <div class="mt-3 flex items-center gap-3">
+          <button
+            type="button"
+            class="btn btn-secondary"
+            :disabled="!canRunGoogleAutologin"
+            @click="runGoogleAutologin"
+          >
+            {{ googleAutologinBusy ? 'Running Google activation…' : 'Run Google activation' }}
+          </button>
+          <p
+            v-if="googleAutologinStatusText"
+            data-testid="google-autologin-status"
+            class="text-xs text-gray-500 dark:text-gray-400"
+            aria-live="polite"
+          >
+            {{ googleAutologinStatusText }}
+          </p>
+        </div>
+      </div>
+
       <!-- The streamed stealth browser (noVNC over the account's proxy) -->
       <div
         class="relative w-full overflow-hidden rounded-lg border border-gray-200 dark:border-dark-600"
@@ -94,6 +168,10 @@ const props = defineProps<{
   profileId?: string
   mode?: 'login' | 'launch'
   accountName?: string
+  accountId?: number
+  initialGoogleLogin?: string
+  initialGooglePassword?: string
+  initialGoogle2faImportCode?: string
 }>()
 
 const emit = defineEmits<{
@@ -121,6 +199,16 @@ const starting = ref(false)
 const generating = ref(false)
 const completing = ref(false)
 const statusText = ref('')
+const googleLogin = ref('')
+const googlePassword = ref('')
+const googleTwoFactorImportCode = ref('')
+const showGooglePassword = ref(false)
+const showGoogleTwoFactorImportCode = ref(false)
+const googleAutologinStatus = ref<'idle' | 'running' | 'succeeded' | 'failed'>('idle')
+const googleAutologinSubmitting = ref(false)
+let googleAutologinPollTimer: ReturnType<typeof setInterval> | null = null
+let googleAutologinPollGeneration = 0
+let activeGoogleAutologinPollRequest = 0
 let pollTimer: ReturnType<typeof setInterval> | null = null
 let lifecycleGeneration = 0
 let pollGeneration = 0
@@ -136,6 +224,113 @@ const vncUrl = computed(() => {
   url.searchParams.set('password', current.vnc_token)
   return url.toString()
 })
+
+const googleAutologinBusy = computed(
+  () => googleAutologinSubmitting.value || googleAutologinStatus.value === 'running'
+)
+const canRunGoogleAutologin = computed(
+  () =>
+    !!session.value &&
+    !!googleLogin.value.trim() &&
+    !!googlePassword.value &&
+    !googleAutologinBusy.value
+)
+const googleAutologinStatusText = computed(() => {
+  switch (googleAutologinStatus.value) {
+    case 'running':
+      return 'Google activation running.'
+    case 'succeeded':
+      return 'Google activation succeeded.'
+    case 'failed':
+      return 'Google activation failed.'
+    default:
+      return ''
+  }
+})
+
+const stopGoogleAutologinPoll = () => {
+  googleAutologinPollGeneration++
+  activeGoogleAutologinPollRequest = 0
+  if (googleAutologinPollTimer) {
+    clearInterval(googleAutologinPollTimer)
+    googleAutologinPollTimer = null
+  }
+}
+
+const startGoogleAutologinPoll = () => {
+  stopGoogleAutologinPoll()
+  const generation = ++googleAutologinPollGeneration
+  googleAutologinPollTimer = setInterval(async () => {
+    const current = session.value
+    if (!current || activeGoogleAutologinPollRequest === generation) return
+    activeGoogleAutologinPollRequest = generation
+    try {
+      const result = await browserLoginAPI.getGoogleAutologinStatus(current.session_id)
+      if (
+        generation !== googleAutologinPollGeneration ||
+        !props.show ||
+        session.value?.session_id !== current.session_id
+      ) return
+      googleAutologinStatus.value = result.status
+      if (result.status === 'succeeded' || result.status === 'failed') {
+        stopGoogleAutologinPoll()
+      }
+    } catch {
+      if (
+        generation !== googleAutologinPollGeneration ||
+        !props.show ||
+        session.value?.session_id !== current.session_id
+      ) return
+      googleAutologinStatus.value = 'failed'
+      stopGoogleAutologinPoll()
+    } finally {
+      if (activeGoogleAutologinPollRequest === generation) {
+        activeGoogleAutologinPollRequest = 0
+      }
+    }
+  }, 1500)
+}
+
+const runGoogleAutologin = async () => {
+  const current = session.value
+  if (!current || !canRunGoogleAutologin.value) return
+  const generation = lifecycleGeneration
+  const browserSessionId = current.session_id
+  googleAutologinSubmitting.value = true
+  googleAutologinStatus.value = 'running'
+  const payload: {
+    account_id?: number
+    login: string
+    password: string
+    two_factor_import_code?: string
+  } = {
+    login: googleLogin.value.trim(),
+    password: googlePassword.value
+  }
+  if (props.accountId !== undefined) payload.account_id = props.accountId
+  const importCode = googleTwoFactorImportCode.value.trim()
+  if (importCode) payload.two_factor_import_code = importCode
+  try {
+    const result = await browserLoginAPI.runGoogleAutologin(browserSessionId, payload)
+    if (
+      generation !== lifecycleGeneration ||
+      !props.show ||
+      session.value?.session_id !== browserSessionId
+    ) return
+    googleAutologinStatus.value = result.status
+    if (result.status === 'running') startGoogleAutologinPoll()
+  } catch {
+    if (
+      generation !== lifecycleGeneration ||
+      !props.show ||
+      session.value?.session_id !== browserSessionId
+    ) return
+    googleAutologinStatus.value = 'failed'
+    appStore.showError('Failed to run Google activation')
+  } finally {
+    if (generation === lifecycleGeneration) googleAutologinSubmitting.value = false
+  }
+}
 
 const stopPoll = () => {
   pollGeneration++
@@ -207,6 +402,14 @@ const open = async (attempt = 0, generation = ++lifecycleGeneration) => {
     session.value = null
     generating.value = false
     completing.value = false
+    googleLogin.value = props.initialGoogleLogin || ''
+    googlePassword.value = props.initialGooglePassword || ''
+    googleTwoFactorImportCode.value = props.initialGoogle2faImportCode || ''
+    showGooglePassword.value = false
+    showGoogleTwoFactorImportCode.value = false
+    googleAutologinStatus.value = 'idle'
+    googleAutologinSubmitting.value = false
+    stopGoogleAutologinPoll()
     resetState()
   }
   try {
@@ -284,6 +487,8 @@ const copyUrl = async () => {
 const cleanup = async () => {
   lifecycleGeneration++
   stopPoll()
+  stopGoogleAutologinPoll()
+  googleAutologinSubmitting.value = false
   const current = session.value
   session.value = null
   if (!current) return
@@ -323,7 +528,12 @@ const complete = async () => {
       !props.show ||
       session.value?.session_id !== browserSessionId
     ) return
-    const credentials = buildCredentials(tokenInfo)
+    const credentials = {
+      ...buildCredentials(tokenInfo),
+      google_login: googleLogin.value,
+      google_password: googlePassword.value,
+      google_2fa_import_code: googleTwoFactorImportCode.value
+    }
     await cleanup()
     if (lifecycleGeneration !== generation + 1 || !props.show) return
     completing.value = false

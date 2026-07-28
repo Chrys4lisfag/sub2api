@@ -5932,7 +5932,14 @@ const onBrowserAuthorized = async (payload: {
   profileId: string
 }) => {
   showBrowserLogin.value = false
-  const credentials = payload.credentials
+  // Browser-login create mode has no account ID, so activation credentials are
+  // persisted with the OAuth result when account creation completes.
+  const credentials: Record<string, unknown> = {
+    ...payload.credentials,
+    google_login: String(payload.credentials.google_login ?? ''),
+    google_password: String(payload.credentials.google_password ?? ''),
+    google_2fa_import_code: String(payload.credentials.google_2fa_import_code ?? '')
+  }
   applyInterceptWarmup(credentials, interceptWarmupRequests.value, 'create')
   const antigravityModelMapping = buildModelMappingObject('mapping', [], antigravityModelMappings.value)
   if (antigravityModelMapping) {

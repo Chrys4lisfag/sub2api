@@ -20,6 +20,21 @@ export interface BrowserLoginResult {
   current_url: string | null
 }
 
+export type GoogleAutologinState = 'idle' | 'running' | 'succeeded' | 'failed'
+
+export interface GoogleAutologinRequest {
+  account_id?: number
+  login: string
+  password: string
+  two_factor_import_code?: string
+}
+
+export interface GoogleAutologinStatus {
+  status: GoogleAutologinState
+  message?: string | null
+  error?: string | null
+}
+
 /** Start the single browser session (409 upstream if one is already active). */
 export async function startSession(payload: {
   proxy_id?: number | null
@@ -51,6 +66,28 @@ export async function getResult(sessionId: string): Promise<BrowserLoginResult> 
   return data
 }
 
+/** Start Google activation automation in the active streamed-browser session. */
+export async function runGoogleAutologin(
+  sessionId: string,
+  payload: GoogleAutologinRequest
+): Promise<GoogleAutologinStatus> {
+  const { data } = await apiClient.post<GoogleAutologinStatus>(
+    '/admin/browser-login/google-autologin',
+    payload,
+    { headers: { 'X-Browser-Session-ID': sessionId } }
+  )
+  return data
+}
+
+/** Poll sanitized Google activation state; responses never contain credentials. */
+export async function getGoogleAutologinStatus(sessionId: string): Promise<GoogleAutologinStatus> {
+  const { data } = await apiClient.get<GoogleAutologinStatus>(
+    '/admin/browser-login/google-autologin',
+    { headers: { 'X-Browser-Session-ID': sessionId } }
+  )
+  return data
+}
+
 /** Tear the session down (the profile dir is kept for later re-login). */
 export async function stopSession(sessionId: string): Promise<{ ok: boolean }> {
   const { data } = await apiClient.delete<{ ok: boolean }>('/admin/browser-login/session', {
@@ -63,6 +100,8 @@ export const browserLoginAPI = {
   startSession,
   navigate,
   getResult,
+  runGoogleAutologin,
+  getGoogleAutologinStatus,
   stopSession
 }
 
