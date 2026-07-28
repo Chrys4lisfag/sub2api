@@ -38,6 +38,10 @@ const (
 	// Service 层在 SingleAccountRetry 模式下已做充分原地重试（最多 3 次、总等待 30s），
 	// Handler 层只需短暂间隔后重新进入 Service 层即可。
 	singleAccountBackoffDelay = 2 * time.Second
+	// semanticEmptyMaxRetries limits semantic-empty recovery to five retries
+	// after the initial upstream attempt, regardless of account switching or
+	// same-account retry mode.
+	semanticEmptyMaxRetries = 5
 	// semanticEmptyMaxJitter caps the jitter used for
 	// FailoverKindSemanticEmpty account switches. The goal is to spread
 	// concurrent semantic-empty failovers a tiny amount (so we don't
@@ -64,13 +68,14 @@ var semanticEmptyBackoffFn = func() time.Duration {
 
 // FailoverState 跨循环迭代共享的 failover 状态
 type FailoverState struct {
-	SwitchCount           int
-	MaxSwitches           int
-	FailedAccountIDs      map[int64]struct{}
-	SameAccountRetryCount map[int64]int
-	LastFailoverErr       *service.UpstreamFailoverError
-	ForceCacheBilling     bool
-	hasBoundSession       bool
+	SwitchCount             int
+	MaxSwitches             int
+	SemanticEmptyRetryCount int
+	FailedAccountIDs        map[int64]struct{}
+	SameAccountRetryCount   map[int64]int
+	LastFailoverErr         *service.UpstreamFailoverError
+	ForceCacheBilling       bool
+	hasBoundSession         bool
 }
 
 // NewFailoverState 创建 failover 状态
@@ -99,9 +104,23 @@ func (s *FailoverState) HandleFailoverError(
 		s.ForceCacheBilling = true
 	}
 
+	isSemanticEmpty := failoverErr.Kind == service.FailoverKindSemanticEmpty
+	if isSemanticEmpty && s.SemanticEmptyRetryCount >= semanticEmptyMaxRetries {
+		logger.FromContext(ctx).Warn("gateway.failover_semantic_empty_exhausted",
+			zap.Int64("account_id", accountID),
+			zap.Int("upstream_status", failoverErr.StatusCode),
+			zap.Int("retry_count", s.SemanticEmptyRetryCount),
+			zap.Int("retry_max", semanticEmptyMaxRetries),
+		)
+		return FailoverExhausted
+	}
+
 	// 同账号重试：对 RetryableOnSameAccount 的临时性错误，先在同一账号上重试
 	if failoverErr.RetryableOnSameAccount && s.SameAccountRetryCount[accountID] < maxSameAccountRetries {
 		s.SameAccountRetryCount[accountID]++
+		if isSemanticEmpty {
+			s.SemanticEmptyRetryCount++
+		}
 		logger.FromContext(ctx).Warn("gateway.failover_same_account_retry",
 			zap.Int64("account_id", accountID),
 			zap.Int("upstream_status", failoverErr.StatusCode),
@@ -128,6 +147,9 @@ func (s *FailoverState) HandleFailoverError(
 	}
 
 	// 递增切换计数
+	if isSemanticEmpty {
+		s.SemanticEmptyRetryCount++
+	}
 	s.SwitchCount++
 	logger.FromContext(ctx).Warn("gateway.failover_switch_account",
 		zap.Int64("account_id", accountID),

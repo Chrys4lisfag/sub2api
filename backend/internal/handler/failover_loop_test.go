@@ -193,6 +193,81 @@ func TestHandleFailoverError_BasicSwitch(t *testing.T) {
 		require.Equal(t, 11, fs.SwitchCount)
 	})
 
+	t.Run("semantic empty allows five retries after initial attempt", func(t *testing.T) {
+		originalBackoff := semanticEmptyBackoffFn
+		semanticEmptyBackoffFn = func() time.Duration { return 0 }
+		t.Cleanup(func() { semanticEmptyBackoffFn = originalBackoff })
+
+		mock := &mockTempUnscheduler{}
+		fs := NewFailoverState(10, false)
+		err := newTestFailoverErr(502, false, false)
+		err.Kind = service.FailoverKindSemanticEmpty
+
+		for retry := 1; retry <= semanticEmptyMaxRetries; retry++ {
+			action := fs.HandleFailoverError(
+				context.Background(),
+				mock,
+				int64(retry),
+				service.PlatformAntigravityNative,
+				err,
+			)
+			require.Equal(t, FailoverContinue, action)
+			require.Equal(t, retry, fs.SemanticEmptyRetryCount)
+		}
+
+		action := fs.HandleFailoverError(
+			context.Background(),
+			mock,
+			int64(semanticEmptyMaxRetries+1),
+			service.PlatformAntigravityNative,
+			err,
+		)
+		require.Equal(t, FailoverExhausted, action)
+		require.Equal(t, semanticEmptyMaxRetries, fs.SemanticEmptyRetryCount)
+		require.Equal(t, semanticEmptyMaxRetries, fs.SwitchCount)
+
+		normalErr := newTestFailoverErr(502, false, false)
+		action = fs.HandleFailoverError(
+			context.Background(),
+			mock,
+			99,
+			service.PlatformGemini,
+			normalErr,
+		)
+		require.Equal(t, FailoverContinue, action, "semantic cap must not reduce other failover kinds")
+		require.Equal(t, semanticEmptyMaxRetries+1, fs.SwitchCount)
+	})
+
+	t.Run("semantic empty same-account retry shares global cap", func(t *testing.T) {
+		mock := &mockTempUnscheduler{}
+		fs := NewFailoverState(10, false)
+		fs.SemanticEmptyRetryCount = semanticEmptyMaxRetries - 1
+		err := newTestFailoverErr(502, true, false)
+		err.Kind = service.FailoverKindSemanticEmpty
+
+		action := fs.HandleFailoverError(
+			context.Background(),
+			mock,
+			42,
+			service.PlatformAntigravityNative,
+			err,
+		)
+		require.Equal(t, FailoverContinue, action)
+		require.Equal(t, semanticEmptyMaxRetries, fs.SemanticEmptyRetryCount)
+		require.Equal(t, 1, fs.SameAccountRetryCount[int64(42)])
+
+		action = fs.HandleFailoverError(
+			context.Background(),
+			mock,
+			43,
+			service.PlatformAntigravityNative,
+			err,
+		)
+		require.Equal(t, FailoverExhausted, action)
+		require.Equal(t, semanticEmptyMaxRetries, fs.SemanticEmptyRetryCount)
+		require.NotContains(t, fs.SameAccountRetryCount, int64(43))
+	})
+
 	t.Run("连续切换直到耗尽", func(t *testing.T) {
 		mock := &mockTempUnscheduler{}
 		fs := NewFailoverState(2, false)
