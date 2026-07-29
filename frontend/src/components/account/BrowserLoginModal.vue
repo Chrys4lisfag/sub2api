@@ -90,6 +90,15 @@
           >
             {{ googleAutologinBusy ? 'Running Google activation…' : 'Run Google activation' }}
           </button>
+          <button
+            v-if="canCancelGoogleAutologin"
+            type="button"
+            class="btn btn-danger"
+            :disabled="googleAutologinCanceling"
+            @click="cancelGoogleAutologin"
+          >
+            {{ googleAutologinCanceling ? 'Canceling…' : 'Cancel Google activation' }}
+          </button>
           <p
             v-if="googleAutologinStatusText"
             data-testid="google-autologin-status"
@@ -158,7 +167,10 @@
 import { ref, computed, watch, onMounted, onUnmounted } from 'vue'
 import BaseDialog from '@/components/common/BaseDialog.vue'
 import { useAntigravityNativeOAuth } from '@/composables/useAntigravityNativeOAuth'
-import browserLoginAPI, { type BrowserLoginSession } from '@/api/admin/browserLogin'
+import browserLoginAPI, {
+  type BrowserLoginSession,
+  type GoogleAutologinState
+} from '@/api/admin/browserLogin'
 import { useAppStore } from '@/stores/app'
 import { buildApiUrl } from '@/api/client'
 
@@ -204,8 +216,13 @@ const googlePassword = ref('')
 const googleTwoFactorImportCode = ref('')
 const showGooglePassword = ref(false)
 const showGoogleTwoFactorImportCode = ref(false)
-const googleAutologinStatus = ref<'idle' | 'running' | 'succeeded' | 'failed'>('idle')
+const googleAutologinStatus = ref<GoogleAutologinState>('idle')
 const googleAutologinSubmitting = ref(false)
+const googleAutologinCanceling = ref(false)
+let googleAutologinRunController: AbortController | null = null
+let googleAutologinPollController: AbortController | null = null
+let googleAutologinCancelController: AbortController | null = null
+let googleAutologinOperationGeneration = 0
 let googleAutologinPollTimer: ReturnType<typeof setInterval> | null = null
 let googleAutologinPollGeneration = 0
 let activeGoogleAutologinPollRequest = 0
@@ -226,7 +243,16 @@ const vncUrl = computed(() => {
 })
 
 const googleAutologinBusy = computed(
-  () => googleAutologinSubmitting.value || googleAutologinStatus.value === 'running'
+  () =>
+    googleAutologinSubmitting.value ||
+    googleAutologinCanceling.value ||
+    googleAutologinStatus.value === 'running'
+)
+const canCancelGoogleAutologin = computed(
+  () =>
+    !!session.value &&
+    googleAutologinStatus.value === 'running' &&
+    !googleAutologinSubmitting.value
 )
 const canRunGoogleAutologin = computed(
   () =>
@@ -243,6 +269,8 @@ const googleAutologinStatusText = computed(() => {
       return 'Google activation succeeded.'
     case 'failed':
       return 'Google activation failed.'
+    case 'canceled':
+      return 'Google activation canceled.'
     default:
       return ''
   }
@@ -251,10 +279,21 @@ const googleAutologinStatusText = computed(() => {
 const stopGoogleAutologinPoll = () => {
   googleAutologinPollGeneration++
   activeGoogleAutologinPollRequest = 0
+  googleAutologinPollController?.abort()
+  googleAutologinPollController = null
   if (googleAutologinPollTimer) {
     clearInterval(googleAutologinPollTimer)
     googleAutologinPollTimer = null
   }
+}
+
+const invalidateGoogleAutologinWork = () => {
+  googleAutologinOperationGeneration++
+  stopGoogleAutologinPoll()
+  googleAutologinRunController?.abort()
+  googleAutologinRunController = null
+  googleAutologinCancelController?.abort()
+  googleAutologinCancelController = null
 }
 
 const startGoogleAutologinPoll = () => {
@@ -263,20 +302,24 @@ const startGoogleAutologinPoll = () => {
   googleAutologinPollTimer = setInterval(async () => {
     const current = session.value
     if (!current || activeGoogleAutologinPollRequest === generation) return
+    const requestController = new AbortController()
+    googleAutologinPollController = requestController
     activeGoogleAutologinPollRequest = generation
     try {
-      const result = await browserLoginAPI.getGoogleAutologinStatus(current.session_id)
+      const result = await browserLoginAPI.getGoogleAutologinStatus(current.session_id, {
+        signal: requestController.signal
+      })
       if (
+        requestController.signal.aborted ||
         generation !== googleAutologinPollGeneration ||
         !props.show ||
         session.value?.session_id !== current.session_id
       ) return
       googleAutologinStatus.value = result.status
-      if (result.status === 'succeeded' || result.status === 'failed') {
-        stopGoogleAutologinPoll()
-      }
+      if (result.status !== 'running') stopGoogleAutologinPoll()
     } catch {
       if (
+        requestController.signal.aborted ||
         generation !== googleAutologinPollGeneration ||
         !props.show ||
         session.value?.session_id !== current.session_id
@@ -284,6 +327,9 @@ const startGoogleAutologinPoll = () => {
       googleAutologinStatus.value = 'failed'
       stopGoogleAutologinPoll()
     } finally {
+      if (googleAutologinPollController === requestController) {
+        googleAutologinPollController = null
+      }
       if (activeGoogleAutologinPollRequest === generation) {
         activeGoogleAutologinPollRequest = 0
       }
@@ -294,10 +340,14 @@ const startGoogleAutologinPoll = () => {
 const runGoogleAutologin = async () => {
   const current = session.value
   if (!current || !canRunGoogleAutologin.value) return
-  const generation = lifecycleGeneration
+  const lifecycle = lifecycleGeneration
   const browserSessionId = current.session_id
+  invalidateGoogleAutologinWork()
+  const operation = googleAutologinOperationGeneration
+  const requestController = new AbortController()
+  googleAutologinRunController = requestController
   googleAutologinSubmitting.value = true
-  googleAutologinStatus.value = 'running'
+  googleAutologinStatus.value = 'idle'
   const payload: {
     account_id?: number
     login: string
@@ -311,9 +361,13 @@ const runGoogleAutologin = async () => {
   const importCode = googleTwoFactorImportCode.value.trim()
   if (importCode) payload.two_factor_import_code = importCode
   try {
-    const result = await browserLoginAPI.runGoogleAutologin(browserSessionId, payload)
+    const result = await browserLoginAPI.runGoogleAutologin(browserSessionId, payload, {
+      signal: requestController.signal
+    })
     if (
-      generation !== lifecycleGeneration ||
+      requestController.signal.aborted ||
+      operation !== googleAutologinOperationGeneration ||
+      lifecycle !== lifecycleGeneration ||
       !props.show ||
       session.value?.session_id !== browserSessionId
     ) return
@@ -321,14 +375,72 @@ const runGoogleAutologin = async () => {
     if (result.status === 'running') startGoogleAutologinPoll()
   } catch {
     if (
-      generation !== lifecycleGeneration ||
+      requestController.signal.aborted ||
+      operation !== googleAutologinOperationGeneration ||
+      lifecycle !== lifecycleGeneration ||
       !props.show ||
       session.value?.session_id !== browserSessionId
     ) return
     googleAutologinStatus.value = 'failed'
     appStore.showError('Failed to run Google activation')
   } finally {
-    if (generation === lifecycleGeneration) googleAutologinSubmitting.value = false
+    if (googleAutologinRunController === requestController) {
+      googleAutologinRunController = null
+    }
+    if (
+      operation === googleAutologinOperationGeneration &&
+      lifecycle === lifecycleGeneration
+    ) {
+      googleAutologinSubmitting.value = false
+    }
+  }
+}
+
+const cancelGoogleAutologin = async () => {
+  const current = session.value
+  if (!current || !canCancelGoogleAutologin.value || googleAutologinCanceling.value) return
+  const lifecycle = lifecycleGeneration
+  const browserSessionId = current.session_id
+  invalidateGoogleAutologinWork()
+  const operation = googleAutologinOperationGeneration
+  const requestController = new AbortController()
+  googleAutologinCancelController = requestController
+  googleAutologinCanceling.value = true
+  try {
+    const result = await browserLoginAPI.cancelGoogleAutologin(browserSessionId, {
+      signal: requestController.signal
+    })
+    if (
+      requestController.signal.aborted ||
+      operation !== googleAutologinOperationGeneration ||
+      lifecycle !== lifecycleGeneration ||
+      !props.show ||
+      session.value?.session_id !== browserSessionId
+    ) return
+    googleAutologinStatus.value =
+      result.status === 'succeeded' || result.status === 'failed'
+        ? result.status
+        : 'canceled'
+  } catch {
+    if (
+      requestController.signal.aborted ||
+      operation !== googleAutologinOperationGeneration ||
+      lifecycle !== lifecycleGeneration ||
+      !props.show ||
+      session.value?.session_id !== browserSessionId
+    ) return
+    appStore.showError('Failed to cancel Google activation')
+    if (googleAutologinStatus.value === 'running') startGoogleAutologinPoll()
+  } finally {
+    if (googleAutologinCancelController === requestController) {
+      googleAutologinCancelController = null
+    }
+    if (
+      operation === googleAutologinOperationGeneration &&
+      lifecycle === lifecycleGeneration
+    ) {
+      googleAutologinCanceling.value = false
+    }
   }
 }
 
@@ -409,7 +521,8 @@ const open = async (attempt = 0, generation = ++lifecycleGeneration) => {
     showGoogleTwoFactorImportCode.value = false
     googleAutologinStatus.value = 'idle'
     googleAutologinSubmitting.value = false
-    stopGoogleAutologinPoll()
+    googleAutologinCanceling.value = false
+    invalidateGoogleAutologinWork()
     resetState()
   }
   try {
@@ -487,8 +600,9 @@ const copyUrl = async () => {
 const cleanup = async () => {
   lifecycleGeneration++
   stopPoll()
-  stopGoogleAutologinPoll()
+  invalidateGoogleAutologinWork()
   googleAutologinSubmitting.value = false
+  googleAutologinCanceling.value = false
   const current = session.value
   session.value = null
   if (!current) return

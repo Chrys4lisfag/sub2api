@@ -12,14 +12,18 @@ import (
 	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/pkg/antigravity"
+	"github.com/Wei-Shaw/sub2api/internal/pkg/diagnosticcapture"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/logger"
 	"github.com/gin-gonic/gin"
 )
 
 type antigravityStreamResult struct {
-	usage            *ClaudeUsage
-	firstTokenMs     *int
-	clientDisconnect bool // 客户端是否在流式传输过程中断开
+	usage             *ClaudeUsage
+	firstTokenMs      *int
+	clientDisconnect  bool // 客户端是否在流式传输过程中断开
+	upstreamResponse  []byte
+	convertedResponse []byte
+	diagnosticOutcome string
 }
 
 // antigravityClientWriter 封装流式响应的客户端写入，自动检测断开并标记。
@@ -300,6 +304,9 @@ func (s *AntigravityGatewayService) handleGeminiStreamToNonStreaming(c *gin.Cont
 	var lastWithParts map[string]any
 	var collectedImageParts []map[string]any // 收集所有包含图片的 parts
 	var collectedTextParts []string          // 收集所有文本片段
+	var diagnosticPayloads []json.RawMessage
+	diagnosticPayloadBytes := 0
+	captureEnabled := diagnosticcapture.Enabled()
 
 	type scanEvent struct {
 		line string
@@ -374,6 +381,16 @@ func (s *AntigravityGatewayService) handleGeminiStreamToNonStreaming(c *gin.Cont
 			payload := strings.TrimSpace(strings.TrimPrefix(trimmed, "data:"))
 			if payload == "" || payload == "[DONE]" {
 				continue
+			}
+			if captureEnabled && json.Valid([]byte(payload)) && len(payload) <= antigravityABPayloadByteLimit {
+				for len(diagnosticPayloads) > 0 &&
+					(diagnosticPayloadBytes+len(payload) > antigravityABPayloadByteLimit || len(diagnosticPayloads) >= antigravityABPayloadCountLimit) {
+					diagnosticPayloadBytes -= len(diagnosticPayloads[0])
+					diagnosticPayloads[0] = nil
+					diagnosticPayloads = diagnosticPayloads[1:]
+				}
+				diagnosticPayloads = append(diagnosticPayloads, json.RawMessage(append([]byte(nil), payload...)))
+				diagnosticPayloadBytes += len(payload)
 			}
 
 			// 解包 v1internal 响应
@@ -469,7 +486,18 @@ returnResponse:
 	}
 	c.Data(http.StatusOK, "application/json", respBody)
 
-	return &antigravityStreamResult{usage: usage, firstTokenMs: firstTokenMs}, nil
+	result := &antigravityStreamResult{usage: usage, firstTokenMs: firstTokenMs}
+	if captureEnabled {
+		result.upstreamResponse, _ = json.Marshal(map[string]any{"sse_payloads": diagnosticPayloads})
+		result.convertedResponse = append([]byte(nil), respBody...)
+		result.diagnosticOutcome, _ = inspectGeminiResponseForAnomalies(respBody)
+		if strings.EqualFold(payloadFinishReason(respBody), "MALFORMED_FUNCTION_CALL") {
+			result.diagnosticOutcome = "malformed_function_call"
+		} else if result.diagnosticOutcome == "" {
+			result.diagnosticOutcome = "success"
+		}
+	}
+	return result, nil
 }
 
 // getOrCreateGeminiParts 获取 Gemini 响应的 parts 结构，返回深拷贝和更新回调

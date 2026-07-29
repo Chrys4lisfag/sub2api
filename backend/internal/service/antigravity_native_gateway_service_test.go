@@ -675,7 +675,7 @@ func TestPassNonStreamingGemini_ThoughtOnlyStopFailsOverBeforeWrite(t *testing.T
 	svc := &AntigravityNativeGatewayService{}
 	result, err := svc.passNonStreamingGemini(
 		context.Background(), c, 39, resp, time.Now(),
-		"gemini-3.6-flash", "gemini-3.6-flash-high", toolPrepReport{},
+		"gemini-3.6-flash", "gemini-3.6-flash-high", "generateContent", []byte(`{"request":{"contents":[]}}`), toolPrepReport{},
 	)
 	if result != nil {
 		t.Fatalf("thought-only STOP result = %#v, want nil", result)

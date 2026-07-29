@@ -1,15 +1,17 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
-const { get, post } = vi.hoisted(() => ({
+const { get, post, deleteRequest } = vi.hoisted(() => ({
   get: vi.fn(),
-  post: vi.fn()
+  post: vi.fn(),
+  deleteRequest: vi.fn()
 }))
 
 vi.mock('@/api/client', () => ({
-  apiClient: { get, post }
+  apiClient: { get, post, delete: deleteRequest }
 }))
 
 import {
+  cancelGoogleAutologin,
   getGoogleAutologinStatus,
   runGoogleAutologin,
   type GoogleAutologinRequest,
@@ -21,6 +23,7 @@ const idleState: GoogleAutologinState = 'idle'
 beforeEach(() => {
   get.mockReset()
   post.mockReset()
+  deleteRequest.mockReset()
 })
 
 describe('browser-login Google autologin API', () => {
@@ -38,6 +41,18 @@ describe('browser-login Google autologin API', () => {
       message: 'started'
     })
     expect(post).toHaveBeenCalledWith('/admin/browser-login/google-autologin', payload, {
+      headers: { 'X-Browser-Session-ID': 'session-a' }
+    })
+  })
+
+  it('deletes only Google autologin using the active session header', async () => {
+    deleteRequest.mockResolvedValue({ data: { status: 'canceled', message: 'canceled' } })
+
+    await expect(cancelGoogleAutologin('session-a')).resolves.toEqual({
+      status: 'canceled',
+      message: 'canceled'
+    })
+    expect(deleteRequest).toHaveBeenCalledWith('/admin/browser-login/google-autologin', {
       headers: { 'X-Browser-Session-ID': 'session-a' }
     })
   })

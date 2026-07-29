@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/pkg/antigravity"
+	"github.com/Wei-Shaw/sub2api/internal/pkg/diagnosticcapture"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/logger"
 	"github.com/gin-gonic/gin"
 )
@@ -415,6 +416,18 @@ handleSuccess:
 			logger.LegacyPrintf("service.antigravity_gateway", "%s status=stream_collect_error error=%v", prefix, err)
 			return nil, err
 		}
+		captureAntigravityAB(ctx, c, diagnosticcapture.Record{
+			Route:             "antigravity",
+			Model:             originalModel,
+			WireModel:         mappedModel,
+			Action:            action,
+			Stream:            false,
+			AccountID:         account.ID,
+			Outcome:           streamRes.diagnosticOutcome,
+			OutboundRequest:   wrappedBody,
+			UpstreamResponse:  streamRes.upstreamResponse,
+			ConvertedResponse: streamRes.convertedResponse,
+		})
 		usage = streamRes.usage
 		firstTokenMs = streamRes.firstTokenMs
 	}

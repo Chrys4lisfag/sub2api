@@ -26,8 +26,13 @@ import (
 
 // browserLoginTimeout bounds a single control call. Session start launches a
 // browser (+ optional geoip DB fetch), so allow generous headroom; the fast
-// calls (navigate/result/stop) finish well within it.
-const browserLoginTimeout = 120 * time.Second
+// calls (navigate/result/stop) finish well within it. Error bodies/messages are
+// separately bounded before crossing the admin API trust boundary.
+const (
+	browserLoginTimeout           = 120 * time.Second
+	browserLoginErrorBodyLimit    = 8 * 1024
+	browserLoginErrorMessageLimit = 512
+)
 
 // browserLoginCreds is the runtime browser2webfront connection tuple resolved
 // from the DB at call time.
@@ -35,6 +40,20 @@ type browserLoginCreds struct {
 	baseURL string
 	user    string
 	pass    string
+}
+
+// BrowserLoginUpstreamError preserves only upstream HTTP status plus a bounded,
+// sanitized message. Raw browser2webfront bodies never cross this boundary.
+type BrowserLoginUpstreamError struct {
+	StatusCode int
+	Message    string
+}
+
+func (e *BrowserLoginUpstreamError) Error() string {
+	if e == nil {
+		return "browser login upstream request failed"
+	}
+	return e.Message
 }
 
 // BrowserLoginService talks to the browser2webfront control API.
@@ -245,6 +264,24 @@ func (s *BrowserLoginService) GoogleAutologinStatus(ctx context.Context, session
 	return &out, nil
 }
 
+// CancelGoogleAutologin stops only the active automation run. The streamed
+// browser session remains available for manual work or another activation run.
+func (s *BrowserLoginService) CancelGoogleAutologin(ctx context.Context, sessionID string) (*GoogleAutologinStatus, error) {
+	sessionID = strings.TrimSpace(sessionID)
+	if sessionID == "" {
+		return nil, fmt.Errorf("browser session header is required")
+	}
+	creds, err := s.browserLoginCreds(ctx)
+	if err != nil {
+		return nil, err
+	}
+	var out GoogleAutologinStatus
+	if err := s.doJSON(ctx, creds, http.MethodDelete, "/session/google-autologin", sessionID, nil, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
 // StopSession tears the browser session down (the profile dir is kept for reuse).
 func (s *BrowserLoginService) StopSession(ctx context.Context, sessionID string) error {
 	creds, err := s.browserLoginCreds(ctx)
@@ -278,9 +315,9 @@ func (s *BrowserLoginService) browserLoginCreds(ctx context.Context) (browserLog
 	return browserLoginCreds{baseURL: baseURL, user: user, pass: pass}, nil
 }
 
-// doJSON issues a Basic-Auth'd JSON request and, on a non-2xx response,
-// propagates the upstream status + body verbatim so a 409 "session busy" or a
-// launch error is legible to the admin.
+// doJSON issues a Basic-Auth'd JSON request. Non-2xx responses retain their
+// upstream status but expose only an allow-listed, bounded, credential-redacted
+// message; raw browser2webfront bodies never reach admin callers.
 func (s *BrowserLoginService) doJSON(ctx context.Context, creds browserLoginCreds, method, path, sessionID string, body any, out any) error {
 	var reader io.Reader
 	if body != nil {
@@ -307,9 +344,22 @@ func (s *BrowserLoginService) doJSON(ctx context.Context, creds browserLoginCred
 		return err
 	}
 	defer func() { _ = resp.Body.Close() }()
-	respBody, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return fmt.Errorf("browser login %s %s: HTTP %d: %s", method, path, resp.StatusCode, string(respBody))
+		respBody, _ := io.ReadAll(io.LimitReader(resp.Body, browserLoginErrorBodyLimit))
+		return &BrowserLoginUpstreamError{
+			StatusCode: resp.StatusCode,
+			Message: browserLoginSafeErrorMessage(
+				resp.StatusCode,
+				respBody,
+				body,
+				creds,
+				sessionID,
+			),
+		}
+	}
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return fmt.Errorf("browser login %s %s: read response: %w", method, path, err)
 	}
 	if out != nil {
 		if err := json.Unmarshal(respBody, out); err != nil {
@@ -317,6 +367,65 @@ func (s *BrowserLoginService) doJSON(ctx context.Context, creds browserLoginCred
 		}
 	}
 	return nil
+}
+
+func browserLoginSafeErrorMessage(statusCode int, raw []byte, requestBody any, creds browserLoginCreds, sessionID string) string {
+	message := ""
+	var payload map[string]any
+	if json.Unmarshal(raw, &payload) == nil {
+		for _, key := range []string{"detail", "error", "message"} {
+			if text := browserLoginErrorText(payload[key]); text != "" {
+				message = text
+				break
+			}
+		}
+	}
+	if message == "" {
+		message = fmt.Sprintf("browser login upstream returned HTTP %d", statusCode)
+	}
+
+	secrets := []string{creds.user, creds.pass, sessionID}
+	if request, ok := requestBody.(map[string]any); ok {
+		for _, key := range []string{
+			"login",
+			"password",
+			"two_factor_import_code",
+			"herosms_api_key",
+			"proxy",
+		} {
+			if value, ok := request[key].(string); ok {
+				secrets = append(secrets, value, strings.TrimSpace(value))
+			}
+		}
+	}
+	for _, secret := range secrets {
+		if secret != "" {
+			message = strings.ReplaceAll(message, secret, "[redacted]")
+		}
+	}
+	message = strings.Join(strings.Fields(message), " ")
+	runes := []rune(message)
+	if len(runes) > browserLoginErrorMessageLimit {
+		message = string(runes[:browserLoginErrorMessageLimit-1]) + "…"
+	}
+	if message == "" {
+		return fmt.Sprintf("browser login upstream returned HTTP %d", statusCode)
+	}
+	return message
+}
+
+func browserLoginErrorText(value any) string {
+	switch typed := value.(type) {
+	case string:
+		return strings.TrimSpace(typed)
+	case map[string]any:
+		for _, key := range []string{"detail", "error", "message"} {
+			if text := browserLoginErrorText(typed[key]); text != "" {
+				return text
+			}
+		}
+	}
+	return ""
 }
 
 func browserLoginHTTPClient() *http.Client {

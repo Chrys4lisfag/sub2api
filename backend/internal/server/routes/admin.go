@@ -415,6 +415,7 @@ func registerBrowserLoginRoutes(admin *gin.RouterGroup, h *handler.Handlers) {
 		g.GET("/result", h.Admin.BrowserLogin.Result)
 		g.POST("/google-autologin", h.Admin.BrowserLogin.RunGoogleAutologin)
 		g.GET("/google-autologin", h.Admin.BrowserLogin.GetGoogleAutologinStatus)
+		g.DELETE("/google-autologin", h.Admin.BrowserLogin.CancelGoogleAutologin)
 		g.DELETE("/session", h.Admin.BrowserLogin.StopSession)
 	}
 }

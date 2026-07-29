@@ -35,6 +35,7 @@ import (
 	"github.com/Wei-Shaw/sub2api/internal/domain"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/antigravity"
 	agynative "github.com/Wei-Shaw/sub2api/internal/pkg/antigravity_native"
+	"github.com/Wei-Shaw/sub2api/internal/pkg/diagnosticcapture"
 	"github.com/koval/agymimic/api"
 	"github.com/koval/agymimic/fingerprint"
 	"github.com/koval/agymimic/metrics"
@@ -621,7 +622,7 @@ func (s *AntigravityNativeGatewayService) ForwardGemini(
 	if stream {
 		return s.streamGeminiToClient(ctx, c, account.ID, resp, startTime, originalModel, wireModel, toolReport)
 	}
-	return s.passNonStreamingGemini(ctx, c, account.ID, resp, startTime, originalModel, wireModel, toolReport)
+	return s.passNonStreamingGemini(ctx, c, account.ID, resp, startTime, originalModel, wireModel, action, envelope, toolReport)
 }
 
 // Forward handles Claude-format requests. Native does not implement the
@@ -1499,7 +1500,8 @@ func (s *AntigravityNativeGatewayService) passNonStreamingGemini(
 	accountID int64,
 	resp *http.Response,
 	startTime time.Time,
-	originalModel, wireModel string,
+	originalModel, wireModel, action string,
+	outboundRequest []byte,
 	toolReport toolPrepReport,
 ) (*ForwardResult, error) {
 	raw, err := io.ReadAll(resp.Body)
@@ -1520,6 +1522,31 @@ func (s *AntigravityNativeGatewayService) passNonStreamingGemini(
 	// Back-translate call_mcp_tool function calls if the aggregator was
 	// used for this request — keeps omp's tool dispatch transparent.
 	out = rewriteAggregatedFunctionCalls(out, toolReport)
+
+	anomaly, details := inspectGeminiResponseForAnomalies(out)
+	outcome := anomaly
+	switch {
+	case len(bytes.TrimSpace(out)) == 0:
+		outcome = "empty_body"
+	case strings.EqualFold(payloadFinishReason(out), "MALFORMED_FUNCTION_CALL"):
+		outcome = "malformed_function_call"
+	case isVersionRejectionPayload(out):
+		outcome = "version_rejection"
+	case outcome == "":
+		outcome = "success"
+	}
+	captureAntigravityAB(ctx, c, diagnosticcapture.Record{
+		Route:             "antigravity-native",
+		Model:             originalModel,
+		WireModel:         wireModel,
+		Action:            action,
+		Stream:            false,
+		AccountID:         accountID,
+		Outcome:           outcome,
+		OutboundRequest:   outboundRequest,
+		UpstreamResponse:  raw,
+		ConvertedResponse: out,
+	})
 
 	// Defense-in-depth: cloudcode-pa has been observed returning 200 OK
 	// with Content-Length: 0 in rare edge cases (e.g. upstream-side
@@ -1569,7 +1596,6 @@ func (s *AntigravityNativeGatewayService) passNonStreamingGemini(
 		}
 	}
 
-	anomaly, details := inspectGeminiResponseForAnomalies(out)
 	if anomaly != "" {
 		logNativeRequestAnomaly(ctx, accountID, originalModel, wireModel, false, out, anomaly, details)
 	}

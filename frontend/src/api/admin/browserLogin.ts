@@ -20,7 +20,7 @@ export interface BrowserLoginResult {
   current_url: string | null
 }
 
-export type GoogleAutologinState = 'idle' | 'running' | 'succeeded' | 'failed'
+export type GoogleAutologinState = 'idle' | 'running' | 'succeeded' | 'failed' | 'canceled'
 
 export interface GoogleAutologinRequest {
   account_id?: number
@@ -33,6 +33,10 @@ export interface GoogleAutologinStatus {
   status: GoogleAutologinState
   message?: string | null
   error?: string | null
+}
+
+export interface BrowserLoginRequestOptions {
+  signal?: AbortSignal
 }
 
 /** Start the single browser session (409 upstream if one is already active). */
@@ -69,21 +73,46 @@ export async function getResult(sessionId: string): Promise<BrowserLoginResult> 
 /** Start Google activation automation in the active streamed-browser session. */
 export async function runGoogleAutologin(
   sessionId: string,
-  payload: GoogleAutologinRequest
+  payload: GoogleAutologinRequest,
+  options?: BrowserLoginRequestOptions
 ): Promise<GoogleAutologinStatus> {
   const { data } = await apiClient.post<GoogleAutologinStatus>(
     '/admin/browser-login/google-autologin',
     payload,
-    { headers: { 'X-Browser-Session-ID': sessionId } }
+    {
+      headers: { 'X-Browser-Session-ID': sessionId },
+      ...(options?.signal ? { signal: options.signal } : {})
+    }
   )
   return data
 }
 
 /** Poll sanitized Google activation state; responses never contain credentials. */
-export async function getGoogleAutologinStatus(sessionId: string): Promise<GoogleAutologinStatus> {
+export async function getGoogleAutologinStatus(
+  sessionId: string,
+  options?: BrowserLoginRequestOptions
+): Promise<GoogleAutologinStatus> {
   const { data } = await apiClient.get<GoogleAutologinStatus>(
     '/admin/browser-login/google-autologin',
-    { headers: { 'X-Browser-Session-ID': sessionId } }
+    {
+      headers: { 'X-Browser-Session-ID': sessionId },
+      ...(options?.signal ? { signal: options.signal } : {})
+    }
+  )
+  return data
+}
+
+/** Cancel only Google activation; keep the streamed browser session alive. */
+export async function cancelGoogleAutologin(
+  sessionId: string,
+  options?: BrowserLoginRequestOptions
+): Promise<GoogleAutologinStatus> {
+  const { data } = await apiClient.delete<GoogleAutologinStatus>(
+    '/admin/browser-login/google-autologin',
+    {
+      headers: { 'X-Browser-Session-ID': sessionId },
+      ...(options?.signal ? { signal: options.signal } : {})
+    }
   )
   return data
 }
@@ -102,6 +131,7 @@ export const browserLoginAPI = {
   getResult,
   runGoogleAutologin,
   getGoogleAutologinStatus,
+  cancelGoogleAutologin,
   stopSession
 }
 

@@ -9,6 +9,7 @@ const api = vi.hoisted(() => ({
   stopSession: vi.fn(),
   runGoogleAutologin: vi.fn(),
   getGoogleAutologinStatus: vi.fn(),
+  cancelGoogleAutologin: vi.fn(),
   navigate: vi.fn()
 }))
 
@@ -92,6 +93,7 @@ describe('BrowserLoginModal lifecycle', () => {
     api.stopSession.mockResolvedValue({ ok: true })
     api.runGoogleAutologin.mockResolvedValue({ status: 'running' })
     api.getGoogleAutologinStatus.mockResolvedValue({ status: 'succeeded' })
+    api.cancelGoogleAutologin.mockResolvedValue({ status: 'canceled' })
     oauth.generateAuthUrl.mockResolvedValue(false)
     oauth.exchangeAuthCode.mockResolvedValue(null)
     oauth.buildCredentials.mockReturnValue({})
@@ -258,24 +260,76 @@ describe('BrowserLoginModal lifecycle', () => {
     await run!.trigger('click')
     await flushPromises()
 
-    expect(api.runGoogleAutologin).toHaveBeenCalledWith('session-a', {
-      account_id: 42,
-      login: 'admin@example.com',
-      password: 'secret-password',
-      two_factor_import_code: 'IMPORT-CODE'
-    })
+    expect(api.runGoogleAutologin).toHaveBeenCalledWith(
+      'session-a',
+      {
+        account_id: 42,
+        login: 'admin@example.com',
+        password: 'secret-password',
+        two_factor_import_code: 'IMPORT-CODE'
+      },
+      { signal: expect.any(AbortSignal) }
+    )
     expect(wrapper.get('[data-testid="google-autologin-status"]').text()).toBe(
       'Google activation running.'
     )
 
     await vi.advanceTimersByTimeAsync(1500)
     await flushPromises()
-    expect(api.getGoogleAutologinStatus).toHaveBeenCalledWith('session-a')
+    expect(api.getGoogleAutologinStatus).toHaveBeenCalledWith(
+      'session-a',
+      { signal: expect.any(AbortSignal) }
+    )
     expect(wrapper.get('[data-testid="google-autologin-status"]').text()).toBe(
       'Google activation succeeded.'
     )
     expect(wrapper.text()).not.toContain('secret-password')
     expect(wrapper.text()).not.toContain('IMPORT-CODE')
+    wrapper.unmount()
+    vi.useRealTimers()
+  })
+
+  it('cancels activation, aborts polling, and ignores a late status response', async () => {
+    vi.useFakeTimers()
+    const pendingStatus = deferred<{ status: 'succeeded' }>()
+    api.getGoogleAutologinStatus.mockReturnValue(pendingStatus.promise)
+    const wrapper = mountModal()
+    await wrapper.setProps({ show: true })
+    await flushPromises()
+    await wrapper.get('#browser-google-login').setValue('admin@example.com')
+    await wrapper.get('#browser-google-password').setValue('secret-password')
+
+    const run = wrapper.findAll('button').find((button) => button.text() === 'Run Google activation')
+    await run!.trigger('click')
+    await flushPromises()
+    await vi.advanceTimersByTimeAsync(1500)
+
+    const pollOptions = api.getGoogleAutologinStatus.mock.calls[0][1]
+    expect(pollOptions.signal.aborted).toBe(false)
+    const cancel = wrapper
+      .findAll('button')
+      .find((button) => button.text() === 'Cancel Google activation')
+    await cancel!.trigger('click')
+    await flushPromises()
+
+    expect(api.cancelGoogleAutologin).toHaveBeenCalledWith(
+      'session-a',
+      { signal: expect.any(AbortSignal) }
+    )
+    expect(pollOptions.signal.aborted).toBe(true)
+    expect(api.stopSession).not.toHaveBeenCalled()
+    expect(wrapper.get('[data-testid="google-autologin-status"]').text()).toBe(
+      'Google activation canceled.'
+    )
+
+    pendingStatus.resolve({ status: 'succeeded' })
+    await flushPromises()
+    await vi.advanceTimersByTimeAsync(3000)
+    expect(api.getGoogleAutologinStatus).toHaveBeenCalledOnce()
+    expect(wrapper.get('[data-testid="google-autologin-status"]').text()).toBe(
+      'Google activation canceled.'
+    )
+
     wrapper.unmount()
     vi.useRealTimers()
   })

@@ -4,21 +4,25 @@
 //
 // Endpoints (registered in routes/admin.go):
 //
-//	POST   /api/v1/admin/browser-login/session   -> start the single session
-//	POST   /api/v1/admin/browser-login/navigate  -> drive the tab to a URL
-//	GET    /api/v1/admin/browser-login/result     -> captured callback code + url
-//	DELETE /api/v1/admin/browser-login/session    -> tear the session down
+//	POST   /api/v1/admin/browser-login/session          -> start the single session
+//	POST   /api/v1/admin/browser-login/navigate         -> drive the tab to a URL
+//	GET    /api/v1/admin/browser-login/result           -> captured callback code + url
+//	POST   /api/v1/admin/browser-login/google-autologin -> start Google activation
+//	GET    /api/v1/admin/browser-login/google-autologin -> read activation status
+//	DELETE /api/v1/admin/browser-login/google-autologin -> cancel Google activation
+//	DELETE /api/v1/admin/browser-login/session          -> tear the session down
 //
-// Upstream (browser2webfront) errors — including a 409 "session busy" or a
-// not-configured message — are passed through verbatim so the admin sees the
-// real cause in the dialog.
+// Upstream (browser2webfront) errors preserve their HTTP status while exposing
+// only the service's bounded, sanitized message.
 package admin
 
 import (
+	"errors"
+	"strings"
+
 	"github.com/Wei-Shaw/sub2api/internal/pkg/response"
 	"github.com/Wei-Shaw/sub2api/internal/service"
 	"github.com/gin-gonic/gin"
-	"strings"
 )
 
 type BrowserLoginHandler struct {
@@ -27,6 +31,15 @@ type BrowserLoginHandler struct {
 
 func NewBrowserLoginHandler(svc *service.BrowserLoginService) *BrowserLoginHandler {
 	return &BrowserLoginHandler{svc: svc}
+}
+
+func writeBrowserLoginError(c *gin.Context, err error) {
+	var upstreamErr *service.BrowserLoginUpstreamError
+	if errors.As(err, &upstreamErr) {
+		response.Error(c, upstreamErr.StatusCode, upstreamErr.Error())
+		return
+	}
+	response.BadRequest(c, err.Error())
 }
 
 type BrowserLoginStartRequest struct {
@@ -53,7 +66,7 @@ func (h *BrowserLoginHandler) StartSession(c *gin.Context) {
 		ProfileID: req.ProfileID,
 	})
 	if err != nil {
-		response.BadRequest(c, err.Error())
+		writeBrowserLoginError(c, err)
 		return
 	}
 	response.Success(c, sess)
@@ -72,7 +85,7 @@ func (h *BrowserLoginHandler) Navigate(c *gin.Context) {
 	}
 	res, err := h.svc.Navigate(c.Request.Context(), strings.TrimSpace(c.GetHeader("X-Browser-Session-ID")), req.URL)
 	if err != nil {
-		response.BadRequest(c, err.Error())
+		writeBrowserLoginError(c, err)
 		return
 	}
 	response.Success(c, res)
@@ -82,7 +95,7 @@ func (h *BrowserLoginHandler) Navigate(c *gin.Context) {
 func (h *BrowserLoginHandler) Result(c *gin.Context) {
 	res, err := h.svc.Result(c.Request.Context(), strings.TrimSpace(c.GetHeader("X-Browser-Session-ID")))
 	if err != nil {
-		response.BadRequest(c, err.Error())
+		writeBrowserLoginError(c, err)
 		return
 	}
 	response.Success(c, res)
@@ -107,7 +120,7 @@ func (h *BrowserLoginHandler) RunGoogleAutologin(c *gin.Context) {
 		TwoFactorImportCode: req.TwoFactorImportCode,
 	})
 	if err != nil {
-		response.BadRequest(c, err.Error())
+		writeBrowserLoginError(c, err)
 		return
 	}
 	response.Success(c, status)
@@ -122,7 +135,22 @@ func (h *BrowserLoginHandler) GetGoogleAutologinStatus(c *gin.Context) {
 	}
 	status, err := h.svc.GoogleAutologinStatus(c.Request.Context(), sessionID)
 	if err != nil {
-		response.BadRequest(c, err.Error())
+		writeBrowserLoginError(c, err)
+		return
+	}
+	response.Success(c, status)
+}
+
+// CancelGoogleAutologin — DELETE /api/v1/admin/browser-login/google-autologin
+func (h *BrowserLoginHandler) CancelGoogleAutologin(c *gin.Context) {
+	sessionID := strings.TrimSpace(c.GetHeader("X-Browser-Session-ID"))
+	if sessionID == "" {
+		response.BadRequest(c, "X-Browser-Session-ID header is required")
+		return
+	}
+	status, err := h.svc.CancelGoogleAutologin(c.Request.Context(), sessionID)
+	if err != nil {
+		writeBrowserLoginError(c, err)
 		return
 	}
 	response.Success(c, status)
@@ -131,7 +159,7 @@ func (h *BrowserLoginHandler) GetGoogleAutologinStatus(c *gin.Context) {
 // StopSession — DELETE /api/v1/admin/browser-login/session
 func (h *BrowserLoginHandler) StopSession(c *gin.Context) {
 	if err := h.svc.StopSession(c.Request.Context(), strings.TrimSpace(c.GetHeader("X-Browser-Session-ID"))); err != nil {
-		response.BadRequest(c, err.Error())
+		writeBrowserLoginError(c, err)
 		return
 	}
 	response.Success(c, gin.H{"ok": true})
