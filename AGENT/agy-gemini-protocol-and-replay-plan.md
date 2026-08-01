@@ -732,6 +732,29 @@ structural JSONL comparison
 
 The local proxy controls request transformation and credential isolation. It does not cryptographically prove Google's internal account selection or proxy egress.
 
+## Production deployment validation
+
+Commit `1b046492f1f6e754c09a76b9d306936c9a4ab1b5` was published by successful
+GitHub Actions run `30697157073` and deployed through the Electerm MCP
+production bookmark. The pulled image was verified before recreation and the
+running container afterward:
+
+- deployed image ID:
+  `sha256:9050cf1831f4bd7658d4cb981282fb9e07ad0cee90f62bce8a5aa9dc5ee3f480`;
+- deployed revision label:
+  `1b046492f1f6e754c09a76b9d306936c9a4ab1b5`;
+- previous image ID retained under local rollback tag
+  `ghcr.io/chrys4lisfag/sub2api:rollback-stop-20260801`;
+- only `sub2api` was recreated with `--no-deps`;
+- container became healthy and loopback `/health` returned HTTP 200.
+
+The bounded canary from `2026-08-01T11:16:12Z` through `11:21:47Z` contained
+49 request markers and no detected semantic-empty STOP, semantic failover, 502,
+or panic/fatal marker. This is deployment and immediate-regression evidence
+only. Because no natural semantic-empty event occurred, it does not validate
+the live failover branch, prove an upstream fix, or resolve the correlation and
+full-payload gaps above.
+
 ## Prioritized future plan
 
 ### P0: preserve and compare exact bodies

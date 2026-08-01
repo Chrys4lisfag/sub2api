@@ -322,6 +322,48 @@ Prompt text, system instructions, tools, schemas, stop sequences, candidate text
 7. Keep synchronous pre-commit semantic-empty failover. Without it, downstream clients receive false-success HTTP 200 responses.
 8. The current-binary 15-session time-tool family observed no semantic-empty target stream, but strict identity correlation failed for all 15. Treat it as an unsuccessful correlated reproduction, not evidence of a fix.
 
+## Production deployment validation, 2026-08-01
+
+The payload-parity and stream-wide STOP changes were released as commit
+`1b046492f1f6e754c09a76b9d306936c9a4ab1b5`. GitHub Actions
+`docker-publish` run `30697157073` completed successfully before rollout.
+Production operations used the approved Electerm MCP `usa` bookmark only.
+
+Pre-deployment rollback identity:
+
+- image ID: `sha256:48c6c56391f44288ea174d8e6e274e5162c8328ad0d723003e61fc62b079df56`;
+- image revision label: `9669f73135b4603785e2a62acd95c4f042a49f86`;
+- container health: healthy;
+- local rollback tag retained as
+  `ghcr.io/chrys4lisfag/sub2api:rollback-stop-20260801`.
+
+The release command pulled `ghcr.io/chrys4lisfag/sub2api:latest`, verified its
+revision label before recreation, and recreated only the `sub2api` service with
+`--no-deps`. Deployed identity:
+
+- image ID: `sha256:9050cf1831f4bd7658d4cb981282fb9e07ad0cee90f62bce8a5aa9dc5ee3f480`;
+- image revision label:
+  `1b046492f1f6e754c09a76b9d306936c9a4ab1b5`;
+- health status: healthy;
+- `GET http://127.0.0.1:8080/health`: HTTP 200;
+- container start: `2026-08-01T11:16:12.016304022Z`.
+
+A bounded canary observed logs from container start through
+`2026-08-01T11:21:47Z`: 138 total lines, one readiness marker, and 49 request
+markers. It found zero `stop_without_content` markers, zero
+`failover_kind=semantic_empty` markers, zero detected 502 markers, and zero
+panic/fatal markers. The preceding 15-minute baseline also had zero semantic
+STOP, semantic failover, 502, or panic/fatal markers.
+
+This proves exact-image deployment, service health, and absence of an immediate
+traffic regression. No natural semantic-empty event occurred during the
+canary, so the deployment did **not** exercise the live failover branch and is
+not evidence that upstream semantic-empty generation is fixed. The permanent
+regression tests remain the evidence for `functionCall -> empty STOP`
+classification, and the earlier controlled matrix remains the evidence for the
+thinking mitigation. No captured prompt, response body, credential, or tool
+argument was transferred or logged during deployment validation.
+
 ## Operational cleanup
 
 Cleanup completed on `2026-07-30`:
