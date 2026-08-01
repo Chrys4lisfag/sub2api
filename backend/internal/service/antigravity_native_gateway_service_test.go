@@ -51,6 +51,48 @@ func TestWrapNativeV1Internal_BareGeminiBody(t *testing.T) {
 	}
 }
 
+func TestWrapNativeV1Internal_PreservesAgyLabels(t *testing.T) {
+	body := []byte(`{
+		"contents":[],
+		"labels":{
+			"last_step_index":"4",
+			"model_enum":"MODEL_PLACEHOLDER",
+			"trajectory_id":"redacted-trajectory",
+			"used_claude":"false",
+			"used_claude_conservative":"false",
+			"used_non_gemini_model":"false"
+		}
+	}`)
+	out, err := wrapNativeV1Internal("redacted-project", "gemini-3.6-flash-high", body)
+	if err != nil {
+		t.Fatalf("wrap request: %v", err)
+	}
+
+	var envelope map[string]any
+	if err := json.Unmarshal(out, &envelope); err != nil {
+		t.Fatalf("decode envelope: %v", err)
+	}
+	inner, ok := envelope["request"].(map[string]any)
+	if !ok {
+		t.Fatalf("request: got %T, want object", envelope["request"])
+	}
+	labels, ok := inner["labels"].(map[string]any)
+	if !ok {
+		t.Fatalf("labels: got %T, want object", inner["labels"])
+	}
+	if len(labels) != 6 {
+		t.Fatalf("labels count: got %d, want 6", len(labels))
+	}
+	if labels["trajectory_id"] != "redacted-trajectory" ||
+		labels["last_step_index"] != "4" ||
+		labels["model_enum"] != "MODEL_PLACEHOLDER" ||
+		labels["used_claude"] != "false" ||
+		labels["used_claude_conservative"] != "false" ||
+		labels["used_non_gemini_model"] != "false" {
+		t.Fatalf("labels changed during native wrapping: %#v", labels)
+	}
+}
+
 // TestWrapNativeV1Internal_IdempotentPassthrough verifies that if the
 // caller hands us an already-wrapped envelope (contains
 // "userAgent":"antigravity"), we don't re-wrap.
@@ -429,6 +471,31 @@ func TestInspectStreamChunk_FunctionCallWithArgs(t *testing.T) {
 	saw, fn, empty := inspectStreamChunk(in)
 	if saw || !fn || empty != "" {
 		t.Fatalf("good function call: sawText=%v sawFn=%v emptyArgs=%q want sawFn=true rest false", saw, fn, empty)
+	}
+}
+
+func TestInspectStreamChunks_FunctionCallThenEmptyStopIsUsable(t *testing.T) {
+	chunks := [][]byte{
+		[]byte(`{"candidates":[{"content":{"role":"model","parts":[{"functionCall":{"name":"call_mcp_tool","args":{"server_name":"fixture","tool_name":"get_time","arguments":{"timezone":"UTC"}}}}]}}]}`),
+		[]byte(`{"candidates":[{"content":{"role":"model","parts":[]},"finishReason":"STOP"}]}`),
+	}
+
+	var sawText, sawFunctionCall bool
+	finishReason := ""
+	for _, chunk := range chunks {
+		chunkSawText, chunkSawFunctionCall, _ := inspectStreamChunk(chunk)
+		sawText = sawText || chunkSawText
+		sawFunctionCall = sawFunctionCall || chunkSawFunctionCall
+		if reason := payloadFinishReason(chunk); reason != "" {
+			finishReason = reason
+		}
+	}
+
+	if !sawFunctionCall {
+		t.Fatal("earlier function call was not retained across stream")
+	}
+	if isNativeSemanticEmptyCompletion(sawText, sawFunctionCall, finishReason) {
+		t.Fatal("functionCall followed by empty STOP must not trigger semantic-empty failover")
 	}
 }
 

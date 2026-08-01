@@ -20,6 +20,7 @@ type GeminiRequest struct {
 	Tools             []GeminiToolDeclaration `json:"tools,omitempty"`
 	ToolConfig        *GeminiToolConfig       `json:"toolConfig,omitempty"`
 	SafetySettings    []GeminiSafetySetting   `json:"safetySettings,omitempty"`
+	Labels            map[string]string       `json:"labels,omitempty"`
 	SessionID         string                  `json:"sessionId,omitempty"`
 }
 
@@ -61,13 +62,15 @@ type GeminiFunctionResponse struct {
 
 // GeminiGenerationConfig Gemini 生成配置
 type GeminiGenerationConfig struct {
-	MaxOutputTokens int                   `json:"maxOutputTokens,omitempty"`
-	Temperature     *float64              `json:"temperature,omitempty"`
-	TopP            *float64              `json:"topP,omitempty"`
-	TopK            *int                  `json:"topK,omitempty"`
-	ThinkingConfig  *GeminiThinkingConfig `json:"thinkingConfig,omitempty"`
-	StopSequences   []string              `json:"stopSequences,omitempty"`
-	ImageConfig     *GeminiImageConfig    `json:"imageConfig,omitempty"`
+	MaxOutputTokens    int                   `json:"maxOutputTokens,omitempty"`
+	Temperature        *float64              `json:"temperature,omitempty"`
+	TopP               *float64              `json:"topP,omitempty"`
+	CandidateCount     *int                  `json:"candidateCount,omitempty"`
+	TopK               *int                  `json:"topK,omitempty"`
+	ThinkingConfig     *GeminiThinkingConfig `json:"thinkingConfig,omitempty"`
+	ResponseModalities *[]string             `json:"responseModalities,omitempty"`
+	StopSequences      *[]string             `json:"stopSequences,omitempty"`
+	ImageConfig        *GeminiImageConfig    `json:"imageConfig,omitempty"`
 }
 
 // GeminiImageConfig Gemini 图片生成配置（gemini-3-pro-image / gemini-3.1-flash-image 等图片模型支持）
@@ -78,8 +81,9 @@ type GeminiImageConfig struct {
 
 // GeminiThinkingConfig Gemini thinking 配置
 type GeminiThinkingConfig struct {
-	IncludeThoughts bool `json:"includeThoughts"`
-	ThinkingBudget  int  `json:"thinkingBudget,omitempty"`
+	IncludeThoughts *bool   `json:"includeThoughts,omitempty"`
+	ThinkingBudget  *int    `json:"thinkingBudget,omitempty"`
+	ThinkingLevel   *string `json:"thinkingLevel,omitempty"`
 }
 
 // GeminiToolDeclaration Gemini 工具声明
@@ -117,7 +121,8 @@ type GeminiToolConfig struct {
 
 // GeminiFunctionCallingConfig 函数调用配置
 type GeminiFunctionCallingConfig struct {
-	Mode string `json:"mode,omitempty"` // VALIDATED, AUTO, NONE
+	Mode                 string    `json:"mode,omitempty"` // VALIDATED, AUTO, NONE
+	AllowedFunctionNames *[]string `json:"allowedFunctionNames,omitempty"`
 }
 
 // GeminiSafetySetting Gemini 安全设置

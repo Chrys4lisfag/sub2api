@@ -619,7 +619,8 @@ func buildGenerationConfig(req *ClaudeRequest) *GeminiGenerationConfig {
 
 	isReasoning := IsGeminiReasoningModel(req.Model)
 	if !isReasoning {
-		config.StopSequences = DefaultStopSequences
+		stopSequences := append([]string(nil), DefaultStopSequences...)
+		config.StopSequences = &stopSequences
 	}
 
 	// 如果请求中指定了 MaxTokens，使用请求值
@@ -629,8 +630,9 @@ func buildGenerationConfig(req *ClaudeRequest) *GeminiGenerationConfig {
 
 	// Thinking 配置
 	if req.Thinking != nil && (req.Thinking.Type == "enabled" || req.Thinking.Type == "adaptive") {
+		includeThoughts := true
 		config.ThinkingConfig = &GeminiThinkingConfig{
-			IncludeThoughts: true,
+			IncludeThoughts: &includeThoughts,
 		}
 
 		// - thinking.type=enabled：budget_tokens>0 用显式预算
@@ -657,7 +659,7 @@ func buildGenerationConfig(req *ClaudeRequest) *GeminiGenerationConfig {
 				config.MaxOutputTokens = adjusted
 			}
 		}
-		config.ThinkingConfig.ThinkingBudget = budget
+		config.ThinkingConfig.ThinkingBudget = &budget
 	}
 
 	if config.MaxOutputTokens > maxLimit {
