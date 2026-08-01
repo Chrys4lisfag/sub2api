@@ -67,10 +67,13 @@ func NewBrowserLoginService(settingService *SettingService, proxyRepo ProxyRepos
 	return &BrowserLoginService{settingService: settingService, proxyRepo: proxyRepo, accountRepo: accountRepo}
 }
 
+const browserProfileExtraKey = "browser_profile_id"
+
 // BrowserLoginStartInput describes the admin's ask when opening the modal.
 type BrowserLoginStartInput struct {
+	AccountID *int64 // existing account whose persistent browser profile owns the session
 	ProxyID   *int64 // account proxy — the streamed browser egresses through it
-	ProfileID string // per-account persistent profile; empty → server mints a uuid
+	ProfileID string // create flow only; existing accounts resolve this from persisted account state
 	StartURL  string // initial page; empty → https://www.google.com
 }
 
@@ -113,9 +116,112 @@ type GoogleAutologinStatus struct {
 	Error   string `json:"error,omitempty"`
 }
 
+func accountBrowserProfileID(accountID int64) string {
+	return fmt.Sprintf("account-%d", accountID)
+}
+
+func browserProfileIDFromAccount(account *Account) string {
+	if account == nil || account.Extra == nil {
+		return ""
+	}
+	value, _ := account.Extra[browserProfileExtraKey].(string)
+	return strings.TrimSpace(value)
+}
+
+// resolveBrowserProfileID binds existing-account sessions to repository state.
+// A missing or shared legacy profile is replaced with a deterministic,
+// account-specific ID and persisted before browser2webfront is called.
+func (s *BrowserLoginService) resolveBrowserProfileID(ctx context.Context, input *BrowserLoginStartInput) (string, error) {
+	requested := strings.TrimSpace(input.ProfileID)
+	if input.AccountID == nil {
+		return requested, nil
+	}
+	accountID := *input.AccountID
+	if accountID <= 0 {
+		return "", fmt.Errorf("account_id must be positive")
+	}
+	if s.accountRepo == nil {
+		return "", fmt.Errorf("account profile persistence is unavailable")
+	}
+	account, err := s.accountRepo.GetByID(ctx, accountID)
+	if err != nil {
+		return "", fmt.Errorf("load browser account: %w", err)
+	}
+	if account == nil {
+		return "", fmt.Errorf("browser account not found")
+	}
+
+	stored := browserProfileIDFromAccount(account)
+	if stored != "" {
+		matches, findErr := s.accountRepo.FindByExtraField(ctx, browserProfileExtraKey, stored)
+		if findErr != nil {
+			return "", fmt.Errorf("check browser profile ownership: %w", findErr)
+		}
+		shared := false
+		currentIncluded := false
+		for i := range matches {
+			if matches[i].ID == accountID {
+				currentIncluded = true
+			} else {
+				shared = true
+			}
+		}
+		if !shared {
+			return stored, nil
+		}
+
+		// Split every owner in one pass. Migrating only the account being opened
+		// would leave the final owner attached to the old shared cookie jar.
+		if !currentIncluded {
+			matches = append(matches, *account)
+		}
+		for i := range matches {
+			derived := accountBrowserProfileID(matches[i].ID)
+			owners, ownershipErr := s.accountRepo.FindByExtraField(ctx, browserProfileExtraKey, derived)
+			if ownershipErr != nil {
+				return "", fmt.Errorf("check migrated browser profile ownership: %w", ownershipErr)
+			}
+			for j := range owners {
+				if owners[j].ID != matches[i].ID {
+					return "", fmt.Errorf("derived browser profile is already owned by another account")
+				}
+			}
+		}
+		for i := range matches {
+			derived := accountBrowserProfileID(matches[i].ID)
+			if updateErr := s.accountRepo.UpdateExtra(ctx, matches[i].ID, map[string]any{browserProfileExtraKey: derived}); updateErr != nil {
+				return "", fmt.Errorf("split shared account browser profile: %w", updateErr)
+			}
+		}
+		return accountBrowserProfileID(accountID), nil
+	}
+
+	profileID := accountBrowserProfileID(accountID)
+	matches, err := s.accountRepo.FindByExtraField(ctx, browserProfileExtraKey, profileID)
+	if err != nil {
+		return "", fmt.Errorf("check derived browser profile ownership: %w", err)
+	}
+	for i := range matches {
+		if matches[i].ID != accountID {
+			return "", fmt.Errorf("derived browser profile is already owned by another account")
+		}
+	}
+	if err := s.accountRepo.UpdateExtra(ctx, accountID, map[string]any{browserProfileExtraKey: profileID}); err != nil {
+		return "", fmt.Errorf("save account browser profile: %w", err)
+	}
+	return profileID, nil
+}
+
 // StartSession opens the single browser session, egressing through the account's
 // proxy (if any). Returns the VNC token the frontend needs to attach noVNC.
 func (s *BrowserLoginService) StartSession(ctx context.Context, input *BrowserLoginStartInput) (*BrowserLoginSession, error) {
+	if input == nil {
+		return nil, fmt.Errorf("browser session input is required")
+	}
+	profileID, err := s.resolveBrowserProfileID(ctx, input)
+	if err != nil {
+		return nil, err
+	}
 	creds, err := s.browserLoginCreds(ctx)
 	if err != nil {
 		return nil, err
@@ -144,7 +250,7 @@ func (s *BrowserLoginService) StartSession(ctx context.Context, input *BrowserLo
 	}
 
 	payload := map[string]any{
-		"profile_id": input.ProfileID,
+		"profile_id": profileID,
 		"start_url":  startURL,
 	}
 	if proxyURL != "" {

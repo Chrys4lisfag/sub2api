@@ -43,6 +43,7 @@ func writeBrowserLoginError(c *gin.Context, err error) {
 }
 
 type BrowserLoginStartRequest struct {
+	AccountID *int64 `json:"account_id"`
 	ProxyID   *int64 `json:"proxy_id"`
 	ProfileID string `json:"profile_id"`
 }
@@ -62,6 +63,7 @@ func (h *BrowserLoginHandler) StartSession(c *gin.Context) {
 		return
 	}
 	sess, err := h.svc.StartSession(c.Request.Context(), &service.BrowserLoginStartInput{
+		AccountID: req.AccountID,
 		ProxyID:   req.ProxyID,
 		ProfileID: req.ProfileID,
 	})

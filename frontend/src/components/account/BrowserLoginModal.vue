@@ -198,6 +198,9 @@ const isLaunch = computed(() => props.mode === 'launch')
 const modalTitle = computed(() =>
   isLaunch.value ? `Browser${props.accountName ? ' — ' + props.accountName : ''}` : 'Login with Browser'
 )
+const browserSessionIdentity = computed(() =>
+  JSON.stringify([props.accountId ?? null, props.profileId?.trim() ?? '', props.proxyId ?? null, props.mode ?? 'login'])
+)
 
 // Fresh OAuth composable instance — the modal runs the whole flow
 // (generate URL → open in stream → capture code → exchange) internally and
@@ -527,6 +530,7 @@ const open = async (attempt = 0, generation = ++lifecycleGeneration) => {
   }
   try {
     const started = await browserLoginAPI.startSession({
+      account_id: props.accountId,
       proxy_id: props.proxyId,
       profile_id: props.profileId
     })
@@ -535,9 +539,9 @@ const open = async (attempt = 0, generation = ++lifecycleGeneration) => {
       return
     }
     session.value = started
-    // Launch mode: persist a freshly-minted profile back to the account so a
-    // later launch / re-login reuses the same signed-in profile.
-    if (isLaunch.value && !props.profileId && session.value.profile_id) {
+    // Launch mode: refresh the parent cache when the backend assigned or
+    // corrected this account's persisted profile ID.
+    if (isLaunch.value && session.value.profile_id && session.value.profile_id !== props.profileId) {
       emit('profile-created', session.value.profile_id)
     }
     statusText.value = isLaunch.value
@@ -657,11 +661,24 @@ const complete = async () => {
   }
 }
 
+const restartForBrowserIdentity = async (expectedIdentity: string) => {
+  await cleanup()
+  if (!props.show || browserSessionIdentity.value !== expectedIdentity) return
+  await open()
+}
+
 watch(
-  () => props.show,
-  (val) => {
-    if (val) void open()
-    else void cleanup()
+  () => [props.show, browserSessionIdentity.value] as const,
+  ([visible, identity], [wasVisible, previousIdentity]) => {
+    if (!visible) {
+      void cleanup()
+      return
+    }
+    if (!wasVisible) {
+      void open()
+      return
+    }
+    if (identity !== previousIdentity) void restartForBrowserIdentity(identity)
   }
 )
 

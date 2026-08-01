@@ -73,6 +73,7 @@ type ModalOverrides = Partial<{
   mode: 'login' | 'launch'
   accountName: string
   accountId: number
+  proxyId: number | null
   initialGoogleLogin: string
   initialGooglePassword: string
   initialGoogle2faImportCode: string
@@ -108,6 +109,61 @@ describe('BrowserLoginModal lifecycle', () => {
     await wrapper.setProps({ show: false })
     await flushPromises()
     expect(api.stopSession).toHaveBeenCalledWith('session-a')
+
+    wrapper.unmount()
+  })
+
+  it('restarts for a changed account identity and rejects a stale start', async () => {
+    const pendingSecondStart = deferred<typeof session>()
+    const sessionB = {
+      ...session,
+      session_id: 'session-b',
+      profile_id: 'profile-b',
+      vnc_token: 'password-b'
+    }
+    const sessionC = {
+      ...session,
+      session_id: 'session-c',
+      profile_id: 'profile-c',
+      vnc_token: 'password-c'
+    }
+    api.startSession
+      .mockResolvedValueOnce(session)
+      .mockReturnValueOnce(pendingSecondStart.promise)
+      .mockResolvedValueOnce(sessionC)
+    const wrapper = mountModal({
+      mode: 'launch',
+      accountId: 1,
+      proxyId: 11,
+      profileId: 'profile-a'
+    })
+
+    await wrapper.setProps({ show: true })
+    await flushPromises()
+    await wrapper.setProps({ accountId: 2, proxyId: 22, profileId: 'profile-b' })
+    await flushPromises()
+
+    expect(api.stopSession).toHaveBeenCalledWith('session-a')
+    expect(api.startSession).toHaveBeenNthCalledWith(2, {
+      account_id: 2,
+      proxy_id: 22,
+      profile_id: 'profile-b'
+    })
+
+    await wrapper.setProps({ accountId: 3, proxyId: 33, profileId: 'profile-c' })
+    await flushPromises()
+    expect(api.startSession).toHaveBeenNthCalledWith(3, {
+      account_id: 3,
+      proxy_id: 33,
+      profile_id: 'profile-c'
+    })
+    expect(wrapper.get('iframe').attributes('src')).toContain('password=password-c')
+
+    pendingSecondStart.resolve(sessionB)
+    await flushPromises()
+    expect(api.stopSession).toHaveBeenCalledWith('session-b')
+    expect(wrapper.get('iframe').attributes('src')).toContain('password=password-c')
+    expect(wrapper.get('iframe').attributes('src')).not.toContain('password=password-b')
 
     wrapper.unmount()
   })

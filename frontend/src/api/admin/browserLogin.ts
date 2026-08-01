@@ -41,6 +41,7 @@ export interface BrowserLoginRequestOptions {
 
 /** Start the single browser session (409 upstream if one is already active). */
 export async function startSession(payload: {
+  account_id?: number
   proxy_id?: number | null
   profile_id?: string
 }): Promise<BrowserLoginSession> {

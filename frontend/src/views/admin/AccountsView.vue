@@ -424,7 +424,7 @@
       :initial-google-password="launchGoogleCredential('google_password')"
       :initial-google-2fa-import-code="launchGoogleCredential('google_2fa_import_code')"
       @profile-created="onLaunchProfileCreated"
-      @close="showLaunchBrowser = false"
+      @close="closeLaunchBrowser"
     />
     <SyncFromCrsModal :show="showSync" @close="showSync = false" @synced="reload" />
     <ImportDataModal :show="showImportData" @close="showImportData = false" @imported="handleDataImported" />
@@ -1745,15 +1745,14 @@ const handleSchedule = async (a: Account) => {
 const closeSchedulePanel = () => { showSchedulePanel.value = false; scheduleAcc.value = null; scheduleModelOptions.value = [] }
 const handleReAuth = (a: Account) => { reAuthAcc.value = a; showReAuth.value = true }
 const handleLaunchBrowser = (a: Account) => { launchAcc.value = a; showLaunchBrowser.value = true }
-const onLaunchProfileCreated = async (profileId: string) => {
-  if (!launchAcc.value) return
-  try {
-    const extra = { ...((launchAcc.value.extra as Record<string, unknown>) || {}), browser_profile_id: profileId }
-    const updated = await adminAPI.accounts.update(launchAcc.value.id, { extra })
-    handleAccountUpdated(updated)
-  } catch {
-    /* non-fatal: the launched session still works this time */
-  }
+const closeLaunchBrowser = () => { showLaunchBrowser.value = false; launchAcc.value = null }
+const onLaunchProfileCreated = (profileId: string) => {
+  const account = launchAcc.value
+  if (!account) return
+  patchAccountInList({
+    ...account,
+    extra: { ...((account.extra as Record<string, unknown>) || {}), browser_profile_id: profileId }
+  })
 }
 const handleRefresh = async (a: Account) => {
   try {
