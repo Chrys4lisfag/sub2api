@@ -222,7 +222,7 @@ func (s *AntigravityGatewayService) ForwardGemini(ctx context.Context, c *gin.Co
 			s.settingService != nil &&
 			s.settingService.IsSignatureRectifierEnabled(ctx) &&
 			isSignatureRelatedError(signatureCheckBody) &&
-			bytes.Contains(injectedBody, []byte(`"thoughtSignature"`)) {
+			hasGeminiNativeThoughtSignature(injectedBody) {
 			upstreamMsg := sanitizeUpstreamErrorMessage(strings.TrimSpace(extractAntigravityErrorMessage(signatureCheckBody)))
 			upstreamDetail := s.getUpstreamErrorDetail(signatureCheckBody)
 			appendOpsUpstreamError(c, OpsUpstreamErrorEvent{

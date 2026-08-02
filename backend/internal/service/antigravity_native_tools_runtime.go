@@ -22,9 +22,12 @@
 package service
 
 import (
+	"bytes"
 	"encoding/json"
 	"log/slog"
 	"sort"
+
+	"github.com/tidwall/gjson"
 	"strings"
 )
 
@@ -56,8 +59,7 @@ func preprocessNativeBody(body []byte, useAggregator bool, aggregatorName, disco
 			ToolCallMode:   toolCallMode,
 		}, nil
 	}
-	var inner map[string]any
-	if err := json.Unmarshal(body, &inner); err != nil {
+	if !gjson.ValidBytes(body) {
 		return body, toolPrepReport{
 			AggregatorOn:   useAggregator,
 			AggregatorName: aggregatorName,
@@ -65,8 +67,28 @@ func preprocessNativeBody(body []byte, useAggregator bool, aggregatorName, disco
 			ToolCallMode:   toolCallMode,
 		}, nil
 	}
-	if r, ok := inner["request"].(map[string]any); ok && len(inner) == 1 {
-		inner = r
+	decoder := json.NewDecoder(bytes.NewReader(body))
+	decoder.UseNumber()
+	var root map[string]any
+	if err := decoder.Decode(&root); err != nil {
+		return body, toolPrepReport{
+			AggregatorOn:   useAggregator,
+			AggregatorName: aggregatorName,
+			DiscoveryMode:  discoveryMode,
+			ToolCallMode:   toolCallMode,
+		}, nil
+	}
+	inner := root
+	fullEnvelope := false
+	if r, ok := root["request"].(map[string]any); ok {
+		userAgent, _ := root["userAgent"].(string)
+		switch {
+		case len(root) == 1:
+			inner = r
+		case strings.EqualFold(userAgent, "antigravity"):
+			inner = r
+			fullEnvelope = true
+		}
 	}
 	// Normalize Google GenAI SDK shape ({model, contents, config:{...}})
 	// to Gemini REST API shape (top-level tools/systemInstruction/
@@ -77,7 +99,11 @@ func preprocessNativeBody(body []byte, useAggregator bool, aggregatorName, disco
 	// field.`). No-op when the body is already REST-shaped.
 	normalizeOmpGeminiSDKShape(inner)
 	report := applyToolPreprocessing(inner, useAggregator, aggregatorName, discoveryMode, toolCallMode)
-	out, err := json.Marshal(inner)
+	output := inner
+	if fullEnvelope {
+		output = root
+	}
+	out, err := json.Marshal(output)
 	if err != nil {
 		return body, report, nil
 	}
@@ -177,8 +203,10 @@ func rewriteAggregatedFunctionCalls(payload []byte, report toolPrepReport) []byt
 		return payload
 	}
 
+	decoder := json.NewDecoder(bytes.NewReader(payload))
+	decoder.UseNumber()
 	var root map[string]any
-	if err := json.Unmarshal(payload, &root); err != nil {
+	if err := decoder.Decode(&root); err != nil {
 		return payload
 	}
 	// Peel agymimic envelope when present so the loop's wrapped payloads

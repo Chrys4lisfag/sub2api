@@ -168,6 +168,44 @@ func ResolveWireFromBody(publicName string, body []byte) string {
 	}
 }
 
+// ResolveSemanticRetryModel lowers explicit Antigravity tier aliases to match
+// the thinkingLevel selected for a semantic-empty retry. Normal routing keeps
+// explicit suffixes authoritative; retry routing must override them because the
+// handler intentionally lowers the tier after repeated unusable outputs.
+func ResolveSemanticRetryModel(publicName string, body []byte) string {
+	normalized := strings.ToLower(strings.TrimSpace(strings.TrimPrefix(publicName, "models/")))
+	level := extractThinkingLevel(body)
+	switch normalized {
+	case "gemini-3.6-flash-high":
+		switch level {
+		case "medium":
+			return "gemini-3.6-flash-medium"
+		case "minimal", "low":
+			return "gemini-3.6-flash-low"
+		}
+	case "gemini-3.6-flash-medium":
+		if level == "minimal" || level == "low" {
+			return "gemini-3.6-flash-low"
+		}
+	case "gemini-3.5-flash-high", "gemini-3-flash-agent":
+		switch level {
+		case "medium":
+			return "gemini-3.5-flash-medium"
+		case "minimal", "low":
+			return "gemini-3.5-flash-low"
+		}
+	case "gemini-3.5-flash-medium":
+		if level == "minimal" || level == "low" {
+			return "gemini-3.5-flash-low"
+		}
+	case "gemini-3.1-pro-high", "gemini-pro-agent":
+		if level == "minimal" || level == "low" {
+			return "gemini-3.1-pro-low"
+		}
+	}
+	return publicName
+}
+
 // extractThinkingLevel returns the first non-empty thinkingLevel found in a
 // native Gemini REST body, an OMP @google/genai SDK body, or a wrapped
 // v1internal request, normalized to lowercase.
@@ -201,7 +239,7 @@ func DefaultVariantThinkingLevel(modelName string) string {
 		return "high"
 	case "gemini-3.5-flash-medium", "gemini-3.6-flash-medium":
 		return "medium"
-	case "gemini-3.6-flash-low":
+	case "gemini-3.5-flash-low", "gemini-3.6-flash-low":
 		return "low"
 	default:
 		return ""
@@ -237,8 +275,8 @@ func ApplyWireModelToBody(body []byte) []byte {
 	return out
 }
 
-// applyDefaultThinkingLevel injects request.generationConfig.thinkingConfig
-// for variants that imply one. Skipped when the caller already supplied an
+// applyDefaultThinkingLevel injects thinkingConfig into the caller's bare,
+// SDK config, or wrapped request shape for variants that imply one. Skipped when the caller already supplied an
 // explicit thinking level OR budget (either camelCase or snake_case keys).
 // Skipped when there is no implicit level for the given model.
 func applyDefaultThinkingLevel(body []byte, publicModelName string) []byte {
@@ -246,16 +284,19 @@ func applyDefaultThinkingLevel(body []byte, publicModelName string) []byte {
 	if level == "" {
 		return body
 	}
-	const thinkingPath = "request.generationConfig.thinkingConfig"
-	for _, key := range []string{
-		thinkingPath + ".thinkingLevel",
-		thinkingPath + ".thinking_level",
-		thinkingPath + ".thinkingBudget",
-		thinkingPath + ".thinking_budget",
-	} {
-		if gjson.GetBytes(body, key).Exists() {
-			return body
+	bases := []string{"generationConfig.thinkingConfig", "config.thinkingConfig", "request.generationConfig.thinkingConfig", "request.config.thinkingConfig"}
+	for _, base := range bases {
+		for _, key := range []string{"thinkingLevel", "thinking_level", "thinkingBudget", "thinking_budget"} {
+			if gjson.GetBytes(body, base+"."+key).Exists() {
+				return body
+			}
 		}
+	}
+	thinkingPath := "generationConfig.thinkingConfig"
+	if gjson.GetBytes(body, "request").IsObject() {
+		thinkingPath = "request.generationConfig.thinkingConfig"
+	} else if gjson.GetBytes(body, "config").IsObject() {
+		thinkingPath = "config.thinkingConfig"
 	}
 	updated, err := sjson.SetBytes(body, thinkingPath+".thinkingLevel", level)
 	if err != nil {

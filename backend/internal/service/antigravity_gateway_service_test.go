@@ -867,14 +867,7 @@ func TestAntigravityGatewayService_ForwardGemini_RetriesCorruptedThoughtSignatur
 	writer := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(writer)
 
-	body, err := json.Marshal(map[string]any{
-		"contents": []map[string]any{
-			{"role": "user", "parts": []map[string]any{{"text": "hello"}}},
-			{"role": "model", "parts": []map[string]any{{"text": "thinking", "thought": true, "thoughtSignature": "sig_bad_1"}}},
-			{"role": "model", "parts": []map[string]any{{"functionCall": map[string]any{"name": "toolA", "args": map[string]any{"x": 1}}, "thoughtSignature": "sig_bad_2"}}},
-		},
-	})
-	require.NoError(t, err)
+	body := []byte(`{"systemInstruction":{"parts":[{"text":"You are Antigravity"}]},"contents":[{"role":"user","parts":[{"text":"hello"}]},{"role":"model","parts":[{"text":"thinking","thought":true,"\u0074houghtSignature":"sig_bad_1"}]},{"role":"model","parts":[{"functionCall":{"name":"toolA","args":{"x":1}},"\u0074houghtSignature":"sig_bad_2"}]}]}`)
 
 	req := httptest.NewRequest(http.MethodPost, "/antigravity/v1beta/models/gemini-3.1-pro-preview:streamGenerateContent", bytes.NewReader(body))
 	c.Request = req

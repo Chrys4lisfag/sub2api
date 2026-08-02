@@ -526,6 +526,14 @@ func (h *GatewayHandler) GeminiV1BetaModels(c *gin.Context) {
 				failoverAction := fs.HandleFailoverError(c.Request.Context(), h.gatewayService, account.ID, account.Platform, failoverErr)
 				switch failoverAction {
 				case FailoverContinue:
+					if loweredBody, retryModel, changed := prepareGeminiFailoverRetry(body, modelName, failoverErr, fs.SemanticEmptyRetryCount); changed {
+						body = loweredBody
+						modelName = retryModel
+						reqLog.Info("gemini.semantic_empty_retry_lowered_thinking",
+							zap.String("thinking_policy", "HIGH_RETRY_THEN_MEDIUM_THEN_LOW"),
+							zap.String("retry_model", retryModel),
+						)
+					}
 					continue
 				case FailoverExhausted:
 					h.handleGeminiFailoverExhausted(c, fs.LastFailoverErr)
@@ -534,7 +542,12 @@ func (h *GatewayHandler) GeminiV1BetaModels(c *gin.Context) {
 					return
 				}
 			}
-			// ForwardNative already wrote the response
+			// Compatibility forwarders usually write their own error response.
+			// Native preprocessing/envelope failures do not; never let those
+			// naked errors become an implicit HTTP 200 with an empty body.
+			if c.Writer.Size() == writerSizeBeforeForward {
+				googleError(c, http.StatusBadGateway, "Upstream request failed")
+			}
 			reqLog.Error("gemini.forward_failed", zap.Int64("account_id", account.ID), zap.Error(err))
 			return
 		}
@@ -600,6 +613,17 @@ func (h *GatewayHandler) GeminiV1BetaModels(c *gin.Context) {
 		)
 		return
 	}
+}
+
+func prepareGeminiFailoverRetry(body []byte, modelName string, failoverErr *service.UpstreamFailoverError, semanticRetryCount int) ([]byte, string, bool) {
+	if failoverErr == nil || failoverErr.Kind != service.FailoverKindSemanticEmpty || semanticRetryCount <= 1 {
+		return body, modelName, false
+	}
+	loweredBody, changed := service.LowerGeminiNativeThinkingForSemanticRetry(body)
+	if !changed {
+		return body, modelName, false
+	}
+	return loweredBody, antigravity.ResolveSemanticRetryModel(modelName, loweredBody), true
 }
 
 func parseGeminiModelAction(rest string) (model string, action string, err error) {

@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/tidwall/gjson"
 )
 
 // TestWrapNativeV1Internal_BareGeminiBody verifies the common case: a plain
@@ -98,12 +99,42 @@ func TestWrapNativeV1Internal_PreservesAgyLabels(t *testing.T) {
 // "userAgent":"antigravity"), we don't re-wrap.
 func TestWrapNativeV1Internal_IdempotentPassthrough(t *testing.T) {
 	already := []byte(`{"project":"proj-x","model":"gemini-3-pro","request":{"contents":[]},"userAgent":"antigravity","requestId":"agent-abc"}`)
-	out, err := wrapNativeV1Internal("ignored", "ignored-model", already)
+	out, err := wrapNativeV1Internal("ignored", "gemini-3-pro", already)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if string(out) != string(already) {
 		t.Errorf("idempotent passthrough broken:\nwant: %s\ngot:  %s", already, out)
+	}
+}
+
+func TestWrapNativeV1Internal_SynchronizesPrebuiltEnvelopeRetryTier(t *testing.T) {
+	already := []byte(`{"project":"proj-x","model":"gemini-3.6-flash-high","request":{"generationConfig":{"thinkingConfig":{"thinkingLevel":"MEDIUM"}},"contents":[{"parts":[{"functionCall":{"args":{"large":9007199254740993}}}]}]},"userAgent":"antigravity","requestId":"agent-abc"}`)
+	out, err := wrapNativeV1Internal("ignored", "gemini-3.6-flash-medium", already)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got := gjson.GetBytes(out, "model").String(); got != "gemini-3.6-flash-medium" {
+		t.Fatalf("model: got %q, want medium retry alias", got)
+	}
+	if got := gjson.GetBytes(out, "request.generationConfig.thinkingConfig.thinkingBudget").Int(); got != 4000 {
+		t.Fatalf("thinkingBudget: got %d, want 4000", got)
+	}
+	if !strings.Contains(string(out), `"large":9007199254740993`) {
+		t.Fatalf("large tool argument changed: %s", out)
+	}
+}
+
+func TestWrapNativeV1Internal_EmptyBody(t *testing.T) {
+	out, err := wrapNativeV1Internal("proj", "gemini-3.6-flash-high", nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got := gjson.GetBytes(out, "model").String(); got != "gemini-3.6-flash-high" {
+		t.Fatalf("model: got %q", got)
+	}
+	if !gjson.GetBytes(out, "request.sessionId").Exists() {
+		t.Fatal("request.sessionId missing")
 	}
 }
 
@@ -724,6 +755,34 @@ func TestStreamGeminiToClient_ThoughtThenAnswerFlushesOnce(t *testing.T) {
 	}
 	if strings.Index(out, "private reasoning") > strings.Index(out, "visible answer") {
 		t.Fatalf("buffered thought reordered after answer: %q", out)
+	}
+}
+
+func TestPassNonStreamingGemini_EmbeddedRateLimitFailsOverBeforeWrite(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	resp := &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     http.Header{"Content-Type": []string{"application/json"}},
+		Body:       io.NopCloser(strings.NewReader(`{"error":{"code":429,"status":"RESOURCE_EXHAUSTED","message":"quota"}}`)),
+	}
+	result, err := (&AntigravityNativeGatewayService{}).passNonStreamingGemini(
+		context.Background(), c, 39, resp, time.Now(),
+		"gemini-3.6-flash", "gemini-3.6-flash-high", "generateContent", []byte(`{"request":{"contents":[]}}`), toolPrepReport{},
+	)
+	if result != nil {
+		t.Fatalf("result = %#v, want nil", result)
+	}
+	var failoverErr *UpstreamFailoverError
+	if !errors.As(err, &failoverErr) {
+		t.Fatalf("error = %v, want UpstreamFailoverError", err)
+	}
+	if failoverErr.StatusCode != http.StatusTooManyRequests {
+		t.Fatalf("status = %d, want 429", failoverErr.StatusCode)
+	}
+	if rec.Body.Len() != 0 {
+		t.Fatalf("response committed before failover: %q", rec.Body.String())
 	}
 }
 

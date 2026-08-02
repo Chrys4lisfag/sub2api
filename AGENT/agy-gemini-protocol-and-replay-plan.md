@@ -37,7 +37,7 @@ Observed matrix:
 
 1. **Issue evidence:** external issues are test cases, not proof that sub2api is wrong. The direct official-AGY typed round-trip found one concrete payload mismatch: AGY emits `request.labels`, while sub2api dropped it. `GeminiRequest.Labels` now preserves the string map; synthetic round-trip, native-wrapper, and private exact-envelope semantic probes pass. Issue-derived risks still requiring parity tests include invented sampling defaults, thought-signature/history continuity, function-call IDs, schema casing, `systemInstruction`, stream metadata, and function-call precedence over terminal STOP.
 2. **Complete field capture:** every serialized key is known for the five accepted raw bodies, six model-alias structural requests, and eight explicit-effort/default structural requests. HIGH, MEDIUM, LOW, and omitted-effort CLI controls are captured, but AGY-global coverage and 100% behavior parity are not proved. `thinkingLevel`, `temperature`, `topP`, `topK`, `candidateCount`, `stopSequences`, `responseModalities`, `imageConfig`, and allowed function names were absent from those bodies; other model families, tool choices, multimodal requests, providers, and retry-generated requests remain uncovered.
-3. **Local STOP reproduction:** a complete 74,647-byte production request containing the captured prompt/history/tools was replayed through a localhost CLIProxy with live upstream access. HIGH produced semantic-empty STOP in 80–100% of paired runs; LOW and disabled thinking produced 0/5 semantic-empty each. This proves the mitigation for that sample, not HIGH as root cause. The separate exact 94,771-byte official-AGY envelope harness has only a synthetic localhost STOP control so far; genuine provider/AGY semantic-empty replay for that envelope remains pending.
+3. **STOP reproduction and current AGY replay:** the earlier 74,647-byte family reproduced semantic-empty STOP at HIGH and established LOW/disabled mitigation. The newer complete 189,612-byte account-28 request produced 5 semantic-empty STOPs in 30 unchanged HIGH provider-success controls; LOW and disabled controls remained usable. Current `agy.exe` then sent that exact newer inner request in ten hash-bound, raw-captured transactions: eight initial text responses and two function calls, no semantic-empty STOP. This proves exact current-binary replay but not an upstream fix because AGY used a different outer project/account and egress. HIGH remains a condition, not a proved root cause.
 
 ## AGY artifact and evidence source
 
@@ -732,6 +732,131 @@ structural JSONL comparison
 
 The local proxy controls request transformation and credential isolation. It does not cryptographically prove Google's internal account selection or proxy egress.
 
+### Post-deployment complete-request replay
+
+A new complete production-causing request was captured at
+`2026-08-01T19:56:36.260612361Z`, transferred through Electerm SFTP, and
+hash-verified in the ACL-private evidence root:
+
+- inner request: 189,612 bytes;
+- request SHA-256:
+  `5e08ffa7b4cf45a55f93b2f8edfd3376e314d4261902b59592cc982f68dff622`;
+- capture bundle SHA-256:
+  `50cc3a81b18e94a53b23748e0be9c321b04e3986aacd1d9df3a92937d59e5b65`;
+- root keys: `contents`, `generationConfig`, `systemInstruction`, `tools`;
+- 133 content items and 13 function declarations;
+- HIGH thinking with thoughts enabled, no numeric budget, and no `toolConfig`.
+
+The pinned replay backend remained
+`ca8d8c3c4696f30ee8669cfaaf340db8ddeda0ec`. Dry-run preserved the unchanged
+baseline bytes/hash and made zero network requests. Attempts were sequential,
+request retries were zero, the listener was loopback-only, and output was
+structural JSONL.
+
+The captured per-account proxy could not complete the local transport path:
+five stale-token attempts failed during OAuth-token connection and one
+fresh-token probe still returned HTTP 500 before provider SSE. Those attempts
+cannot classify semantic generation.
+
+A bounded direct-egress fallback kept the exact request and captured OAuth
+account while changing egress:
+
+| Variant | Attempts | Semantic-empty STOP | Text | Function call |
+|---|---:|---:|---:|---:|
+| unchanged HIGH baseline | 5 | 1 | 4 | 0 |
+| LOW | 5 | 0 | 2 | 3 |
+| disabled thinking | 5 | 0 | 3 | 2 |
+
+The one HIGH failure matched the production signature: HTTP 200 stream,
+thought-only content plus signature, terminal STOP, no non-thought text, and no
+function call. Thus local reproduction succeeded, but exact-network-parity did
+not. LOW and disabled thinking were usable in all ten mitigation attempts.
+This supports the existing mitigation and still does not identify HIGH as root
+cause.
+
+Private structural summary SHA-256:
+`4b72595709b5fe77910a4d6b7bf1ccbcffdf32e8be2a07db4bfd070b7259dc03`.
+Raw prompt/history/tools and all replay credentials remain outside the
+repository in ACL-private retained storage. Explicit user instruction forbids
+deleting the auth artifacts unless that instruction is reversed.
+
+### Current-binary exact inner-request injection and forced-account result
+
+Current `agy.exe` SHA-256
+`83fb6e9d80e751d174b3738c3eefb054e75e85e47b17d1e159fe4831adceadc8`
+was exercised with permissioned print-mode prompts and localhost MITM. The
+request hook is resolved by masked pattern with an exact-one-match guard; no
+fixed RVA is trusted. Frida attachment exits before request emission on this
+binary, so successful experiments use the existing proxy-enabled MITM path.
+
+System-prompt spoofing was tested with a temporary custom agent carrying the
+complete captured instruction. It does not load the external 133-content
+history. `--continue` and `--conversation` resume AGY-owned sessions only; no
+supported arbitrary session-import path was found. The temporary agent and its
+acknowledgment were removed after the control. Full replay therefore uses exact
+inner-request injection, not a claim that CLI resume imported the transcript.
+
+The earlier ten-run exact injection proved byte/canonical forwarding but used
+AGY's unrelated current account/project: eight initial text responses, two
+function calls, zero semantic-empty. It remains a different-account control.
+
+The corrected operator-only gateway loaded the retained credential file and
+project, used the same direct local egress as the account-28 control, and
+forwarded provider responses back into real current `agy.exe`. Google's
+provider-internal account identity was not independently exposed; identity
+claims are limited to the exact local credential/project inputs. Only
+ACL-private artifacts contain bodies. Headers and credential values were never
+persisted. All agent rows shared project fingerprint
+`7bddb774000c7d4d8c9b797066a15a44bd8cf07ddc669c3187d508b2b4303bd7`.
+
+The exact 189,612-byte broken source produced a function call, then a genuine
+thought-only semantic-empty STOP, then text after AGY sent another exact agent
+request. This proves current AGY has the same provider-visible issue and proves
+its runtime recovery request, rather than proving absence.
+
+Hash-bound AGY-native batches preserved the prompt/history/tools invariant and
+varied only the actual wire tier representation:
+
+| Tier | Runs | Agent attempts | Text | Function call | Semantic-empty | Serialized control |
+|---|---:|---:|---:|---:|---:|---|
+| HIGH | 10 | 15 | 10 | 3 | 2 | high alias; budget 10,000; level absent |
+| MEDIUM | 10 | 16 | 10 | 5 | 1 | medium alias; budget 4,000; level absent |
+
+All agent attempts were HTTP 200 and matched the expected inner canonical hash,
+credential fingerprint, and project fingerprint. Every semantic-empty event
+was followed by another exact agent attempt and recovered to text or a
+function-call sequence ending in text. This is direct runtime confirmation of
+a genuine semantic-empty STOP and subsequent AGY/provider request. It does not
+prove a universal rate or that MEDIUM eliminates the stochastic condition.
+
+A separate five-run validation sent the service's exact serialized MEDIUM retry
+shape: medium alias, numeric budget 4,000, and explicit MEDIUM level. Seven agent
+attempts yielded five text, one function call, and one recoverable
+semantic-empty, all HTTP 200. This proves the provider accepts the final service
+shape. The retry policy consequently preserves HIGH for the first retry,
+changes to MEDIUM only after another semantic-empty, and reaches LOW only after
+MEDIUM also fails. The implementation now lowers recognized explicit model-tier
+suffixes and known AGY wire aliases together with `thinkingLevel`; otherwise
+suffix precedence would keep the provider wire model HIGH. Unknown and
+suffixless model IDs retain normal routing. Supported mutation paths cover bare
+`generationConfig`, OMP SDK `config`, and both under a wrapped `request`, with
+camelCase or snake_case level/budget keys. Prebuilt v1internal envelopes also
+synchronize the top-level model and tier budget. Thinking mutation uses targeted
+JSON paths so unrelated numeric literals and tool-argument values are preserved.
+
+Final code review also hardened adjacent paths exercised by these request
+shapes: escaped and prebuilt-envelope `thoughtSignature` keys now reach cleaning
+and rectifier retry; aggregated tool-call rewrites retain large JSON integers;
+HTTP-200 non-stream quota payloads become pre-write 429 failovers; naked
+forwarding failures no longer become implicit empty 200 responses; and decoded
+compressed request bodies over 64 MiB return an explicit `http.MaxBytesError`
+rather than a truncated body. Checkpoint-envelope comments are scoped to that
+captured request class rather than claiming universal AGY defaults.
+
+Private evidence is retained under the ACL-only semantic AGY and thinking
+ladder roots. Auth artifacts remain under the permanent retained-auth policy.
+Disposable proxies were stopped; credentials and evidence were not deleted.
+
 ## Production deployment validation
 
 Commit `1b046492f1f6e754c09a76b9d306936c9a4ab1b5` was published by successful
@@ -758,6 +883,11 @@ full-payload gaps above.
 ## Prioritized future plan
 
 ### P0: preserve and compare exact bodies
+
+Status update: steps 1–3 and the five-attempt HIGH/LOW/disabled subset of step
+5 are now complete for request SHA-256
+`5e08ffa7b4cf45a55f93b2f8edfd3376e314d4261902b59592cc982f68dff622`.
+Step 4 remains open, as does the rest of the one-variable protocol matrix.
 
 1. Capture a new problematic full payload or accept one supplied by the client.
 2. Store it only in the ACL-protected private evidence root.
@@ -820,4 +950,4 @@ A candidate fix graduates only when:
 4. behavior reproduces through an independent client path where possible;
 5. a valid function-call-plus-empty-STOP control still succeeds;
 6. malformed/safety/MAX_TOKENS cases remain distinguishable;
-7. temporary captures, credentials, processes, and overrides are removed afterward.
+7. disposable processes and overrides are removed afterward, while credentials or evidence under an explicit retention instruction remain ACL-private and are never deleted.

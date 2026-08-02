@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"compress/gzip"
 	"compress/zlib"
+	"errors"
 	"net/http"
 	"strings"
 	"testing"
@@ -114,6 +115,20 @@ func TestReadRequestBodyWithPrealloc_RejectsCorruptZstd(t *testing.T) {
 	_, err := ReadRequestBodyWithPrealloc(req)
 	if err == nil {
 		t.Fatal("expected error for corrupt zstd body, got nil")
+	}
+}
+
+func TestReadDecompressedBodyRejectsOverLimit(t *testing.T) {
+	got, err := readDecompressedBody(strings.NewReader("12345"), 4)
+	if got != nil {
+		t.Fatalf("expected no truncated body, got %q", got)
+	}
+	var maxErr *http.MaxBytesError
+	if !errors.As(err, &maxErr) {
+		t.Fatalf("expected MaxBytesError, got %v", err)
+	}
+	if maxErr.Limit != 4 {
+		t.Fatalf("limit: got %d, want 4", maxErr.Limit)
 	}
 }
 

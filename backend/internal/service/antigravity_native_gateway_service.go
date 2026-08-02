@@ -40,6 +40,8 @@ import (
 	"github.com/koval/agymimic/fingerprint"
 	"github.com/koval/agymimic/metrics"
 	"github.com/koval/agymimic/types"
+	"github.com/tidwall/gjson"
+	"github.com/tidwall/sjson"
 )
 
 // AntigravityNativeGatewayService is the platform=antigravity_native gateway.
@@ -717,15 +719,16 @@ func jsonEscape(s string) string {
 }
 
 // wrapNativeV1Internal wraps a Gemini-format inner request body in the
-// envelope agy.exe sends to /v1internal:streamGenerateContent. Verified
-// via Frida capture of crypto/tls.Conn.Write (May 2026):
+// checkpoint-style envelope accepted by /v1internal:streamGenerateContent.
+// Shape was verified against a May 2026 checkpoint capture; agent-mode
+// captures use different requestType, tool mode, and token defaults:
 //
 //	{
 //	  "project":     "<project_id>",
 //	  "requestId":   "checkpoint/<uuid>",   // NOT "agent-<uuid>"
 //	  "model":       "<wire_model>",        // envelope-level
 //	  "userAgent":   "antigravity",
-//	  "requestType": "checkpoint",          // agy always sends this
+//	  "requestType": "checkpoint",          // this gateway profile
 //	  "request": {
 //	    "contents":       [...],
 //	    "systemInstruction": {...},
@@ -738,16 +741,43 @@ func jsonEscape(s string) string {
 //
 // Returns the marshaled envelope ready for the HTTP body.
 func wrapNativeV1Internal(projectID, model string, geminiBody []byte) ([]byte, error) {
-	// Idempotent passthrough: caller may have pre-built the full envelope.
-	if len(geminiBody) > 0 && bytes.Contains(geminiBody, []byte(`"userAgent":"antigravity"`)) {
-		return geminiBody, nil
+	// Idempotent passthrough for a caller-provided full envelope. Semantic
+	// retries are the exception: keep the prebuilt envelope, but synchronize
+	// its top-level model and tier budget with the handler's lowered model.
+	if len(geminiBody) > 0 && gjson.ValidBytes(geminiBody) &&
+		strings.EqualFold(gjson.GetBytes(geminiBody, "userAgent").String(), "antigravity") {
+		if gjson.GetBytes(geminiBody, "model").String() == model {
+			return geminiBody, nil
+		}
+		out, err := sjson.SetBytes(geminiBody, "model", model)
+		if err != nil {
+			return nil, fmt.Errorf("set prebuilt envelope model: %w", err)
+		}
+		thinkingConfigPath := "request.generationConfig.thinkingConfig"
+		if !gjson.GetBytes(out, thinkingConfigPath).Exists() &&
+			gjson.GetBytes(out, "request.config.thinkingConfig").Exists() {
+			thinkingConfigPath = "request.config.thinkingConfig"
+		}
+		out, err = sjson.SetBytes(out, thinkingConfigPath+".thinkingBudget", thinkingBudgetForModel(model))
+		if err != nil {
+			return nil, fmt.Errorf("set prebuilt envelope thinking budget: %w", err)
+		}
+		return out, nil
 	}
 
-	var inner map[string]any
+	inner := make(map[string]any)
 	if len(geminiBody) > 0 {
-		if err := json.Unmarshal(geminiBody, &inner); err != nil {
+		if !gjson.ValidBytes(geminiBody) {
+			return nil, fmt.Errorf("decode body: invalid JSON")
+		}
+		decoder := json.NewDecoder(bytes.NewReader(geminiBody))
+		decoder.UseNumber()
+		if err := decoder.Decode(&inner); err != nil {
 			return nil, fmt.Errorf("decode body: %w", err)
 		}
+	}
+	if inner == nil {
+		inner = make(map[string]any)
 	}
 	// Caller-handed double-wrap: {"request": {...}} → unwrap once.
 	if r, ok := inner["request"].(map[string]any); ok && len(inner) == 1 {
@@ -762,7 +792,7 @@ func wrapNativeV1Internal(projectID, model string, geminiBody []byte) ([]byte, e
 		inner["sessionId"] = newSessionID()
 	}
 
-	// Inject generationConfig defaults agy.exe always sends. Caller-provided
+	// Inject defaults for this synthesized checkpoint profile. Caller-provided
 	// values win — we only fill gaps.
 	applyAgyDefaultsToInnerRequest(inner, model)
 
@@ -794,8 +824,8 @@ func newSessionID() string {
 }
 
 // applyAgyDefaultsToInnerRequest fills in generationConfig + toolConfig
-// defaults that real agy.exe always sends. Values present in `inner` are
-// preserved — we only patch gaps so callers can override per-request.
+// defaults used by this synthesized checkpoint profile. Values present in
+// `inner` are preserved — we only patch gaps so callers can override.
 //
 // Verified vs Frida capture (model=gemini-3.5-flash-low, "Medium" tier):
 //
@@ -1575,6 +1605,28 @@ func (s *AntigravityNativeGatewayService) passNonStreamingGemini(
 			PassthroughVerbatim:    true,
 			RetryableOnSameAccount: true,
 			Kind:                   FailoverKindSemanticEmpty,
+		}
+	}
+
+	// Match the streaming guard: cloudcode-pa may embed quota exhaustion in
+	// an HTTP-200 non-stream body. Surface 429 before any client write so the
+	// handler can rotate accounts and update the shared usage cache.
+	if isUpstreamRateLimitPayload(out) {
+		slog.WarnContext(ctx, "native: rate-limit error inside 200-OK non-stream response",
+			slog.Int64("account_id", accountID),
+			slog.String("model", originalModel),
+			slog.String("wire_model", wireModel))
+		if s.accountRepo != nil {
+			if acc, getErr := s.accountRepo.GetByID(ctx, accountID); getErr == nil && acc != nil {
+				s.nativeMarkFamilyExhaustedInCache(ctx, acc, originalModel, out)
+			}
+		}
+		return nil, &UpstreamFailoverError{
+			StatusCode:             http.StatusTooManyRequests,
+			ResponseBody:           out,
+			ResponseHeaders:        resp.Header,
+			PassthroughVerbatim:    true,
+			RetryableOnSameAccount: false,
 		}
 	}
 

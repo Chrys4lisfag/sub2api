@@ -820,3 +820,26 @@ func TestHandleSelectionExhausted(t *testing.T) {
 		require.Equal(t, FailoverContinue, action)
 	})
 }
+
+func TestPrepareGeminiFailoverRetry(t *testing.T) {
+	high := []byte(`{"generationConfig":{"thinkingConfig":{"thinkingLevel":"HIGH","thinkingBudget":8192,"includeThoughts":true}}}`)
+	semantic := &service.UpstreamFailoverError{Kind: service.FailoverKindSemanticEmpty}
+	firstRetry, firstModel, changed := prepareGeminiFailoverRetry(high, "gemini-3.6-flash-high", semantic, 1)
+	require.False(t, changed)
+	require.Equal(t, high, firstRetry)
+	require.Equal(t, "gemini-3.6-flash-high", firstModel)
+	medium, mediumModel, changed := prepareGeminiFailoverRetry(firstRetry, firstModel, semantic, 2)
+	require.True(t, changed)
+	require.JSONEq(t, `{"generationConfig":{"thinkingConfig":{"thinkingLevel":"MEDIUM","includeThoughts":true}}}`, string(medium))
+	require.Equal(t, "gemini-3.6-flash-medium", mediumModel)
+	low, lowModel, changed := prepareGeminiFailoverRetry(medium, mediumModel, semantic, 3)
+	require.True(t, changed)
+	require.JSONEq(t, `{"generationConfig":{"thinkingConfig":{"thinkingLevel":"LOW","includeThoughts":true}}}`, string(low))
+	require.Equal(t, "gemini-3.6-flash-low", lowModel)
+	for _, failoverErr := range []*service.UpstreamFailoverError{nil, {Kind: service.FailoverKindRateLimit}, {Kind: service.FailoverKindNetwork}} {
+		got, gotModel, gotChanged := prepareGeminiFailoverRetry(high, "gemini-3.6-flash-high", failoverErr, 2)
+		require.False(t, gotChanged)
+		require.Equal(t, high, got)
+		require.Equal(t, "gemini-3.6-flash-high", gotModel)
+	}
+}

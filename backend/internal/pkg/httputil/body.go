@@ -83,21 +83,21 @@ func decompressRequestBody(encoding string, raw []byte) ([]byte, error) {
 			return nil, err
 		}
 		defer dec.Close()
-		return io.ReadAll(io.LimitReader(dec, maxDecompressedBodySize))
+		return readDecompressedBody(dec, maxDecompressedBodySize)
 	case "gzip", "x-gzip":
 		gr, err := gzip.NewReader(bytes.NewReader(raw))
 		if err != nil {
 			return nil, err
 		}
 		defer func() { _ = gr.Close() }()
-		return io.ReadAll(io.LimitReader(gr, maxDecompressedBodySize))
+		return readDecompressedBody(gr, maxDecompressedBodySize)
 	case "deflate":
 		zr, err := zlib.NewReader(bytes.NewReader(raw))
 		if err != nil {
 			return nil, err
 		}
 		defer func() { _ = zr.Close() }()
-		return io.ReadAll(io.LimitReader(zr, maxDecompressedBodySize))
+		return readDecompressedBody(zr, maxDecompressedBodySize)
 	default:
 		return nil, errors.New("unsupported Content-Encoding")
 	}
@@ -105,6 +105,17 @@ func decompressRequestBody(encoding string, raw []byte) ([]byte, error) {
 
 // NormalizeLenientJSONRequestBody escapes raw control bytes that broken
 // OpenAI-compatible clients sometimes place inside JSON strings.
+func readDecompressedBody(reader io.Reader, limit int64) ([]byte, error) {
+	decoded, err := io.ReadAll(io.LimitReader(reader, limit+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(decoded)) > limit {
+		return nil, &http.MaxBytesError{Limit: limit}
+	}
+	return decoded, nil
+}
+
 func NormalizeLenientJSONRequestBody(body []byte, maxNormalizedBytes int64) ([]byte, error) {
 	if maxNormalizedBytes <= 0 {
 		maxNormalizedBytes = maxDecompressedBodySize

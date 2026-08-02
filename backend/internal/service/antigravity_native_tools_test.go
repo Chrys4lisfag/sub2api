@@ -196,7 +196,7 @@ func TestRewriteAggregatedFunctionCalls_BasicMatch(t *testing.T) {
 		},
 	}
 	payload := []byte(`{"candidates":[{"content":{"parts":[
-		{"functionCall":{"name":"call_mcp_tool","args":{"ServerName":"github-official","ToolName":"get_pull_request","Arguments":{"owner":"acme","repo":"x"}}}}
+		{"functionCall":{"name":"call_mcp_tool","args":{"ServerName":"github-official","ToolName":"get_pull_request","Arguments":{"owner":"acme","repo":"x","large":9007199254740993}}}}
 	]}}]}`)
 	out := rewriteAggregatedFunctionCalls(payload, report)
 	if !strings.Contains(string(out), `"name":"mcp__github_official_get_pull_request"`) {
@@ -210,6 +210,9 @@ func TestRewriteAggregatedFunctionCalls_BasicMatch(t *testing.T) {
 	args := fc["args"].(map[string]any)
 	if args["owner"] != "acme" {
 		t.Errorf("Arguments not unwrapped: %v", args)
+	}
+	if !strings.Contains(string(out), `"large":9007199254740993`) {
+		t.Errorf("large argument changed during rewrite: %s", out)
 	}
 	// Verify ServerName/ToolName are NOT in the rewritten args.
 	if _, has := args["ServerName"]; has {
@@ -909,6 +912,28 @@ func TestPreprocess_LiftsOmpSdkShape(t *testing.T) {
 	}
 	if !strings.Contains(outStr, `"name":"mcp__electerm_list_electerm_bookmarks"`) {
 		t.Errorf("mcp tool should still be in declarations after lift+single_name preprocessing: %s", outStr)
+	}
+}
+
+func TestPreprocess_LiftsWrappedOmpSdkShapeAndPreservesLargeIntegers(t *testing.T) {
+	body := []byte(`{"model":"gemini-3.6-flash-high","userAgent":"antigravity","request":{"contents":[{"parts":[{"functionCall":{"args":{"large":9007199254740993}}}]}],"config":{"thinkingConfig":{"thinkingLevel":"MEDIUM"}}}}`)
+	out, _, err := preprocessNativeBody(body, false, "", "both", "single_name")
+	if err != nil {
+		t.Fatalf("unexpected err: %v", err)
+	}
+	outStr := string(out)
+	if strings.Contains(outStr, `"config"`) || !strings.Contains(outStr, `"generationConfig"`) {
+		t.Fatalf("wrapped SDK config was not normalized: %s", out)
+	}
+	if !strings.Contains(outStr, `"large":9007199254740993`) {
+		t.Fatalf("large tool argument changed: %s", out)
+	}
+	var envelope map[string]any
+	if err := json.Unmarshal(out, &envelope); err != nil {
+		t.Fatalf("invalid output: %v", err)
+	}
+	if envelope["userAgent"] != "antigravity" {
+		t.Fatalf("full envelope was unwrapped: %s", out)
 	}
 }
 

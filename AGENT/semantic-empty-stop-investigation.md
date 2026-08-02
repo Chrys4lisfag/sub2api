@@ -6,6 +6,14 @@ Controlled tests established one actionable result; protocol-parity and root-cau
 
 For the captured request, `gemini-3.6-flash-high` with `thinkingLevel: HIGH` frequently returned HTTP 200 streams containing only thought text plus a thought signature, then `finishReason: STOP`, with no non-thought text and no function call. Lowering or disabling thinking made the same request usable in every controlled attempt. This proves the mitigation for this sample, not that HIGH thinking is the root cause.
 
+On `2026-08-02`, a newly captured complete 189,612-byte request reproduced the
+same semantic-empty signature in 1 of 5 bounded local HIGH-thinking attempts.
+LOW and disabled-thinking controls were usable in 5 of 5 attempts each. The
+reproduction preserved the exact request and captured OAuth account but used
+direct local egress because the captured per-account proxy was not reachable
+from the local control. This adds reproduction evidence, not protocol-parity or
+root-cause proof.
+
 sub2api's existing pre-commit semantic-empty guard is still required. It prevents false HTTP 200 empty responses by switching accounts before headers are committed. Exhaustion is surfaced as an explicit 502.
 
 AGY wire evidence, external issue review, configuration-field matrix, and future local replay plan are maintained in [`agy-gemini-protocol-and-replay-plan.md`](agy-gemini-protocol-and-replay-plan.md).
@@ -321,6 +329,10 @@ Prompt text, system instructions, tools, schemas, stop sequences, candidate text
 6. Do not classify the final STOP chunk alone. Earlier function calls make the stream usable.
 7. Keep synchronous pre-commit semantic-empty failover. Without it, downstream clients receive false-success HTTP 200 responses.
 8. The current-binary 15-session time-tool family observed no semantic-empty target stream, but strict identity correlation failed for all 15. Treat it as an unsuccessful correlated reproduction, not evidence of a fix.
+9. A post-deployment complete-request replay reproduced semantic-empty STOP in
+   1/5 HIGH attempts over direct local egress; LOW and disabled thinking were
+   each usable in 5/5. The egress difference prevents an exact-network-parity
+   claim but does not weaken the bounded local reproduction itself.
 
 ## Production deployment validation, 2026-08-01
 
@@ -364,6 +376,226 @@ classification, and the earlier controlled matrix remains the evidence for the
 thinking mitigation. No captured prompt, response body, credential, or tool
 argument was transferred or logged during deployment validation.
 
+## Post-deployment recurrence and local reproduction, 2026-08-02
+
+The upstream condition continued after the release. A bounded rolling
+60-minute production-log query against the deployed image returned 28
+`stop_without_content` markers. Matching timestamps spanned
+`2026-08-02T03:18:40.212+0800` through
+`2026-08-02T03:49:17.522+0800`; sampled safe fields showed
+`model=gemini-3.6-flash`, `wire_model=gemini-3.6-flash-high`,
+`stream=true`, and multiple account records. No request or response body was
+included in the structural count.
+
+A later complete capture from the same active incident period was selected:
+
+- captured at `2026-08-01T19:56:36.260612361Z`;
+- action `streamGenerateContent`, requested model `gemini-3.6-flash`;
+- complete inner request: 189,612 bytes, not truncated;
+- request SHA-256:
+  `5e08ffa7b4cf45a55f93b2f8edfd3376e314d4261902b59592cc982f68dff622`;
+- gzip capture bundle: 107,328 bytes, SHA-256
+  `50cc3a81b18e94a53b23748e0be9c321b04e3986aacd1d9df3a92937d59e5b65`;
+- 133 content items, one tool collection, 13 declarations;
+- `maxOutputTokens=65536`, `includeThoughts=true`,
+  `thinkingLevel=HIGH`, omitted `thinkingBudget`, omitted `toolConfig`.
+
+The bundle was transferred through Electerm SFTP into the ACL-private evidence
+root and its hashes were verified locally. Prompt, history, tools, and schemas
+remain only in private evidence; none is committed. Replay OAuth artifacts are
+now permanent retained evidence by explicit user instruction: do not delete
+them unless that instruction is explicitly reversed.
+
+The local backend was CLIProxyAPI commit
+`ca8d8c3c4696f30ee8669cfaaf340db8ddeda0ec`; the built binary SHA-256 was
+`d569fbce6c6019d4a94319b099fdbbacd0aef33f25859df58ca869f6856fe124`.
+It listened only on `127.0.0.1:18317`, loaded one retained direct-route auth
+copy, used one retained file-backed local API key, disabled request/debug
+logging, set upstream request retries to zero, and ran attempts sequentially.
+The dry run preserved the baseline 189,612 bytes and exact request hash while
+making zero network requests.
+
+The captured per-account proxy was unusable from the local PC. Five initial
+baseline attempts ended as HTTP errors during OAuth-token connection, before a
+provider stream was available. After a bounded direct token refresh, one
+fresh-token attempt through the captured proxy still ended as HTTP 500 before
+provider SSE. These six transport failures are not semantic-empty results.
+
+A direct-egress local fallback preserved the exact request bytes, model, and
+captured OAuth account credential while changing only the network egress:
+
+| Variant | Attempts | Semantic-empty STOP | Text | Function call | Usable |
+|---|---:|---:|---:|---:|---:|
+| unchanged HIGH baseline | 5 | 1 | 4 | 0 | 4 |
+| `thinking_low` | 5 | 0 | 2 | 3 | 5 |
+| `thinking_disabled` | 5 | 0 | 3 | 2 | 5 |
+
+The reproduced failure was HTTP 200 event-stream output containing thought text
+and a thought signature, then `finishReason=STOP`, with no non-thought text and
+no function call. Classification used accumulated stream state and emitted no
+content.
+
+This verifies that a recent production-causing prompt can reproduce the same
+upstream semantic-empty signature on the local PC. It does not establish exact
+proxy-egress parity, cryptographically prove Google's internal account
+identity, or prove HIGH thinking is the root cause. The only supported
+intervention remains lowering or disabling thinking for this request family.
+
+Private structural summary: 1,940 bytes, SHA-256
+`4b72595709b5fe77910a4d6b7bf1ccbcffdf32e8be2a07db4bfd070b7259dc03`.
+The hash-bound raw request, capture bundle, exact-proxy auth copy, refreshed
+direct-route auth copy, local replay key, and server-side retained auth copy
+remain in ACL-private storage. They are intentionally retained and must not be
+deleted. Disposable runtime processes may be stopped without removing those
+credentials or evidence files.
+
+## Payload isolation, real-AGY injection, and recovery fix, 2026-08-02
+
+The corrected direct-egress HIGH control used only provider-success responses
+in its denominator. Three unchanged 10-attempt controls produced 5
+semantic-empty STOPs, 20 text responses, and 5 function calls in 30 attempts.
+Transport and startup failures were excluded.
+
+Controlled payload reductions were non-monotonic:
+
+| Variant | Attempts | Semantic-empty | Text | Function call |
+|---|---:|---:|---:|---:|
+| unchanged full HIGH | 30 | 5 | 20 | 5 |
+| current user turn only | 10 | 7 | 0 | 3 |
+| first/second system-prompt halves | 20 | 0 | 5 | 15 |
+| even/odd system-prompt lines | 20 | 0 | 12 | 8 |
+| no function-call/response history | 10 | 0 | 10 | 0 |
+| remove early/late 19 atomic tool exchanges | 20 | 0 | 14 | 6 |
+| omit all 38 thought signatures | 10 | 7 | 3 | 0 |
+| replace all 38 with the supported dummy signature | 20 | 0 | 17 | 3 |
+| replace only early or late 19 signatures | 20 | 4 | 13 | 3 |
+| replace only the final signature | 10 | 1 | 8 | 1 |
+
+Replacing every real signature with the dummy representation yielded 0/20
+semantic-empty versus 5/30 for unchanged real signatures. The one-sided exact
+table probability is approximately 0.067, so this is suggestive, not
+root-cause proof. Replacing either half alone returned to 2/10; no individual
+half or final signature was isolated. Omitting signatures greatly worsened the
+failure. Do not strip signatures as a fix. Results instead support a
+chain-wide interaction among system instruction, tool history, signature
+representation, and HIGH thinking. Payload size alone is not monotonic.
+
+Current `agy.exe` SHA-256
+`83fb6e9d80e751d174b3738c3eefb054e75e85e47b17d1e159fe4831adceadc8`
+was exercised through a localhost-only, permissioned MITM path. Observation
+points are found by masked byte pattern with an exact-one-match guard rather
+than fixed RVAs. Frida attachment caused the current process to exit before a
+request, so Frida rows are negative instrumentation evidence only.
+
+AGY session-loading paths were tested before wire injection. A temporary custom
+agent successfully spoofed the complete captured system instruction. The CLI's
+`--continue` and `--conversation` options can resume AGY-created conversations,
+but no supported path imports an arbitrary external transcript with the exact
+133-content history. The temporary agent was removed and the prior agent list
+restored. Therefore system-prompt spoofing alone was not treated as full-payload
+proof.
+
+The first MITM family replaced the agent inner request exactly in ten runs, but
+used AGY's unrelated current account/project. It produced eight initial text
+responses and two function calls, no semantic-empty response. This remains a
+different-account control, not evidence that AGY lacks the issue.
+
+A second, operator-only gateway path fixed the locally controlled credential
+and project gap. Real current `agy.exe` initiated each request and consumed each
+returned SSE stream. The loopback addon loaded the retained credential file,
+replaced the outer project with its hash-bound project, forwarded through the
+same local direct egress as the account-28 controls, and never persisted headers
+or tokens. Google's provider-internal account identity was not independently
+exposed, so the claim is limited to the exact local credential/project inputs.
+Agent request/response bodies remained only in ACL-private storage.
+The stable project fingerprint was
+`7bddb774000c7d4d8c9b797066a15a44bd8cf07ddc669c3187d508b2b4303bd7`.
+
+An exact-source probe injected the complete 189,612-byte broken inner request
+(SHA-256
+`5e08ffa7b4cf45a55f93b2f8edfd3376e314d4261902b59592cc982f68dff622`).
+Its agent responses were function call, genuine semantic-empty STOP, then text;
+AGY also emitted its checkpoint request. The empty response was HTTP 200 with
+thought-only content and STOP, and the following agent request retained the
+same canonical inner hash. This directly proves current `agy.exe` is **not
+absent** from the provider issue and proves AGY issues a subsequent model
+request after receiving it.
+
+Two ten-run forced-account batches then used AGY-native wire configurations
+while preserving the exact prompt/history/tools invariant:
+
+| AGY wire tier | CLI runs | Agent attempts | Text | Function call | Semantic-empty | Wire shape |
+|---|---:|---:|---:|---:|---:|---|
+| HIGH | 10 | 15 | 10 | 3 | 2 | `gemini-3.6-flash-high`, budget 10,000, no level |
+| MEDIUM | 10 | 16 | 10 | 5 | 1 | `gemini-3.6-flash-medium`, budget 4,000, no level |
+
+Every agent attempt returned HTTP 200, used one retained credential/project
+fingerprint, and matched its expected inner canonical hash. Both HIGH empties
+and the MEDIUM empty were followed by another exact agent attempt that recovered
+to text or a function-call sequence ending in text. These samples prove
+presence and recovery behavior; their sizes are too small to claim a precise
+provider-wide rate or that MEDIUM eliminates the condition.
+
+Direct same-account controls separated level and budget effects:
+
+| Direct variant on HIGH alias | Attempts | Text | Function call | Semantic-empty |
+|---|---:|---:|---:|---:|
+| AGY-native HIGH, budget 10,000, no level | 20 | 12 | 2 | 6 |
+| explicit HIGH plus budget 4,000 | 20 | 13 | 1 | 6 |
+| budget 4,000 with level omitted | 20 | 12 | 5 | 3 |
+
+Adding a 4,000 budget while retaining explicit HIGH did not help in this
+sample. Omitting HIGH and using the moderate budget reduced but did not remove
+failures. Thus budget-only mutation is not a reliable replacement for tier
+progression. Structural answer-quality proxies did not show a candidate-token
+collapse at MEDIUM; they do not measure semantic answer correctness.
+
+Evidence-backed mechanism verdict remains narrow: the provider sometimes
+returns HTTP 200 `STOP` after thought-only/no-usable output for this full
+request family. No deterministic malformed field or single culprit block was
+isolated, and HIGH is not established as the root cause. Current AGY encounters
+the same response and automatically retries it.
+
+Production recovery now follows the least-degrading observed order. The initial
+request is untouched. The first semantic-empty retry also preserves HIGH,
+matching AGY's demonstrated successful recovery. Only a second consecutive
+semantic-empty lowers HIGH to MEDIUM and removes a stale budget so native wire
+resolution emits the medium alias and budget 4,000. A further semantic-empty
+lowers MEDIUM to LOW; LOW is never selected immediately. Non-semantic failovers,
+LOW bodies, missing config, and malformed JSON remain byte-identical. Recognized
+explicit `-high`/`-medium` model aliases and known AGY wire aliases are lowered
+with the body, preventing a suffix from pinning retries to the old wire tier;
+suffixless and unknown model IDs preserve their normal routing. The lowerer
+supports bare `generationConfig`, OMP SDK `config`, and either form under a
+wrapped `request`, including camelCase and snake_case level/budget keys. Prebuilt
+v1internal envelopes synchronize their top-level model and tier budget before
+send. Targeted JSON edits preserve unrelated large integers, tool arguments,
+and history values.
+
+Focused tests prove the retry sequence `HIGH -> HIGH -> MEDIUM -> LOW` and the
+final serialized medium request shape (`gemini-3.6-flash-medium`, budget 4,000).
+A five-run live forced-account check of that exact service-produced shape
+completed seven agent attempts: five text, one function call, one
+semantic-empty; all returned HTTP 200 and matched the expected request,
+credential, and project hashes. The semantic-empty was recoverable. This proves
+provider acceptance, not elimination.
+
+Final review also corrected adjacent request-path gaps. Signature cleaning and
+retry detection now cover escaped keys and `request.contents` in prebuilt
+envelopes. Aggregated tool-call response rewriting preserves large JSON
+integers. HTTP-200 non-stream bodies containing embedded quota errors are
+classified as 429 before client write, and naked forwarding errors can no longer
+fall through as implicit empty 200 responses. Decompression rejects decoded
+bodies over 64 MiB with `http.MaxBytesError` instead of silently forwarding a
+truncated prefix.
+
+`go test ./internal/pkg/antigravity ./internal/pkg/httputil ./internal/service
+./internal/handler -count=1` passed all four affected packages. Focused
+retry/wire-shape/signature/decompression tests passed, and the 40-test Python
+replay/stream suite passed. The disposable replay proxy was stopped and port
+18317 was released. Retained auth files, refreshed copies, replay key, retention
+policy, server-side retained copy, and raw private evidence were not deleted.
+
 ## Operational cleanup
 
 Cleanup completed on `2026-07-30`:
@@ -379,4 +611,6 @@ Cleanup completed on `2026-07-30`:
 - removed the local raw capture, temporary CLIProxy binaries/scripts, Python cache, and temporary observation override.
 - removed the temporary Go effective-configuration logger and its dedicated tests; the service implementation has no remaining working-tree diff, while the permanent 25-line cross-chunk protocol regression remains;
 
-No running diagnostic process, temporary credential, raw prompt, raw response, or generated capture artifact remains on the production host or in the repository.
+That cleanup statement applies only to the older 2026-07-30 fixture. The newer
+2026-08-02 raw request/response evidence and permanent replay credentials are
+intentionally retained outside the repository under user-only ACLs.
