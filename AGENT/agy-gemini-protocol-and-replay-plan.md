@@ -126,6 +126,20 @@ real agy.exe models + hash-bound successful captures
 2. **Complete field capture:** every serialized key is known for the five accepted raw bodies, six model-alias structural requests, and eight explicit-effort/default structural requests. HIGH, MEDIUM, LOW, and omitted-effort CLI controls are captured, but AGY-global coverage and 100% behavior parity are not proved. `thinkingLevel`, `temperature`, `topP`, `topK`, `candidateCount`, `stopSequences`, `responseModalities`, `imageConfig`, and allowed function names were absent from those bodies; other model families, tool choices, multimodal requests, providers, and retry-generated requests remain uncovered.
 3. **STOP reproduction and current AGY replay:** the earlier 74,647-byte family reproduced semantic-empty STOP at HIGH and established LOW/disabled mitigation. The newer complete 189,612-byte account-28 request produced 5 semantic-empty STOPs in 30 unchanged HIGH provider-success controls; LOW and disabled controls remained usable. Current `agy.exe` then sent that exact newer inner request in ten hash-bound, raw-captured transactions: eight initial text responses and two function calls, no semantic-empty STOP. This proves exact current-binary replay but not an upstream fix because AGY used a different outer project/account and egress. HIGH remains a condition, not a proved root cause.
 
+## Gemini 3.7 Flash virtual picker alias, superseding contract, 2026-08-14
+
+The exact-tier-only exposure above was a safe corrective intermediate, not the final picker UX. Real AGY still exposes and accepts only the three suffixed wire IDs. Sub2api now exposes one suffixless **virtual** client alias, `gemini-3.7-flash`; that alias is resolved locally and is never sent to AGY.
+
+| client model | client thinking level | real AGY wire ID | emitted thinking config |
+|---|---|---|---|
+| `gemini-3.7-flash` | `low` or `minimal` | `gemini-3.7-flash-low` | `thinkingBudget: 1000`, `includeThoughts: true` |
+| `gemini-3.7-flash` | `medium`, absent, or unknown | `gemini-3.7-flash-medium` | `thinkingBudget: 4000`, `includeThoughts: true` |
+| `gemini-3.7-flash` | `high` | `gemini-3.7-flash-high` | `thinkingBudget: -1`, `includeThoughts: true` |
+
+Routing accepts camelCase or snake_case level fields in bare Gemini REST, Google SDK `config`, and wrapped `request` forms. Before provider dispatch it removes all level and stale budget aliases from those paths, writes the captured numeric budget in camelCase, and keeps `includeThoughts: true`. Explicit suffixed IDs remain accepted internally and stay pinned for backward compatibility and semantic-retry lowering, but registry, frontend whitelist, presets, priorities, and OMP picker expose only the virtual suffixless alias. Migration `178_add_gemini37_virtual_alias.sql` adds the identity alias to eligible existing mappings with existing custom mappings taking precedence.
+
+`TestLiveGemini37VirtualAliasSlider` exercised the local working tree against the credential-derived real AGY endpoint. Low, medium, high, and absent-level/default-medium cases each selected the expected suffixed wire ID, serialized the exact captured numeric budget without `thinkingLevel`, received HTTP 200, and produced non-empty SSE text. This validates local alias resolution plus provider acceptance; production scheduling and deployed-image behavior remain separate release checks.
+
 ## AGY artifact and evidence source
 
 Hash-bound static-reversing artifact:

@@ -30,6 +30,11 @@ func AntigravityWireModel(modelName string) string {
 		"gemini-3.7-flash-medium",
 		"gemini-3.7-flash-low":
 		return normalized
+	case "gemini-3.7-flash":
+		// Virtual public picker alias. Normal request routing consults
+		// thinkingLevel through ResolveWireFromBody; body-less callers use
+		// the real medium tier.
+		return "gemini-3.7-flash-medium"
 	// Gemini 3.6 Flash variants (rolled onto daily-cloudcode-pa 2026-07,
 	// not yet in prod cloudcode-pa as of 2026-07-21). Sub2api's native
 	// gateway defaults to the DAILY endpoint via agymimic
@@ -105,6 +110,22 @@ func AntigravityWireModel(modelName string) string {
 func ResolveWireFromBody(publicName string, body []byte) string {
 	normalized := strings.ToLower(strings.TrimSpace(strings.TrimPrefix(publicName, "models/")))
 	switch normalized {
+	case "gemini-3.7-flash":
+		// Virtual picker alias only. The suffixless name is never sent to
+		// AGY: its low/medium/high slider selects one exact real wire ID.
+		if len(body) == 0 || !gjson.ValidBytes(body) {
+			return "gemini-3.7-flash-medium"
+		}
+		switch extractThinkingLevel(body) {
+		case "high":
+			return "gemini-3.7-flash-high"
+		case "minimal", "low":
+			return "gemini-3.7-flash-low"
+		case "medium", "":
+			return "gemini-3.7-flash-medium"
+		default:
+			return "gemini-3.7-flash-medium"
+		}
 	case "gemini-3.5-flash":
 		if len(body) == 0 || !gjson.ValidBytes(body) {
 			return AntigravityWireModel(publicName)
@@ -297,38 +318,70 @@ func LowerGemini37TierOnce(modelName string) (string, bool) {
 // exact numeric budget captured for the selected real-AGY tier. This is used
 // only after the semantic-empty retry policy intentionally lowers a tier.
 func ApplyGemini37RetryThinkingBudget(body []byte, modelName string) []byte {
+	return normalizeGemini37TierThinking(body, modelName)
+}
+
+// NormalizeGemini37BaseRequestBody converts the virtual suffixless picker's
+// thinkingLevel into the exact numeric shape observed from real AGY. The
+// caller must first resolve modelName to one of the three exact tier IDs.
+func NormalizeGemini37BaseRequestBody(body []byte, modelName string) []byte {
+	return normalizeGemini37TierThinking(body, modelName)
+}
+
+func normalizeGemini37TierThinking(body []byte, modelName string) []byte {
 	budget, ok := DefaultVariantThinkingBudget(modelName)
 	if !ok || len(body) == 0 || !gjson.ValidBytes(body) {
 		return body
 	}
 
+	thinkingPath := geminiThinkingConfigPath(body)
 	bases := []string{"generationConfig.thinkingConfig", "config.thinkingConfig", "request.generationConfig.thinkingConfig", "request.config.thinkingConfig"}
 	out := body
 	for _, base := range bases {
 		for _, key := range []string{"thinkingLevel", "thinking_level", "thinkingBudget", "thinking_budget"} {
 			path := base + "." + key
 			if gjson.GetBytes(out, path).Exists() {
-				if updated, err := sjson.DeleteBytes(out, path); err == nil {
-					out = updated
+				updated, err := sjson.DeleteBytes(out, path)
+				if err != nil {
+					return body
 				}
+				out = updated
 			}
 		}
 	}
 
-	thinkingPath := "generationConfig.thinkingConfig"
-	if gjson.GetBytes(out, "request").IsObject() {
-		thinkingPath = "request.generationConfig.thinkingConfig"
-	} else if gjson.GetBytes(out, "config").IsObject() {
-		thinkingPath = "config.thinkingConfig"
-	}
 	updated, err := sjson.SetBytes(out, thinkingPath+".thinkingBudget", budget)
 	if err != nil {
 		return body
 	}
-	if withThoughts, err := sjson.SetBytes(updated, thinkingPath+".includeThoughts", true); err == nil {
-		updated = withThoughts
+	updated, err = sjson.SetBytes(updated, thinkingPath+".includeThoughts", true)
+	if err != nil {
+		return body
 	}
 	return updated
+}
+
+func geminiThinkingConfigPath(body []byte) string {
+	if gjson.GetBytes(body, "request").IsObject() {
+		if gjson.GetBytes(body, "request.generationConfig").IsObject() ||
+			gjson.GetBytes(body, "request.generationConfig.thinkingConfig").IsObject() {
+			return "request.generationConfig.thinkingConfig"
+		}
+		if gjson.GetBytes(body, "request.config").IsObject() ||
+			gjson.GetBytes(body, "request.config.thinkingConfig").IsObject() {
+			return "request.config.thinkingConfig"
+		}
+		return "request.generationConfig.thinkingConfig"
+	}
+	if gjson.GetBytes(body, "generationConfig").IsObject() ||
+		gjson.GetBytes(body, "generationConfig.thinkingConfig").IsObject() {
+		return "generationConfig.thinkingConfig"
+	}
+	if gjson.GetBytes(body, "config").IsObject() ||
+		gjson.GetBytes(body, "config.thinkingConfig").IsObject() {
+		return "config.thinkingConfig"
+	}
+	return "generationConfig.thinkingConfig"
 }
 
 // ApplyWireModelToBody rewrites the outgoing Antigravity request body so
@@ -355,8 +408,12 @@ func ApplyWireModelToBody(body []byte) []byte {
 			out = updated
 		}
 	}
-	out = applyDefaultThinkingLevel(out, publicName)
-	out = applyDefaultThinkingBudget(out, publicName)
+	if strings.EqualFold(strings.TrimPrefix(strings.TrimSpace(publicName), "models/"), "gemini-3.7-flash") {
+		out = NormalizeGemini37BaseRequestBody(out, wire)
+	} else {
+		out = applyDefaultThinkingLevel(out, publicName)
+		out = applyDefaultThinkingBudget(out, publicName)
+	}
 	return out
 }
 

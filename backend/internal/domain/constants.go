@@ -149,7 +149,9 @@ var DefaultAntigravityModelMapping = map[string]string{
 	"gemini-3.6-flash-high":   "gemini-3.6-flash-high",
 	"gemini-3.6-flash-medium": "gemini-3.6-flash-medium",
 	"gemini-3.6-flash-low":    "gemini-3.6-flash-low",
-	// Gemini 3.7 Flash
+	// Gemini 3.7 Flash. The suffixless entry is a virtual picker alias;
+	// ResolveWireFromBody selects one exact tier before provider dispatch.
+	"gemini-3.7-flash":        "gemini-3.7-flash",
 	"gemini-3.7-flash-high":   "gemini-3.7-flash-high",
 	"gemini-3.7-flash-medium": "gemini-3.7-flash-medium",
 	"gemini-3.7-flash-low":    "gemini-3.7-flash-low",

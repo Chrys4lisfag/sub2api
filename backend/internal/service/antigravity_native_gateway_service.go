@@ -429,13 +429,18 @@ func (s *AntigravityNativeGatewayService) ForwardGemini(
 	// loop is running. Idempotent — subsequent calls are no-ops.
 	s.ensureMetricsLoop(ctx, account, s.resolveProxyURL(ctx, account))
 
-	// Wire-level model name. ResolveWireFromBody honors the caller's
-	// thinkingConfig.thinkingLevel when the public name is the suffix-less
-	// `gemini-3.5-flash` base — so omp can ship a single model entry whose
-	// slider picks the real backend tier (extra-low / mid / high).
+	// Wire-level model name. ResolveWireFromBody honors slider thinkingLevel
+	// for virtual suffixless Gemini aliases, while exact suffixed IDs stay
+	// pinned to their requested tier.
 	wireModel := antigravity.ResolveWireFromBody(originalModel, body)
 	if wireModel == "" {
 		wireModel = originalModel
+	}
+	if strings.EqualFold(strings.TrimPrefix(strings.TrimSpace(originalModel), "models/"), "gemini-3.7-flash") {
+		// The public base name is virtual. Convert its UI-level directive to
+		// the exact numeric tier shape observed from real AGY before any
+		// preprocessing or v1internal wrapping.
+		body = antigravity.NormalizeGemini37BaseRequestBody(body, wireModel)
 	}
 
 	// Run the tool-list preprocessing pipeline (schema normalize +

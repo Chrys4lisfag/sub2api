@@ -24,7 +24,7 @@ type liveCredentials struct {
 	UserAgent     string `json:"user_agent"`
 }
 
-func TestLiveGemini37Tiers(t *testing.T) {
+func TestLiveGemini37VirtualAliasSlider(t *testing.T) {
 	credFile := os.Getenv("SUB2API_AGY_LIVE_CREDENTIALS_FILE")
 	if credFile == "" {
 		t.Skip("skipping live test: SUB2API_AGY_LIVE_CREDENTIALS_FILE environment variable is not set")
@@ -56,35 +56,46 @@ func TestLiveGemini37Tiers(t *testing.T) {
 	endpoint.User = nil
 	safeProviderURL := endpoint.String()
 
-	tiers := []struct {
-		publicModel string
-		wantBudget  int64
+	cases := []struct {
+		name       string
+		level      string
+		wantWire   string
+		wantBudget int64
 	}{
-		{publicModel: "gemini-3.7-flash-low", wantBudget: 1000},
-		{publicModel: "gemini-3.7-flash-medium", wantBudget: 4000},
-		{publicModel: "gemini-3.7-flash-high", wantBudget: -1},
+		{name: "low", level: "low", wantWire: "gemini-3.7-flash-low", wantBudget: 1000},
+		{name: "medium", level: "medium", wantWire: "gemini-3.7-flash-medium", wantBudget: 4000},
+		{name: "high", level: "high", wantWire: "gemini-3.7-flash-high", wantBudget: -1},
+		{name: "absent-defaults-medium", wantWire: "gemini-3.7-flash-medium", wantBudget: 4000},
 	}
 
 	client := &http.Client{Timeout: 60 * time.Second}
 
-	for _, tc := range tiers {
-		t.Run(tc.publicModel, func(t *testing.T) {
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
 			bareBody := []byte(`{"contents":[{"role":"user","parts":[{"text":"Hello"}]}]}`)
+			if tc.level != "" {
+				bareBody = []byte(`{"contents":[{"role":"user","parts":[{"text":"Hello"}]}],"generationConfig":{"thinkingConfig":{"thinkingLevel":"` + tc.level + `"}}}`)
+			}
 
-			wireModel := antigravity.ResolveWireFromBody(tc.publicModel, bareBody)
-			require.Equal(t, tc.publicModel, wireModel)
+			wireModel := antigravity.ResolveWireFromBody("gemini-3.7-flash", bareBody)
+			require.Equal(t, tc.wantWire, wireModel)
+			bareBody = antigravity.NormalizeGemini37BaseRequestBody(bareBody, wireModel)
+			require.Equal(t, tc.wantBudget, gjson.GetBytes(bareBody, "generationConfig.thinkingConfig.thinkingBudget").Int())
+			require.True(t, gjson.GetBytes(bareBody, "generationConfig.thinkingConfig.includeThoughts").Bool())
+			require.False(t, gjson.GetBytes(bareBody, "generationConfig.thinkingConfig.thinkingLevel").Exists())
 
 			wrapped, err := wrapNativeV1Internal(creds.Project, wireModel, bareBody)
 			require.NoError(t, err, "failed to wrap request")
 
 			modelInEnvelope := gjson.GetBytes(wrapped, "model").String()
-			require.Equal(t, tc.publicModel, modelInEnvelope)
+			require.Equal(t, tc.wantWire, modelInEnvelope)
 
 			budgetInEnvelope := gjson.GetBytes(wrapped, "request.generationConfig.thinkingConfig.thinkingBudget").Int()
 			require.Equal(t, tc.wantBudget, budgetInEnvelope)
 
 			includeThoughts := gjson.GetBytes(wrapped, "request.generationConfig.thinkingConfig.includeThoughts").Bool()
 			require.True(t, includeThoughts)
+			require.False(t, gjson.GetBytes(wrapped, "request.generationConfig.thinkingConfig.thinkingLevel").Exists())
 
 			req, err := http.NewRequest(http.MethodPost, safeProviderURL, bytes.NewReader(wrapped))
 			require.NoError(t, err)
@@ -99,12 +110,12 @@ func TestLiveGemini37Tiers(t *testing.T) {
 
 			resp, err := client.Do(req)
 			if err != nil {
-				t.Fatalf("provider request failed for tier %s: %T", tc.publicModel, err)
+				t.Fatalf("provider request failed for level %s: %T", tc.name, err)
 			}
 			defer resp.Body.Close()
 
 			// Log tier, wire model, and status only — never log credentials, project, prompt, or response content.
-			t.Logf("tier=%s wire=%s status=%d", tc.publicModel, wireModel, resp.StatusCode)
+			t.Logf("level=%s wire=%s status=%d", tc.name, wireModel, resp.StatusCode)
 			require.Equal(t, http.StatusOK, resp.StatusCode)
 
 			scanner := bufio.NewScanner(resp.Body)
@@ -133,7 +144,7 @@ func TestLiveGemini37Tiers(t *testing.T) {
 				}
 			}
 			if err := scanner.Err(); err != nil {
-				t.Fatalf("provider stream read failed for tier %s: %T", tc.publicModel, err)
+				t.Fatalf("provider stream read failed for level %s: %T", tc.name, err)
 			}
 			require.True(t, hasText, "expected at least one non-empty SSE text part")
 		})

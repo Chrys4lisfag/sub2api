@@ -67,6 +67,7 @@ func TestDefaultAntigravityModelMapping_Gemini37FlashExactTiers(t *testing.T) {
 	t.Parallel()
 
 	cases := map[string]string{
+		"gemini-3.7-flash":        "gemini-3.7-flash",
 		"gemini-3.7-flash-high":   "gemini-3.7-flash-high",
 		"gemini-3.7-flash-medium": "gemini-3.7-flash-medium",
 		"gemini-3.7-flash-low":    "gemini-3.7-flash-low",
@@ -80,10 +81,6 @@ func TestDefaultAntigravityModelMapping_Gemini37FlashExactTiers(t *testing.T) {
 		if got != want {
 			t.Fatalf("unexpected mapping for %q: got %q want %q", from, got, want)
 		}
-	}
-
-	if _, ok := DefaultAntigravityModelMapping["gemini-3.7-flash"]; ok {
-		t.Fatalf("did not expect suffixless gemini-3.7-flash mapping entry to exist")
 	}
 }
 
