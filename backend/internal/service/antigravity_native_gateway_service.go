@@ -758,21 +758,27 @@ func wrapNativeV1Internal(projectID, model string, geminiBody []byte) ([]byte, e
 			gjson.GetBytes(out, "request.config.thinkingConfig").Exists() {
 			thinkingConfigPath = "request.config.thinkingConfig"
 		}
-		if isGemini37FlashModel(model) {
-			hasThinkingDirective := false
+		if isGemini37FlashTier(model) {
+			// A prebuilt model change is the semantic-retry path. Synchronize it
+			// to the exact real-AGY numeric tier shape and remove stale levels.
 			for _, base := range []string{"request.generationConfig.thinkingConfig", "request.config.thinkingConfig"} {
 				for _, key := range gemini37ThinkingDirectiveKeys {
-					if gjson.GetBytes(out, base+"."+key).Exists() {
-						hasThinkingDirective = true
-						break
+					path := base + "." + key
+					if gjson.GetBytes(out, path).Exists() {
+						out, err = sjson.DeleteBytes(out, path)
+						if err != nil {
+							return nil, fmt.Errorf("clear prebuilt envelope thinking directive: %w", err)
+						}
 					}
 				}
 			}
-			if !hasThinkingDirective {
-				out, err = sjson.SetBytes(out, thinkingConfigPath+".thinkingLevel", "MEDIUM")
-				if err != nil {
-					return nil, fmt.Errorf("set prebuilt envelope thinking level: %w", err)
-				}
+			out, err = sjson.SetBytes(out, thinkingConfigPath+".thinkingBudget", thinkingBudgetForModel(model))
+			if err != nil {
+				return nil, fmt.Errorf("set prebuilt envelope thinking budget: %w", err)
+			}
+			out, err = sjson.SetBytes(out, thinkingConfigPath+".includeThoughts", true)
+			if err != nil {
+				return nil, fmt.Errorf("set prebuilt envelope include thoughts: %w", err)
 			}
 		} else {
 			out, err = sjson.SetBytes(out, thinkingConfigPath+".thinkingBudget", thinkingBudgetForModel(model))
@@ -856,7 +862,7 @@ func newSessionID() string {
 // thinkingBudget scales with model tier per the fetchAvailableModels probe:
 //
 //	gemini-3-flash             → -1 (dynamic)
-//	gemini-3.7-flash           → thinkingLevel=MEDIUM (no synthesized budget)
+//	gemini-3.7-flash-low/medium/high → 1000 / 4000 / -1
 //	gemini-3.5-flash-extra-low → 1000   (Low)
 //	gemini-3.5-flash-low       → 4000   (Medium)
 //	gemini-3-flash-agent       → 10000  (High)
@@ -905,9 +911,7 @@ func applyAgyDefaultsToInnerRequest(inner map[string]any, wireModel string) {
 	if _, present := tc["includeThoughts"]; !present {
 		tc["includeThoughts"] = true
 	}
-	if isGemini37FlashModel(wireModel) {
-		// Gemini 3.7 uses thinking levels. Preserve any explicit camelCase or
-		// snake_case level/budget; otherwise use Google's documented default.
+	if isGemini37FlashTier(wireModel) {
 		if hasGemini37ThinkingDirective(tc) {
 			return
 		}
@@ -916,11 +920,22 @@ func applyAgyDefaultsToInnerRequest(inner map[string]any, wireModel string) {
 				return
 			}
 		}
-		tc["thinkingLevel"] = "MEDIUM"
+		tc["thinkingBudget"] = thinkingBudgetForModel(wireModel)
 		return
 	}
 	if _, present := tc["thinkingBudget"]; !present {
 		tc["thinkingBudget"] = thinkingBudgetForModel(wireModel)
+	}
+}
+
+func isGemini37FlashTier(model string) bool {
+	normalized := strings.ToLower(strings.TrimSpace(model))
+	normalized = strings.TrimPrefix(normalized, "models/")
+	switch normalized {
+	case "gemini-3.7-flash-low", "gemini-3.7-flash-medium", "gemini-3.7-flash-high":
+		return true
+	default:
+		return false
 	}
 }
 
@@ -935,16 +950,10 @@ func hasGemini37ThinkingDirective(thinkingConfig map[string]any) bool {
 	return false
 }
 
-func isGemini37FlashModel(model string) bool {
-	normalized := strings.ToLower(strings.TrimSpace(model))
-	normalized = strings.TrimPrefix(normalized, "models/")
-	return normalized == "gemini-3.7-flash"
-}
-
 // thinkingBudgetForModel returns the budget agy uses for each known wire
-// model. Values match the fetchAvailableModels probe of daily-cloudcode-pa
-// (last refreshed 2026-07-21 against agy.exe 1.1.0). Unknown models
-// fall back to -1 (dynamic).
+// model. Gemini 3.7 values are bound to successful agy.exe 1.1.13 runtime
+// captures from 2026-08-14 (SHA-256 d628...6eb2). Older values retain their
+// existing evidence dates. Unknown models fall back to -1 (dynamic).
 func thinkingBudgetForModel(wire string) int {
 	switch strings.ToLower(strings.TrimSpace(wire)) {
 	case "gemini-3-flash":
@@ -956,6 +965,13 @@ func thinkingBudgetForModel(wire string) int {
 		return 4000
 	case "gemini-3-flash-agent":
 		return 10000
+	// 3.7 Flash tiers
+	case "gemini-3.7-flash-low":
+		return 1000
+	case "gemini-3.7-flash-medium":
+		return 4000
+	case "gemini-3.7-flash-high":
+		return -1
 	// 3.6 Flash tiers (verified 2026-07-21 via fetchAvailableModels probe)
 	case "gemini-3.6-flash-low":
 		return 1000

@@ -619,6 +619,9 @@ func prepareGeminiFailoverRetry(body []byte, modelName string, failoverErr *serv
 	if failoverErr == nil || failoverErr.Kind != service.FailoverKindSemanticEmpty || semanticRetryCount <= 1 {
 		return body, modelName, false
 	}
+	if loweredModel, ok := antigravity.LowerGemini37TierOnce(modelName); ok {
+		return antigravity.ApplyGemini37RetryThinkingBudget(body, loweredModel), loweredModel, true
+	}
 	loweredBody, changed := service.LowerGeminiNativeThinkingForSemanticRetry(body)
 	if !changed {
 		return body, modelName, false

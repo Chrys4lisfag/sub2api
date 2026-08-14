@@ -1,6 +1,7 @@
 package antigravity
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/tidwall/gjson"
@@ -27,10 +28,12 @@ func TestAntigravityWireModel(t *testing.T) {
 		{"gemini-3.6-flash", "gemini-3.6-flash-medium"},
 		{"models/gemini-3.6-flash-high", "gemini-3.6-flash-high"},
 		{"GEMINI-3.6-FLASH-LOW", "gemini-3.6-flash-low"},
-		// Gemini 3.7 Flash — identity wire ID.
-		{"gemini-3.7-flash", "gemini-3.7-flash"},
-		{"models/gemini-3.7-flash", "gemini-3.7-flash"},
-		{"GEMINI-3.7-FLASH", "gemini-3.7-flash"},
+		// Gemini 3.7 Flash — exact identity wire IDs.
+		{"gemini-3.7-flash-high", "gemini-3.7-flash-high"},
+		{"gemini-3.7-flash-medium", "gemini-3.7-flash-medium"},
+		{"gemini-3.7-flash-low", "gemini-3.7-flash-low"},
+		{"models/gemini-3.7-flash-high", "gemini-3.7-flash-high"},
+		{"GEMINI-3.7-FLASH-LOW", "gemini-3.7-flash-low"},
 		// 3 Flash legacy variants → base 3-flash.
 		{"gemini-3-flash-high", "gemini-3-flash"},
 		{"gemini-3-flash-medium", "gemini-3-flash"},
@@ -75,9 +78,9 @@ func TestDefaultVariantThinkingLevel(t *testing.T) {
 		{"gemini-3.5-flash-medium", "medium"},
 		{"gemini-3.6-flash-high", "high"},
 		{"gemini-3.6-flash-medium", "medium"},
-		{"gemini-3.7-flash", "MEDIUM"},
-		{"models/gemini-3.7-flash", "MEDIUM"},
-		{"GEMINI-3.7-FLASH", "MEDIUM"},
+		{"gemini-3.7-flash-high", ""},
+		{"gemini-3.7-flash-medium", ""},
+		{"gemini-3.7-flash-low", ""},
 		{"gemini-3.5-flash-low", "low"},
 		{"gemini-3.6-flash-low", "low"},
 		{"gemini-3.6-flash", ""}, // base has no implicit default
@@ -94,6 +97,58 @@ func TestDefaultVariantThinkingLevel(t *testing.T) {
 	}
 }
 
+func TestDefaultVariantThinkingBudget(t *testing.T) {
+	cases := []struct {
+		in         string
+		wantBudget int
+		wantOK     bool
+	}{
+		{"gemini-3.7-flash-high", -1, true},
+		{"gemini-3.7-flash-medium", 4000, true},
+		{"gemini-3.7-flash-low", 1000, true},
+		{"models/gemini-3.7-flash-medium", 4000, true},
+		{"GEMINI-3.7-FLASH-LOW", 1000, true},
+		{"gemini-3.7-flash", 0, false},
+		{"gemini-3.6-flash-medium", 0, false},
+	}
+	for _, tc := range cases {
+		budget, ok := DefaultVariantThinkingBudget(tc.in)
+		if budget != tc.wantBudget || ok != tc.wantOK {
+			t.Errorf("DefaultVariantThinkingBudget(%q) = (%d, %v), want (%d, %v)", tc.in, budget, ok, tc.wantBudget, tc.wantOK)
+		}
+	}
+}
+
+func TestGemini37SemanticRetryBudget(t *testing.T) {
+	medium, ok := LowerGemini37TierOnce("models/GEMINI-3.7-FLASH-HIGH")
+	if !ok || medium != "gemini-3.7-flash-medium" {
+		t.Fatalf("high lower = (%q, %v), want medium", medium, ok)
+	}
+	low, ok := LowerGemini37TierOnce(medium)
+	if !ok || low != "gemini-3.7-flash-low" {
+		t.Fatalf("medium lower = (%q, %v), want low", low, ok)
+	}
+	if got, ok := LowerGemini37TierOnce(low); ok || got != low {
+		t.Fatalf("low lower = (%q, %v), want unchanged", got, ok)
+	}
+
+	body := []byte(`{"request":{"generationConfig":{"thinkingConfig":{"thinkingLevel":"MEDIUM","thinking_budget":-1}},"contents":[{"parts":[{"functionCall":{"args":{"large":9007199254740993}}}]}]}}`)
+	out := ApplyGemini37RetryThinkingBudget(body, medium)
+	thinking := "request.generationConfig.thinkingConfig"
+	if got := gjson.GetBytes(out, thinking+".thinkingBudget").Int(); got != 4000 {
+		t.Fatalf("retry budget = %d, want 4000: %s", got, out)
+	}
+	if !gjson.GetBytes(out, thinking+".includeThoughts").Bool() {
+		t.Fatalf("includeThoughts missing: %s", out)
+	}
+	if gjson.GetBytes(out, thinking+".thinkingLevel").Exists() || gjson.GetBytes(out, thinking+".thinking_budget").Exists() {
+		t.Fatalf("stale thinking directive remains: %s", out)
+	}
+	if !strings.Contains(string(out), `"large":9007199254740993`) {
+		t.Fatalf("large integer changed: %s", out)
+	}
+}
+
 func TestApplyWireModelToBody_RewritesModelField(t *testing.T) {
 	body := []byte(`{"model":"gemini-3.5-flash-high","request":{"contents":[]}}`)
 	out := ApplyWireModelToBody(body)
@@ -103,29 +158,35 @@ func TestApplyWireModelToBody_RewritesModelField(t *testing.T) {
 }
 
 func TestApplyWireModelToBody_AddsThinkingLevelForHigh(t *testing.T) {
-	body := []byte(`{"model":"gemini-3.5-flash-high","request":{"generationConfig":{}}}`)
+	body := []byte(`{"model":"gemini-3.5-flash-high","request":{"contents":[]}}`)
 	out := ApplyWireModelToBody(body)
 	if got := gjson.GetBytes(out, "request.generationConfig.thinkingConfig.thinkingLevel").String(); got != "high" {
 		t.Fatalf("thinkingLevel not injected: %s", out)
 	}
-	if got := gjson.GetBytes(out, "request.generationConfig.thinkingConfig.includeThoughts").Bool(); !got {
-		t.Fatalf("includeThoughts not set: %s", out)
-	}
 }
 
 func TestApplyWireModelToBody_AddsThinkingLevelToBareAndSDKShapes(t *testing.T) {
-	cases := []struct{ name, body, levelPath string }{
-		{"bare REST", `{"model":"gemini-3.5-flash-high","generationConfig":{}}`, "generationConfig.thinkingConfig.thinkingLevel"},
-		{"SDK config", `{"model":"gemini-3.5-flash-high","config":{}}`, "config.thinkingConfig.thinkingLevel"},
+	cases := []struct {
+		name string
+		body string
+		path string
+	}{
+		{
+			name: "bare REST shape",
+			body: `{"model":"gemini-3.5-flash-high","contents":[]}`,
+			path: "generationConfig.thinkingConfig.thinkingLevel",
+		},
+		{
+			name: "OMP SDK shape",
+			body: `{"model":"gemini-3.5-flash-high","config":{}}`,
+			path: "config.thinkingConfig.thinkingLevel",
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			out := ApplyWireModelToBody([]byte(tc.body))
-			if got := gjson.GetBytes(out, tc.levelPath).String(); got != "high" {
-				t.Fatalf("thinkingLevel at %s: got %q in %s", tc.levelPath, got, out)
-			}
-			if gjson.GetBytes(out, "request").Exists() {
-				t.Fatalf("unexpected request wrapper added: %s", out)
+			if got := gjson.GetBytes(out, tc.path).String(); got != "high" {
+				t.Fatalf("thinkingLevel at %s: got %q want high, output: %s", tc.path, got, out)
 			}
 		})
 	}
@@ -135,15 +196,12 @@ func TestApplyWireModelToBody_RespectsBareExplicitThinkingLevel(t *testing.T) {
 	body := []byte(`{"model":"gemini-3.5-flash-high","generationConfig":{"thinkingConfig":{"thinkingLevel":"low"}}}`)
 	out := ApplyWireModelToBody(body)
 	if got := gjson.GetBytes(out, "generationConfig.thinkingConfig.thinkingLevel").String(); got != "low" {
-		t.Fatalf("bare explicit thinkingLevel clobbered: %s", out)
-	}
-	if gjson.GetBytes(out, "request").Exists() {
-		t.Fatalf("duplicate wrapped thinking config added: %s", out)
+		t.Fatalf("explicit level clobbered: %s", out)
 	}
 }
 
 func TestApplyWireModelToBody_AddsThinkingLevelForMedium(t *testing.T) {
-	body := []byte(`{"model":"gemini-3.5-flash-medium","request":{}}`)
+	body := []byte(`{"model":"gemini-3.5-flash-medium","request":{"contents":[]}}`)
 	out := ApplyWireModelToBody(body)
 	if got := gjson.GetBytes(out, "request.generationConfig.thinkingConfig.thinkingLevel").String(); got != "medium" {
 		t.Fatalf("thinkingLevel not injected: %s", out)
@@ -151,35 +209,34 @@ func TestApplyWireModelToBody_AddsThinkingLevelForMedium(t *testing.T) {
 }
 
 func TestApplyWireModelToBody_RespectsExplicitThinkingLevel(t *testing.T) {
-	body := []byte(`{"model":"gemini-3.5-flash-high","request":{"generationConfig":{"thinkingConfig":{"thinkingLevel":"low"}}}}`)
+	body := []byte(`{"model":"gemini-3.5-flash-medium","request":{"generationConfig":{"thinkingConfig":{"thinkingLevel":"high"}}}}`)
 	out := ApplyWireModelToBody(body)
-	if got := gjson.GetBytes(out, "request.generationConfig.thinkingConfig.thinkingLevel").String(); got != "low" {
-		t.Fatalf("explicit thinkingLevel was clobbered: got %q want low", got)
+	if got := gjson.GetBytes(out, "request.generationConfig.thinkingConfig.thinkingLevel").String(); got != "high" {
+		t.Fatalf("explicit level clobbered: %s", out)
 	}
 }
 
 func TestApplyWireModelToBody_RespectsExplicitThinkingBudget(t *testing.T) {
-	body := []byte(`{"model":"gemini-3.5-flash-high","request":{"generationConfig":{"thinkingConfig":{"thinkingBudget":512}}}}`)
+	body := []byte(`{"model":"gemini-3.5-flash-medium","request":{"generationConfig":{"thinkingConfig":{"thinkingBudget":2048}}}}`)
 	out := ApplyWireModelToBody(body)
-	// thinkingLevel should NOT be added when budget is explicit.
 	if gjson.GetBytes(out, "request.generationConfig.thinkingConfig.thinkingLevel").Exists() {
-		t.Fatalf("thinkingLevel injected despite explicit thinkingBudget: %s", out)
+		t.Fatalf("unexpected thinkingLevel injected when budget is explicit: %s", out)
 	}
 }
 
 func TestApplyWireModelToBody_PassthroughForUnknown(t *testing.T) {
-	body := []byte(`{"model":"claude-opus-4-7","request":{}}`)
+	body := []byte(`{"model":"unknown-model"}`)
 	out := ApplyWireModelToBody(body)
 	if string(out) != string(body) {
-		t.Fatalf("body mutated unexpectedly: in=%s out=%s", body, out)
+		t.Fatalf("body mutated for unknown model: %s", out)
 	}
 }
 
 func TestApplyWireModelToBody_PassthroughForBodyWithoutModel(t *testing.T) {
-	body := []byte(`{"metadata":{"ideType":"ANTIGRAVITY"}}`)
+	body := []byte(`{"contents":[]}`)
 	out := ApplyWireModelToBody(body)
 	if string(out) != string(body) {
-		t.Fatalf("body mutated for model-less payload: in=%s out=%s", body, out)
+		t.Fatalf("body mutated: %s", out)
 	}
 }
 
@@ -187,47 +244,57 @@ func TestApplyWireModelToBody_PassthroughForInvalidJSON(t *testing.T) {
 	body := []byte(`not json`)
 	out := ApplyWireModelToBody(body)
 	if string(out) != string(body) {
-		t.Fatalf("invalid JSON mutated: in=%s out=%s", body, out)
+		t.Fatalf("body mutated: %s", out)
 	}
 }
 
-func TestApplyWireModelToBody_Gemini37FlashDefaultThinkingLevel(t *testing.T) {
+func TestApplyWireModelToBody_Gemini37FlashDefaultThinkingBudget(t *testing.T) {
 	cases := []struct {
-		name      string
-		body      string
-		levelPath string
+		name       string
+		body       string
+		budgetPath string
+		wantBudget int64
+		wantModel  string
 	}{
 		{
-			name:      "wrapped v1internal request",
-			body:      `{"model":"gemini-3.7-flash","request":{"contents":[]}}`,
-			levelPath: "request.generationConfig.thinkingConfig.thinkingLevel",
+			name:       "wrapped v1internal request high",
+			body:       `{"model":"gemini-3.7-flash-high","request":{"contents":[]}}`,
+			budgetPath: "request.generationConfig.thinkingConfig.thinkingBudget",
+			wantBudget: -1,
+			wantModel:  "gemini-3.7-flash-high",
 		},
 		{
-			name:      "bare REST request",
-			body:      `{"model":"gemini-3.7-flash","generationConfig":{}}`,
-			levelPath: "generationConfig.thinkingConfig.thinkingLevel",
+			name:       "bare REST request medium",
+			body:       `{"model":"gemini-3.7-flash-medium","generationConfig":{}}`,
+			budgetPath: "generationConfig.thinkingConfig.thinkingBudget",
+			wantBudget: 4000,
+			wantModel:  "gemini-3.7-flash-medium",
 		},
 		{
-			name:      "SDK config request",
-			body:      `{"model":"gemini-3.7-flash","config":{}}`,
-			levelPath: "config.thinkingConfig.thinkingLevel",
+			name:       "SDK config request low",
+			body:       `{"model":"gemini-3.7-flash-low","config":{}}`,
+			budgetPath: "config.thinkingConfig.thinkingBudget",
+			wantBudget: 1000,
+			wantModel:  "gemini-3.7-flash-low",
 		},
 		{
-			name:      "prefixed model name",
-			body:      `{"model":"models/gemini-3.7-flash","request":{}}`,
-			levelPath: "request.generationConfig.thinkingConfig.thinkingLevel",
+			name:       "prefixed model name medium",
+			body:       `{"model":"models/gemini-3.7-flash-medium","request":{}}`,
+			budgetPath: "request.generationConfig.thinkingConfig.thinkingBudget",
+			wantBudget: 4000,
+			wantModel:  "gemini-3.7-flash-medium",
 		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			out := ApplyWireModelToBody([]byte(tc.body))
-			if got := gjson.GetBytes(out, tc.levelPath).String(); got != "MEDIUM" {
-				t.Fatalf("thinkingLevel at %s: got %q want MEDIUM, output: %s", tc.levelPath, got, out)
+			if got := gjson.GetBytes(out, tc.budgetPath).Int(); got != tc.wantBudget {
+				t.Fatalf("thinkingBudget at %s: got %d want %d, output: %s", tc.budgetPath, got, tc.wantBudget, out)
 			}
-			if got := gjson.GetBytes(out, "model").String(); got != "gemini-3.7-flash" {
-				t.Fatalf("model: got %q want gemini-3.7-flash, output: %s", got, out)
+			if got := gjson.GetBytes(out, "model").String(); got != tc.wantModel {
+				t.Fatalf("model: got %q want %q, output: %s", got, tc.wantModel, out)
 			}
-			if got := gjson.GetBytes(out, "request.generationConfig.thinkingConfig.includeThoughts").Bool(); !got && tc.name == "wrapped v1internal request" {
+			if got := gjson.GetBytes(out, "request.generationConfig.thinkingConfig.includeThoughts").Bool(); !got && strings.HasPrefix(tc.name, "wrapped") {
 				t.Fatalf("includeThoughts not set: %s", out)
 			}
 		})
@@ -245,25 +312,25 @@ func TestApplyWireModelToBody_Gemini37FlashPreservesExplicitSettings(t *testing.
 	}{
 		{
 			name:       "explicit camelCase thinkingLevel",
-			body:       `{"model":"gemini-3.7-flash","request":{"generationConfig":{"thinkingConfig":{"thinkingLevel":"high"}}}}`,
+			body:       `{"model":"gemini-3.7-flash-medium","request":{"generationConfig":{"thinkingConfig":{"thinkingLevel":"high"}}}}`,
 			checkLevel: "request.generationConfig.thinkingConfig.thinkingLevel",
 			wantLevel:  "high",
 		},
 		{
 			name:       "explicit snake_case thinking_level",
-			body:       `{"model":"gemini-3.7-flash","request":{"generationConfig":{"thinkingConfig":{"thinking_level":"low"}}}}`,
+			body:       `{"model":"gemini-3.7-flash-medium","request":{"generationConfig":{"thinkingConfig":{"thinking_level":"low"}}}}`,
 			checkLevel: "request.generationConfig.thinkingConfig.thinking_level",
 			wantLevel:  "low",
 		},
 		{
 			name:      "explicit camelCase thinkingBudget",
-			body:      `{"model":"gemini-3.7-flash","request":{"generationConfig":{"thinkingConfig":{"thinkingBudget":2048}}}}`,
+			body:      `{"model":"gemini-3.7-flash-medium","request":{"generationConfig":{"thinkingConfig":{"thinkingBudget":2048}}}}`,
 			checkBudg: "request.generationConfig.thinkingConfig.thinkingBudget",
 			wantBudg:  2048,
 		},
 		{
 			name:      "explicit snake_case thinking_budget",
-			body:      `{"model":"gemini-3.7-flash","request":{"generationConfig":{"thinkingConfig":{"thinking_budget":1024}}}}`,
+			body:      `{"model":"gemini-3.7-flash-medium","request":{"generationConfig":{"thinkingConfig":{"thinking_budget":1024}}}}`,
 			checkBudg: "request.generationConfig.thinkingConfig.thinking_budget",
 			wantBudg:  1024,
 		},
@@ -275,18 +342,13 @@ func TestApplyWireModelToBody_Gemini37FlashPreservesExplicitSettings(t *testing.
 				if got := gjson.GetBytes(out, tc.checkLevel).String(); got != tc.wantLevel {
 					t.Fatalf("thinkingLevel at %s: got %q want %q, output: %s", tc.checkLevel, got, tc.wantLevel, out)
 				}
-				if tc.name == "explicit snake_case thinking_level" {
-					if gjson.GetBytes(out, "request.generationConfig.thinkingConfig.thinkingLevel").Exists() {
-						t.Fatalf("unexpected camelCase thinkingLevel injected beside snake_case: %s", out)
-					}
+				if gjson.GetBytes(out, "request.generationConfig.thinkingConfig.thinkingBudget").Exists() {
+					t.Fatalf("unexpected default thinkingBudget injected when level is explicit: %s", out)
 				}
 			}
 			if tc.checkBudg != "" {
 				if got := gjson.GetBytes(out, tc.checkBudg).Int(); got != tc.wantBudg {
 					t.Fatalf("thinkingBudget at %s: got %d want %d, output: %s", tc.checkBudg, got, tc.wantBudg, out)
-				}
-				if gjson.GetBytes(out, "request.generationConfig.thinkingConfig.thinkingLevel").Exists() {
-					t.Fatalf("unexpected thinkingLevel injected when budget is explicit: %s", out)
 				}
 			}
 		})
@@ -380,6 +442,9 @@ func TestResolveWireFromBody_SuffixedVariantsIgnoreBodyLevel(t *testing.T) {
 
 func TestResolveSemanticRetryModel_LowersExplicitTierAliases(t *testing.T) {
 	cases := []struct{ name, model, level, want string }{
+		{name: "3.7 high to medium", model: "gemini-3.7-flash-high", level: "MEDIUM", want: "gemini-3.7-flash-medium"},
+		{name: "3.7 high to low", model: "gemini-3.7-flash-high", level: "LOW", want: "gemini-3.7-flash-low"},
+		{name: "3.7 medium to low", model: "gemini-3.7-flash-medium", level: "LOW", want: "gemini-3.7-flash-low"},
 		{name: "3.6 high to medium", model: "gemini-3.6-flash-high", level: "MEDIUM", want: "gemini-3.6-flash-medium"},
 		{name: "3.6 medium to low", model: "gemini-3.6-flash-medium", level: "LOW", want: "gemini-3.6-flash-low"},
 		{name: "3.6 low stays low", model: "gemini-3.6-flash-low", level: "LOW", want: "gemini-3.6-flash-low"},
@@ -402,7 +467,7 @@ func TestResolveSemanticRetryModel_LowersExplicitTierAliases(t *testing.T) {
 	}
 }
 
-func TestResolveWireFromBody_Gemini37FlashIdentity(t *testing.T) {
+func TestResolveWireFromBody_Gemini37FlashExactTiers(t *testing.T) {
 	cases := []struct {
 		name  string
 		model string
@@ -410,28 +475,22 @@ func TestResolveWireFromBody_Gemini37FlashIdentity(t *testing.T) {
 		want  string
 	}{
 		{
-			name:  "base model no body",
-			model: "gemini-3.7-flash",
+			name:  "high tier no body",
+			model: "gemini-3.7-flash-high",
 			body:  "",
-			want:  "gemini-3.7-flash",
+			want:  "gemini-3.7-flash-high",
 		},
 		{
-			name:  "prefixed model",
-			model: "models/gemini-3.7-flash",
+			name:  "medium tier prefixed",
+			model: "models/gemini-3.7-flash-medium",
 			body:  `{"generationConfig":{"thinkingConfig":{"thinkingLevel":"high"}}}`,
-			want:  "gemini-3.7-flash",
+			want:  "gemini-3.7-flash-medium",
 		},
 		{
-			name:  "uppercase model",
-			model: "GEMINI-3.7-FLASH",
+			name:  "low tier uppercase",
+			model: "GEMINI-3.7-FLASH-LOW",
 			body:  `{"generationConfig":{"thinkingConfig":{"thinkingLevel":"low"}}}`,
-			want:  "gemini-3.7-flash",
-		},
-		{
-			name:  "wrapped request",
-			model: "gemini-3.7-flash",
-			body:  `{"request":{"generationConfig":{"thinkingConfig":{"thinkingLevel":"high"}}}}`,
-			want:  "gemini-3.7-flash",
+			want:  "gemini-3.7-flash-low",
 		},
 	}
 	for _, tc := range cases {

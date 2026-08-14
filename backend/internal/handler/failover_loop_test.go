@@ -8,6 +8,7 @@ import (
 	"github.com/Wei-Shaw/sub2api/internal/service"
 
 	"github.com/stretchr/testify/require"
+	"github.com/tidwall/gjson"
 )
 
 // ---------------------------------------------------------------------------
@@ -819,6 +820,33 @@ func TestHandleSelectionExhausted(t *testing.T) {
 		action := fs.HandleSelectionExhausted(context.Background())
 		require.Equal(t, FailoverContinue, action)
 	})
+}
+
+func TestPrepareGeminiFailoverRetry_Gemini37BudgetOnly(t *testing.T) {
+	high := []byte(`{"contents":[{"role":"user","parts":[{"text":"hi"}]}]}`)
+	semantic := &service.UpstreamFailoverError{Kind: service.FailoverKindSemanticEmpty}
+
+	firstBody, firstModel, changed := prepareGeminiFailoverRetry(high, "gemini-3.7-flash-high", semantic, 1)
+	require.False(t, changed)
+	require.Equal(t, high, firstBody)
+	require.Equal(t, "gemini-3.7-flash-high", firstModel)
+
+	mediumBody, mediumModel, changed := prepareGeminiFailoverRetry(firstBody, firstModel, semantic, 2)
+	require.True(t, changed)
+	require.Equal(t, "gemini-3.7-flash-medium", mediumModel)
+	require.Equal(t, int64(4000), gjson.GetBytes(mediumBody, "generationConfig.thinkingConfig.thinkingBudget").Int())
+	require.True(t, gjson.GetBytes(mediumBody, "generationConfig.thinkingConfig.includeThoughts").Bool())
+	require.False(t, gjson.GetBytes(mediumBody, "generationConfig.thinkingConfig.thinkingLevel").Exists())
+
+	lowBody, lowModel, changed := prepareGeminiFailoverRetry(mediumBody, mediumModel, semantic, 3)
+	require.True(t, changed)
+	require.Equal(t, "gemini-3.7-flash-low", lowModel)
+	require.Equal(t, int64(1000), gjson.GetBytes(lowBody, "generationConfig.thinkingConfig.thinkingBudget").Int())
+
+	unchangedBody, unchangedModel, changed := prepareGeminiFailoverRetry(lowBody, lowModel, semantic, 4)
+	require.False(t, changed)
+	require.Equal(t, lowBody, unchangedBody)
+	require.Equal(t, lowModel, unchangedModel)
 }
 
 func TestPrepareGeminiFailoverRetry(t *testing.T) {

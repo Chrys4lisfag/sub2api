@@ -25,8 +25,10 @@ import (
 func AntigravityWireModel(modelName string) string {
 	normalized := strings.ToLower(strings.TrimSpace(strings.TrimPrefix(modelName, "models/")))
 	switch normalized {
-	// Gemini 3.7 Flash (identity wire ID)
-	case "gemini-3.7-flash":
+	// Gemini 3.7 Flash variants (exact identity wire IDs)
+	case "gemini-3.7-flash-high",
+		"gemini-3.7-flash-medium",
+		"gemini-3.7-flash-low":
 		return normalized
 	// Gemini 3.6 Flash variants (rolled onto daily-cloudcode-pa 2026-07,
 	// not yet in prod cloudcode-pa as of 2026-07-21). Sub2api's native
@@ -103,8 +105,6 @@ func AntigravityWireModel(modelName string) string {
 func ResolveWireFromBody(publicName string, body []byte) string {
 	normalized := strings.ToLower(strings.TrimSpace(strings.TrimPrefix(publicName, "models/")))
 	switch normalized {
-	case "gemini-3.7-flash":
-		return "gemini-3.7-flash"
 	case "gemini-3.5-flash":
 		if len(body) == 0 || !gjson.ValidBytes(body) {
 			return AntigravityWireModel(publicName)
@@ -181,6 +181,17 @@ func ResolveSemanticRetryModel(publicName string, body []byte) string {
 	normalized := strings.ToLower(strings.TrimSpace(strings.TrimPrefix(publicName, "models/")))
 	level := extractThinkingLevel(body)
 	switch normalized {
+	case "gemini-3.7-flash-high":
+		switch level {
+		case "medium":
+			return "gemini-3.7-flash-medium"
+		case "minimal", "low":
+			return "gemini-3.7-flash-low"
+		}
+	case "gemini-3.7-flash-medium":
+		if level == "minimal" || level == "low" {
+			return "gemini-3.7-flash-low"
+		}
 	case "gemini-3.6-flash-high":
 		switch level {
 		case "medium":
@@ -234,7 +245,7 @@ func extractThinkingLevel(body []byte) string {
 }
 
 // DefaultVariantThinkingLevel returns the implied thinking effort level for
-// public Gemini 3.5/3.6/3.7 Flash variant model IDs. Returns "" when the
+// public Gemini 3.5/3.6 Flash variant model IDs. Returns "" when the
 // model does not carry an implicit default (caller's explicit thinking
 // config wins regardless).
 func DefaultVariantThinkingLevel(modelName string) string {
@@ -242,8 +253,6 @@ func DefaultVariantThinkingLevel(modelName string) string {
 	switch normalized {
 	case "gemini-3.5-flash-high", "gemini-3.6-flash-high":
 		return "high"
-	case "gemini-3.7-flash":
-		return "MEDIUM"
 	case "gemini-3.5-flash-medium", "gemini-3.6-flash-medium":
 		return "medium"
 	case "gemini-3.5-flash-low", "gemini-3.6-flash-low":
@@ -253,10 +262,78 @@ func DefaultVariantThinkingLevel(modelName string) string {
 	}
 }
 
+// DefaultVariantThinkingBudget returns the implied thinking budget for
+// Gemini 3.7 Flash variant model IDs (-high: -1, -medium: 4000, -low: 1000).
+// Returns (0, false) when the model is not a known 3.7 variant.
+func DefaultVariantThinkingBudget(modelName string) (int, bool) {
+	normalized := strings.ToLower(strings.TrimSpace(strings.TrimPrefix(modelName, "models/")))
+	switch normalized {
+	case "gemini-3.7-flash-high":
+		return -1, true
+	case "gemini-3.7-flash-medium":
+		return 4000, true
+	case "gemini-3.7-flash-low":
+		return 1000, true
+	default:
+		return 0, false
+	}
+}
+
+// LowerGemini37TierOnce returns the next exact real-AGY tier after a
+// semantic-empty retry. Suffixless and already-low names are not lowerable.
+func LowerGemini37TierOnce(modelName string) (string, bool) {
+	normalized := strings.ToLower(strings.TrimSpace(strings.TrimPrefix(modelName, "models/")))
+	switch normalized {
+	case "gemini-3.7-flash-high":
+		return "gemini-3.7-flash-medium", true
+	case "gemini-3.7-flash-medium":
+		return "gemini-3.7-flash-low", true
+	default:
+		return modelName, false
+	}
+}
+
+// ApplyGemini37RetryThinkingBudget replaces level/budget aliases with the
+// exact numeric budget captured for the selected real-AGY tier. This is used
+// only after the semantic-empty retry policy intentionally lowers a tier.
+func ApplyGemini37RetryThinkingBudget(body []byte, modelName string) []byte {
+	budget, ok := DefaultVariantThinkingBudget(modelName)
+	if !ok || len(body) == 0 || !gjson.ValidBytes(body) {
+		return body
+	}
+
+	bases := []string{"generationConfig.thinkingConfig", "config.thinkingConfig", "request.generationConfig.thinkingConfig", "request.config.thinkingConfig"}
+	out := body
+	for _, base := range bases {
+		for _, key := range []string{"thinkingLevel", "thinking_level", "thinkingBudget", "thinking_budget"} {
+			path := base + "." + key
+			if gjson.GetBytes(out, path).Exists() {
+				if updated, err := sjson.DeleteBytes(out, path); err == nil {
+					out = updated
+				}
+			}
+		}
+	}
+
+	thinkingPath := "generationConfig.thinkingConfig"
+	if gjson.GetBytes(out, "request").IsObject() {
+		thinkingPath = "request.generationConfig.thinkingConfig"
+	} else if gjson.GetBytes(out, "config").IsObject() {
+		thinkingPath = "config.thinkingConfig"
+	}
+	updated, err := sjson.SetBytes(out, thinkingPath+".thinkingBudget", budget)
+	if err != nil {
+		return body
+	}
+	if withThoughts, err := sjson.SetBytes(updated, thinkingPath+".includeThoughts", true); err == nil {
+		updated = withThoughts
+	}
+	return updated
+}
+
 // ApplyWireModelToBody rewrites the outgoing Antigravity request body so
 // its top-level `model` field carries the wire-format model name, and
-// fills in an implicit `thinkingConfig.thinkingLevel` for variants that
-// require one.
+// fills in implicit thinkingConfig for variants that require one.
 //
 // Returns the input unchanged if the body is not valid JSON, has no
 // `model` field, or already specifies a thinking configuration. The
@@ -279,6 +356,7 @@ func ApplyWireModelToBody(body []byte) []byte {
 		}
 	}
 	out = applyDefaultThinkingLevel(out, publicName)
+	out = applyDefaultThinkingBudget(out, publicName)
 	return out
 }
 
@@ -306,6 +384,38 @@ func applyDefaultThinkingLevel(body []byte, publicModelName string) []byte {
 		thinkingPath = "config.thinkingConfig"
 	}
 	updated, err := sjson.SetBytes(body, thinkingPath+".thinkingLevel", level)
+	if err != nil {
+		return body
+	}
+	if withThoughts, errSet := sjson.SetBytes(updated, thinkingPath+".includeThoughts", true); errSet == nil {
+		updated = withThoughts
+	}
+	return updated
+}
+
+// applyDefaultThinkingBudget injects numeric thinkingBudget into the caller's bare,
+// SDK config, or wrapped request shape for 3.7 variants. Skipped when the caller already supplied an
+// explicit thinking level OR budget (either camelCase or snake_case keys).
+func applyDefaultThinkingBudget(body []byte, publicModelName string) []byte {
+	budget, ok := DefaultVariantThinkingBudget(publicModelName)
+	if !ok {
+		return body
+	}
+	bases := []string{"generationConfig.thinkingConfig", "config.thinkingConfig", "request.generationConfig.thinkingConfig", "request.config.thinkingConfig"}
+	for _, base := range bases {
+		for _, key := range []string{"thinkingLevel", "thinking_level", "thinkingBudget", "thinking_budget"} {
+			if gjson.GetBytes(body, base+"."+key).Exists() {
+				return body
+			}
+		}
+	}
+	thinkingPath := "generationConfig.thinkingConfig"
+	if gjson.GetBytes(body, "request").IsObject() {
+		thinkingPath = "request.generationConfig.thinkingConfig"
+	} else if gjson.GetBytes(body, "config").IsObject() {
+		thinkingPath = "config.thinkingConfig"
+	}
+	updated, err := sjson.SetBytes(body, thinkingPath+".thinkingBudget", budget)
 	if err != nil {
 		return body
 	}

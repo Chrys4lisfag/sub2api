@@ -125,23 +125,30 @@ func TestWrapNativeV1Internal_SynchronizesPrebuiltEnvelopeRetryTier(t *testing.T
 	}
 }
 
-func TestWrapNativeV1Internal_Gemini37UsesThinkingLevel(t *testing.T) {
+func TestWrapNativeV1Internal_Gemini37ExactBudgets(t *testing.T) {
+	cases := []struct {
+		model      string
+		wantBudget int64
+	}{
+		{"gemini-3.7-flash-high", -1},
+		{"gemini-3.7-flash-medium", 4000},
+		{"gemini-3.7-flash-low", 1000},
+	}
 	body := []byte(`{"contents":[{"role":"user","parts":[{"text":"hi"}]}]}`)
-	out, err := wrapNativeV1Internal("proj", "gemini-3.7-flash", body)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
-	thinkingConfig := "request.generationConfig.thinkingConfig"
-	if got := gjson.GetBytes(out, thinkingConfig+".thinkingLevel").String(); got != "MEDIUM" {
-		t.Fatalf("thinkingLevel: got %q, want MEDIUM", got)
-	}
-	if gjson.GetBytes(out, thinkingConfig+".thinkingBudget").Exists() ||
-		gjson.GetBytes(out, thinkingConfig+".thinking_budget").Exists() {
-		t.Fatalf("Gemini 3.7 synthesized numeric thinking budget: %s", out)
-	}
-	if !gjson.GetBytes(out, thinkingConfig+".includeThoughts").Bool() {
-		t.Fatal("includeThoughts: got false, want true")
+	for _, tc := range cases {
+		t.Run(tc.model, func(t *testing.T) {
+			out, err := wrapNativeV1Internal("proj", tc.model, body)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			thinkingConfig := "request.generationConfig.thinkingConfig"
+			if got := gjson.GetBytes(out, thinkingConfig+".thinkingBudget").Int(); got != tc.wantBudget {
+				t.Fatalf("thinkingBudget: got %d, want %d", got, tc.wantBudget)
+			}
+			if !gjson.GetBytes(out, thinkingConfig+".includeThoughts").Bool() {
+				t.Fatal("includeThoughts: got false, want true")
+			}
+		})
 	}
 }
 
@@ -174,35 +181,50 @@ func TestWrapNativeV1Internal_Gemini37PreservesExplicitThinkingDirective(t *test
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			out, err := wrapNativeV1Internal("proj", "models/gemini-3.7-flash", []byte(tt.body))
+			out, err := wrapNativeV1Internal("proj", "models/gemini-3.7-flash-medium", []byte(tt.body))
 			if err != nil {
 				t.Fatalf("unexpected error: %v", err)
 			}
 			if got := gjson.GetBytes(out, tt.path).String(); got != tt.want {
 				t.Fatalf("%s: got %q, want %q", tt.path, got, tt.want)
 			}
-			if gjson.GetBytes(out, "request.generationConfig.thinkingConfig.thinkingLevel").String() == "MEDIUM" {
-				t.Fatalf("default thinkingLevel replaced explicit directive: %s", out)
-			}
 		})
 	}
 }
 
-func TestWrapNativeV1Internal_Gemini37PrebuiltRetryUsesThinkingLevel(t *testing.T) {
-	already := []byte(`{"project":"proj-x","model":"gemini-3.6-flash-medium","request":{"generationConfig":{"thinkingConfig":{}},"contents":[]},"userAgent":"antigravity","requestId":"agent-abc"}`)
-	out, err := wrapNativeV1Internal("ignored", "gemini-3.7-flash", already)
+func TestWrapNativeV1Internal_OlderModelThinkingDefaultsUnchanged(t *testing.T) {
+	body := []byte(`{"generationConfig":{"thinkingConfig":{"thinkingLevel":"LOW"}}}`)
+	out, err := wrapNativeV1Internal("proj", "gemini-3.6-flash-high", body)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if got := gjson.GetBytes(out, "model").String(); got != "gemini-3.7-flash" {
-		t.Fatalf("model: got %q, want gemini-3.7-flash", got)
+	thinking := "request.generationConfig.thinkingConfig"
+	if got := gjson.GetBytes(out, thinking+".thinkingLevel").String(); got != "LOW" {
+		t.Fatalf("explicit older-model level changed: %s", out)
+	}
+	if got := gjson.GetBytes(out, thinking+".thinkingBudget").Int(); got != 10000 {
+		t.Fatalf("older-model budget = %d, want 10000: %s", got, out)
+	}
+}
+
+func TestWrapNativeV1Internal_Gemini37PrebuiltRetrySynchronizesBudget(t *testing.T) {
+	already := []byte(`{"project":"proj-x","model":"gemini-3.7-flash-high","request":{"generationConfig":{"thinkingConfig":{"thinkingLevel":"MEDIUM","thinkingBudget":-1,"includeThoughts":false}},"contents":[]},"userAgent":"antigravity","requestId":"agent-abc"}`)
+	out, err := wrapNativeV1Internal("ignored", "gemini-3.7-flash-medium", already)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got := gjson.GetBytes(out, "model").String(); got != "gemini-3.7-flash-medium" {
+		t.Fatalf("model: got %q, want gemini-3.7-flash-medium", got)
 	}
 	thinkingConfig := "request.generationConfig.thinkingConfig"
-	if got := gjson.GetBytes(out, thinkingConfig+".thinkingLevel").String(); got != "MEDIUM" {
-		t.Fatalf("thinkingLevel: got %q, want MEDIUM", got)
+	if got := gjson.GetBytes(out, thinkingConfig+".thinkingBudget").Int(); got != 4000 {
+		t.Fatalf("thinkingBudget: got %d, want 4000", got)
 	}
-	if gjson.GetBytes(out, thinkingConfig+".thinkingBudget").Exists() {
-		t.Fatalf("prebuilt Gemini 3.7 retry synthesized numeric budget: %s", out)
+	if gjson.GetBytes(out, thinkingConfig+".thinkingLevel").Exists() {
+		t.Fatalf("stale thinkingLevel remains: %s", out)
+	}
+	if !gjson.GetBytes(out, thinkingConfig+".includeThoughts").Bool() {
+		t.Fatalf("includeThoughts not synchronized: %s", out)
 	}
 }
 

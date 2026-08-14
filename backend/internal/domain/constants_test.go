@@ -63,15 +63,27 @@ func TestDefaultAntigravityModelMapping_Gemini31ProAliases(t *testing.T) {
 	}
 }
 
-func TestDefaultAntigravityModelMapping_Gemini37Flash(t *testing.T) {
+func TestDefaultAntigravityModelMapping_Gemini37FlashExactTiers(t *testing.T) {
 	t.Parallel()
 
-	got, ok := DefaultAntigravityModelMapping["gemini-3.7-flash"]
-	if !ok {
-		t.Fatalf("expected mapping for gemini-3.7-flash to exist")
+	cases := map[string]string{
+		"gemini-3.7-flash-high":   "gemini-3.7-flash-high",
+		"gemini-3.7-flash-medium": "gemini-3.7-flash-medium",
+		"gemini-3.7-flash-low":    "gemini-3.7-flash-low",
 	}
-	if got != "gemini-3.7-flash" {
-		t.Fatalf("unexpected mapping for gemini-3.7-flash: got %q want %q", got, "gemini-3.7-flash")
+
+	for from, want := range cases {
+		got, ok := DefaultAntigravityModelMapping[from]
+		if !ok {
+			t.Fatalf("expected mapping for %q to exist", from)
+		}
+		if got != want {
+			t.Fatalf("unexpected mapping for %q: got %q want %q", from, got, want)
+		}
+	}
+
+	if _, ok := DefaultAntigravityModelMapping["gemini-3.7-flash"]; ok {
+		t.Fatalf("did not expect suffixless gemini-3.7-flash mapping entry to exist")
 	}
 }
 

@@ -33,64 +33,92 @@ Observed matrix:
 | HIGH + `AUTO` | 5 | 1 |
 | LOW + `VALIDATED` | 5 | 5 |
 
-## Gemini 3.7 Flash support, 2026-08-14
+## Gemini 3.7 Flash correction and real-AGY evidence, 2026-08-14
 
-Official Google sources establish:
+### Failure and corrected evidence boundary
 
-- Gemini 3.7 Flash is GA under the stable public model ID `gemini-3.7-flash`.
-- Default thinking level is `medium`; supported levels are `low`, `medium`, and `high`.
-- Context limit is 1M tokens and maximum output is 64K tokens.
-- Google's migration guidance says to replace `thinking_budget` with `thinking_level` and remove deprecated sampling parameters.
-- Google Antigravity announced Gemini 3.7 Flash as its new Flash model; the Gemini API guide says it is the new default model for the Antigravity agent.
+The first implementation was wrong. It treated Google's public Gemini API ID `gemini-3.7-flash` as an Antigravity Cloud Code wire ID, added it without querying real AGY, and deployed commit `de7ac66b2f97f473ed3d2e9929f6c1d89fd53f10`. The production account test then returned upstream HTTP 404 `NOT_FOUND: Requested entity was not found.` This is direct proof that public Gemini API naming is not sufficient routing evidence for Antigravity Native.
 
-Primary sources:
+Correct rule: model IDs, tier behavior, and thinking defaults for Antigravity must come from real `agy.exe` `models` output plus hash-bound successful wire captures. Public Google documentation remains product context only.
 
-- <https://ai.google.dev/gemini-api/docs/latest-model>
-- <https://ai.google.dev/gemini-api/docs/models/gemini-3.7-flash>
-- <https://antigravity.google/blog/gemini-3-7-flash-in-google-antigravity>
+### Current real-AGY identity and model list
 
-Implementation decision and evidence boundary:
+- path: `C:\Users\koval\AppData\Local\agy\bin\agy.exe`
+- version: `1.1.13`
+- size: `183,233,176` bytes
+- SHA-256: `d628487eefa56b47fded7785125ab634de21e5cc92536f3cad0b56c1ad086eb2`
+- `agy.exe models` exposed exactly three Gemini 3.7 Flash entries:
+  - `gemini-3.7-flash-high` — `Gemini 3.7 Flash (High)`
+  - `gemini-3.7-flash-medium` — `Gemini 3.7 Flash (Medium)`
+  - `gemini-3.7-flash-low` — `Gemini 3.7 Flash (Low)`
+- The suffixless `gemini-3.7-flash` did not appear in the real AGY model list.
 
-- Expose only `gemini-3.7-flash`. Do not invent `-high`, `-medium`, or `-low` aliases without `fetchAvailableModels` or hash-bound AGY wire evidence.
-- Public-to-wire routing is identity. `models/gemini-3.7-flash` is normalized to the same bare wire ID.
-- Native synthesized requests use `thinkingLevel: MEDIUM` only when neither a level nor a budget was supplied. They do not synthesize numeric `thinkingBudget` for 3.7. Explicit caller thinking configuration remains authoritative.
-- Existing 3.6 suffix aliases, budgets, semantic-empty ladder, and protocol conclusions remain unchanged.
-- No live `agy.exe` or IDA session is required for this standard public-ID addition. Fresh-binary work becomes necessary only if Google exposes hidden Cloud Code aliases, a different `model_enum` label, binary-specific budgets, or new envelope fields. Provider acceptance through the Antigravity Native Cloud Code endpoint remains a post-implementation live validation gap.
+Direct local print-mode controls used a non-sensitive exact-response prompt. All three exact IDs returned process status 0, AGY JSON status `SUCCESS`, and non-empty `OK` output. High additionally reported 61 thinking tokens in that run; the low and medium controls reported zero thinking tokens for this trivial prompt. Token counts are response observations, not tier-budget definitions.
 
-Panel/backend pipeline:
+### Hash-bound sanitized wire captures
+
+Runner: external `AGENT/scripts/run_mitm_agy_capture.py`, pinned with `--expected-sha256 d628...6eb2`. Sanitizer SHA-256: `8e33577c7b92f7bf4f26b83fd33070fce1fd14e9a681c15961f859823c256d6c`. The sanitizer was narrowly extended to retain non-secret `model_enum` and `thinkingLevel` enum strings. Prompts, responses, OAuth values, projects, request/session identifiers, signatures, and arbitrary text remained redacted.
+
+| Selected AGY ID | top-level `model` | `request.labels.model_enum` | emitted thinking config | provider result |
+|---|---|---|---|---|
+| `gemini-3.7-flash-low` | same | `MODEL_PLACEHOLDER_M300` | `includeThoughts: true`, `thinkingBudget: 1000` | HTTP 200, 3 SSE events, non-empty text |
+| `gemini-3.7-flash-medium` | same | `MODEL_PLACEHOLDER_M299` | `includeThoughts: true`, `thinkingBudget: 4000` | HTTP 200, 2 SSE events, non-empty text |
+| `gemini-3.7-flash-high` | same | `MODEL_PLACEHOLDER_M298` | `includeThoughts: true`, `thinkingBudget: -1` | HTTP 200, 2 SSE events, non-empty text |
+
+`thinkingLevel` was absent from all three captured agent requests. Numeric `thinkingBudget` is therefore observed AGY wire behavior for this binary and these tiers. The `model_enum` values are agent-request label evidence; sub2api's synthesized native wrapper currently uses a checkpoint profile, and real checkpoint captures have labels absent, so these agent-only labels must not be invented on the checkpoint path without separate checkpoint evidence.
+
+Sanitized artifacts remain outside the repository:
+
+- `AGENT/logs/agy-37-low-20260814.jsonl` plus `-meta.json`
+- `AGENT/logs/agy-37-medium-20260814.jsonl` plus `-meta.json`
+- `AGENT/logs/agy-37-high-20260814.jsonl` plus `-meta.json`
+
+Each metadata file records the exact target/addon hashes, return code 0, four captured rows, and no runner error. Each run contains one successful 3.7 agent request/response and one separate checkpoint request/response; only the agent pair supports the tier table above.
+
+### Corrected implementation contract and release gate
+
+- Expose only the three exact suffixed IDs; remove suffixless `gemini-3.7-flash` from panel, registry, candidates, defaults, and auto-filled mappings.
+- Public-to-wire mapping is identity for each exact tier.
+- When no caller thinking directive exists, synthesize the captured numeric budget: low `1000`, medium `4000`, high `-1`, with `includeThoughts: true`.
+- Preserve explicit camelCase or snake_case thinking level/budget settings.
+- Semantic retry lowering follows high -> medium -> low while keeping wire ID and default budget synchronized.
+- Migration `176_add_gemini37_to_model_mapping.sql` is already deployed and remains immutable. Corrective migration `177_replace_gemini37_model_mapping.sql` adds the three tier identities and removes only the erroneous suffixless identity entry, preserving custom suffixless remaps and exact tier overrides.
+- No corrected deployment is allowed until a locally built corrected sub2api revision sends all three exact IDs to the real provider, logs the selected wire IDs without secrets, and receives non-empty responses for every tier.
+
+### Corrected local validation
+
+The release gate passed before commit or deployment. `TestLiveGemini37Tiers` ran local working-tree code, not the deployed image. It exercised `ResolveWireFromBody`, `wrapNativeV1Internal`, and a real Cloud Code SSE POST using an ephemeral OAuth credential file stored only under the ACL-protected private evidence root. The test never logged the credential, project, prompt, or response content.
+
+| local requested ID | selected wire ID | locally serialized budget | provider result |
+|---|---|---:|---|
+| `gemini-3.7-flash-low` | same | 1000 | HTTP 200, non-empty SSE text |
+| `gemini-3.7-flash-medium` | same | 4000 | HTTP 200, non-empty SSE text |
+| `gemini-3.7-flash-high` | same | -1 | HTTP 200, non-empty SSE text |
+
+The gated test did not skip. All three named subtests ran and passed before review, then ran again after retry/privacy hardening; the final run completed in 3.38 seconds. Additional local validation passed:
 
 ```text
-frontend Antigravity whitelist and account test priority
-    -> backend DefaultAntigravityModelMapping / static model registry
-    -> account model_mapping (migration adds identity entry)
-    -> ResolveWireFromBody / AntigravityWireModel
-    -> wrapNativeV1Internal generation defaults
-    -> agymimic RawRequest
-    -> /v1internal:generateContent or :streamGenerateContent
-```
-
-Issue found during integration: unknown models previously inherited synthesized `thinkingBudget: -1`. That fallback is appropriate for older dynamic-budget paths but conflicts with Google's 3.7 migration guidance. The 3.7 path is now level-based while preserving explicit caller settings and leaving older models untouched.
-
-Implemented surface:
-
-- Panel whitelist, scope label, and both account-test model priorities expose the base ID.
-- Static Claude/Gemini model lists and Antigravity Native candidate discovery expose the base ID.
-- Default account mapping and migration `176_add_gemini37_to_model_mapping.sql` add identity routing; existing exact per-account overrides win over the migration default. Runtime mapping completion respects wildcard overrides.
-- Wire routing normalizes case and an optional `models/` prefix, then keeps the stable base ID unchanged regardless of caller thinking level.
-- Legacy body rewriting and native synthesized envelopes default to medium thinking only when no explicit camelCase or snake_case level/budget exists. Native envelopes emit `thinkingLevel: MEDIUM` and no synthesized numeric budget.
-- Regression coverage exercises panel visibility, account-test selection, registry/mapping discovery, identity routing, explicit setting preservation, synthesized native envelopes, and prebuilt retry envelopes.
-
-Targeted validation completed:
-
-```text
-go test ./internal/domain ./internal/pkg/antigravity ./internal/service -count=1
-go test ./internal/service -run 'Gemini37|DefaultModelsListCandidateIDsAntigravityNative|AntigravityEnsuresGeminiDefaultPassthroughs|AntigravityRespectsWildcardOverride' -count=1
+go test ./migrations ./internal/domain ./internal/pkg/antigravity ./internal/service ./internal/handler -count=1
 pnpm test:run src/composables/__tests__/useModelWhitelist.spec.ts src/components/admin/account/__tests__/AccountTestModal.spec.ts
 pnpm typecheck
-git diff --check
 ```
 
-These tests prove local routing and request-shape behavior. They do not prove live Cloud Code acceptance for this account/endpoint; that remains the explicit provider smoke-test gap.
+Migration 177 was also executed twice after migration 176 against a disposable PostgreSQL 18 database. Assertions proved SQL execution, idempotency, exact-tier insertion, existing exact-tier precedence, removal of only the erroneous suffixless identity mapping, preservation of a custom suffixless remap, and no changes to unrelated/deleted accounts. The disposable container was removed.
+
+This live test proves the corrected local serializer, exact tier routing, captured numeric defaults, provider acceptance, and non-empty output. It does not exercise production account scheduling or deployment; those remain post-release checks.
+
+Pipeline:
+
+```text
+real agy.exe models + hash-bound successful captures
+    -> exact public/wire tier IDs and numeric budgets
+    -> frontend whitelist, priorities, labels, presets
+    -> backend registry/default mapping + corrective migration
+    -> ResolveWireFromBody / AntigravityWireModel identity routing
+    -> native checkpoint wrapper with captured budget defaults
+    -> local live provider probe for low, medium, high
+    -> tests, commit, image publication, Electerm deployment
+```
 
 ## Direct answers saved for payload-parity work
 
