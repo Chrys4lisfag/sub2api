@@ -92,6 +92,7 @@ function mountModal(account: Record<string, unknown> = {
 describe('AccountTestModal', () => {
   beforeEach(() => {
     getAvailableModels.mockResolvedValue([
+      { id: 'gemini-3.7-flash', display_name: 'Gemini 3.7 Flash' },
       { id: 'gemini-3.6-flash', display_name: 'Gemini 3.6 Flash' },
       { id: 'gemini-3.6-flash-high', display_name: 'Gemini 3.6 Flash High' },
       { id: 'gemini-3.6-flash-medium', display_name: 'Gemini 3.6 Flash Medium' },
@@ -124,7 +125,7 @@ describe('AccountTestModal', () => {
     vi.restoreAllMocks()
   })
 
-  it('Antigravity Native 测试模型选择器显示 Gemini 3.6 和 3.1 Flash Lite', async () => {
+  it('Antigravity Native 测试模型选择器显示 Gemini 3.7, 3.6 和 3.1 Flash Lite', async () => {
     const wrapper = mountModal({
       id: 43,
       name: 'Antigravity Native',
@@ -137,6 +138,7 @@ describe('AccountTestModal', () => {
 
     const modelIDs = wrapper.findAll('[data-model-id]').map((node) => node.attributes('data-model-id'))
     expect(modelIDs).toEqual(expect.arrayContaining([
+      'gemini-3.7-flash',
       'gemini-3.6-flash',
       'gemini-3.6-flash-high',
       'gemini-3.6-flash-medium',

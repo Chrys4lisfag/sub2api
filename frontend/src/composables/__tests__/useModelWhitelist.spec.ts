@@ -36,10 +36,11 @@ describe('useModelWhitelist', () => {
     expect(models).toContain('gemini-3-pro-image')
   })
 
-  it.each(['antigravity', 'antigravity_native'])('%s 模型列表包含 Gemini 3.6 和 3.1 Flash Lite', (platform) => {
+  it.each(['antigravity', 'antigravity_native'])('%s 模型列表包含 Gemini 3.7, 3.6 和 3.1 Flash Lite', (platform) => {
     const models = getModelsByPlatform(platform)
 
     expect(models).toContain('gemini-3.1-flash-lite')
+    expect(models).toContain('gemini-3.7-flash')
     expect(models).toContain('gemini-3.6-flash')
     expect(models).toContain('gemini-3.6-flash-high')
     expect(models).toContain('gemini-3.6-flash-medium')
@@ -50,14 +51,17 @@ describe('useModelWhitelist', () => {
     const values = allModels.map((model) => model.value)
 
     expect(values).toContain('gemini-3.1-flash-lite')
+    expect(values).toContain('gemini-3.7-flash')
     expect(values).toContain('gemini-3.6-flash')
     expect(new Set(values).size).toBe(values.length)
   })
 
   it('Antigravity Native 使用 Antigravity 预设映射', () => {
-    expect(getPresetMappingsByPlatform('antigravity_native')).toEqual(
-      getPresetMappingsByPlatform('antigravity')
-    )
+    const presets = getPresetMappingsByPlatform('antigravity_native')
+    expect(presets).toEqual(getPresetMappingsByPlatform('antigravity'))
+    expect(presets).toEqual(expect.arrayContaining([
+      expect.objectContaining({ from: 'gemini-3.7-flash', to: 'gemini-3.7-flash' })
+    ]))
   })
 
   it('Claude 模型列表包含新发布的 Claude 模型', () => {

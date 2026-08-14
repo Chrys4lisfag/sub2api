@@ -25,6 +25,9 @@ import (
 func AntigravityWireModel(modelName string) string {
 	normalized := strings.ToLower(strings.TrimSpace(strings.TrimPrefix(modelName, "models/")))
 	switch normalized {
+	// Gemini 3.7 Flash (identity wire ID)
+	case "gemini-3.7-flash":
+		return normalized
 	// Gemini 3.6 Flash variants (rolled onto daily-cloudcode-pa 2026-07,
 	// not yet in prod cloudcode-pa as of 2026-07-21). Sub2api's native
 	// gateway defaults to the DAILY endpoint via agymimic
@@ -100,6 +103,8 @@ func AntigravityWireModel(modelName string) string {
 func ResolveWireFromBody(publicName string, body []byte) string {
 	normalized := strings.ToLower(strings.TrimSpace(strings.TrimPrefix(publicName, "models/")))
 	switch normalized {
+	case "gemini-3.7-flash":
+		return "gemini-3.7-flash"
 	case "gemini-3.5-flash":
 		if len(body) == 0 || !gjson.ValidBytes(body) {
 			return AntigravityWireModel(publicName)
@@ -229,7 +234,7 @@ func extractThinkingLevel(body []byte) string {
 }
 
 // DefaultVariantThinkingLevel returns the implied thinking effort level for
-// public Gemini 3.5/3.6 Flash variant model IDs. Returns "" when the
+// public Gemini 3.5/3.6/3.7 Flash variant model IDs. Returns "" when the
 // model does not carry an implicit default (caller's explicit thinking
 // config wins regardless).
 func DefaultVariantThinkingLevel(modelName string) string {
@@ -237,6 +242,8 @@ func DefaultVariantThinkingLevel(modelName string) string {
 	switch normalized {
 	case "gemini-3.5-flash-high", "gemini-3.6-flash-high":
 		return "high"
+	case "gemini-3.7-flash":
+		return "MEDIUM"
 	case "gemini-3.5-flash-medium", "gemini-3.6-flash-medium":
 		return "medium"
 	case "gemini-3.5-flash-low", "gemini-3.6-flash-low":

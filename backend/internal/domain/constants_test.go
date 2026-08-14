@@ -63,6 +63,18 @@ func TestDefaultAntigravityModelMapping_Gemini31ProAliases(t *testing.T) {
 	}
 }
 
+func TestDefaultAntigravityModelMapping_Gemini37Flash(t *testing.T) {
+	t.Parallel()
+
+	got, ok := DefaultAntigravityModelMapping["gemini-3.7-flash"]
+	if !ok {
+		t.Fatalf("expected mapping for gemini-3.7-flash to exist")
+	}
+	if got != "gemini-3.7-flash" {
+		t.Fatalf("unexpected mapping for gemini-3.7-flash: got %q want %q", got, "gemini-3.7-flash")
+	}
+}
+
 func TestDefaultBedrockModelMapping_ContainsNewClaudeModels(t *testing.T) {
 	t.Parallel()
 

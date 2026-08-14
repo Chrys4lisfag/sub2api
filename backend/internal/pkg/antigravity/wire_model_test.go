@@ -27,6 +27,10 @@ func TestAntigravityWireModel(t *testing.T) {
 		{"gemini-3.6-flash", "gemini-3.6-flash-medium"},
 		{"models/gemini-3.6-flash-high", "gemini-3.6-flash-high"},
 		{"GEMINI-3.6-FLASH-LOW", "gemini-3.6-flash-low"},
+		// Gemini 3.7 Flash — identity wire ID.
+		{"gemini-3.7-flash", "gemini-3.7-flash"},
+		{"models/gemini-3.7-flash", "gemini-3.7-flash"},
+		{"GEMINI-3.7-FLASH", "gemini-3.7-flash"},
 		// 3 Flash legacy variants → base 3-flash.
 		{"gemini-3-flash-high", "gemini-3-flash"},
 		{"gemini-3-flash-medium", "gemini-3-flash"},
@@ -71,6 +75,9 @@ func TestDefaultVariantThinkingLevel(t *testing.T) {
 		{"gemini-3.5-flash-medium", "medium"},
 		{"gemini-3.6-flash-high", "high"},
 		{"gemini-3.6-flash-medium", "medium"},
+		{"gemini-3.7-flash", "MEDIUM"},
+		{"models/gemini-3.7-flash", "MEDIUM"},
+		{"GEMINI-3.7-FLASH", "MEDIUM"},
 		{"gemini-3.5-flash-low", "low"},
 		{"gemini-3.6-flash-low", "low"},
 		{"gemini-3.6-flash", ""}, // base has no implicit default
@@ -184,6 +191,108 @@ func TestApplyWireModelToBody_PassthroughForInvalidJSON(t *testing.T) {
 	}
 }
 
+func TestApplyWireModelToBody_Gemini37FlashDefaultThinkingLevel(t *testing.T) {
+	cases := []struct {
+		name      string
+		body      string
+		levelPath string
+	}{
+		{
+			name:      "wrapped v1internal request",
+			body:      `{"model":"gemini-3.7-flash","request":{"contents":[]}}`,
+			levelPath: "request.generationConfig.thinkingConfig.thinkingLevel",
+		},
+		{
+			name:      "bare REST request",
+			body:      `{"model":"gemini-3.7-flash","generationConfig":{}}`,
+			levelPath: "generationConfig.thinkingConfig.thinkingLevel",
+		},
+		{
+			name:      "SDK config request",
+			body:      `{"model":"gemini-3.7-flash","config":{}}`,
+			levelPath: "config.thinkingConfig.thinkingLevel",
+		},
+		{
+			name:      "prefixed model name",
+			body:      `{"model":"models/gemini-3.7-flash","request":{}}`,
+			levelPath: "request.generationConfig.thinkingConfig.thinkingLevel",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			out := ApplyWireModelToBody([]byte(tc.body))
+			if got := gjson.GetBytes(out, tc.levelPath).String(); got != "MEDIUM" {
+				t.Fatalf("thinkingLevel at %s: got %q want MEDIUM, output: %s", tc.levelPath, got, out)
+			}
+			if got := gjson.GetBytes(out, "model").String(); got != "gemini-3.7-flash" {
+				t.Fatalf("model: got %q want gemini-3.7-flash, output: %s", got, out)
+			}
+			if got := gjson.GetBytes(out, "request.generationConfig.thinkingConfig.includeThoughts").Bool(); !got && tc.name == "wrapped v1internal request" {
+				t.Fatalf("includeThoughts not set: %s", out)
+			}
+		})
+	}
+}
+
+func TestApplyWireModelToBody_Gemini37FlashPreservesExplicitSettings(t *testing.T) {
+	cases := []struct {
+		name       string
+		body       string
+		checkLevel string
+		wantLevel  string
+		checkBudg  string
+		wantBudg   int64
+	}{
+		{
+			name:       "explicit camelCase thinkingLevel",
+			body:       `{"model":"gemini-3.7-flash","request":{"generationConfig":{"thinkingConfig":{"thinkingLevel":"high"}}}}`,
+			checkLevel: "request.generationConfig.thinkingConfig.thinkingLevel",
+			wantLevel:  "high",
+		},
+		{
+			name:       "explicit snake_case thinking_level",
+			body:       `{"model":"gemini-3.7-flash","request":{"generationConfig":{"thinkingConfig":{"thinking_level":"low"}}}}`,
+			checkLevel: "request.generationConfig.thinkingConfig.thinking_level",
+			wantLevel:  "low",
+		},
+		{
+			name:      "explicit camelCase thinkingBudget",
+			body:      `{"model":"gemini-3.7-flash","request":{"generationConfig":{"thinkingConfig":{"thinkingBudget":2048}}}}`,
+			checkBudg: "request.generationConfig.thinkingConfig.thinkingBudget",
+			wantBudg:  2048,
+		},
+		{
+			name:      "explicit snake_case thinking_budget",
+			body:      `{"model":"gemini-3.7-flash","request":{"generationConfig":{"thinkingConfig":{"thinking_budget":1024}}}}`,
+			checkBudg: "request.generationConfig.thinkingConfig.thinking_budget",
+			wantBudg:  1024,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			out := ApplyWireModelToBody([]byte(tc.body))
+			if tc.checkLevel != "" {
+				if got := gjson.GetBytes(out, tc.checkLevel).String(); got != tc.wantLevel {
+					t.Fatalf("thinkingLevel at %s: got %q want %q, output: %s", tc.checkLevel, got, tc.wantLevel, out)
+				}
+				if tc.name == "explicit snake_case thinking_level" {
+					if gjson.GetBytes(out, "request.generationConfig.thinkingConfig.thinkingLevel").Exists() {
+						t.Fatalf("unexpected camelCase thinkingLevel injected beside snake_case: %s", out)
+					}
+				}
+			}
+			if tc.checkBudg != "" {
+				if got := gjson.GetBytes(out, tc.checkBudg).Int(); got != tc.wantBudg {
+					t.Fatalf("thinkingBudget at %s: got %d want %d, output: %s", tc.checkBudg, got, tc.wantBudg, out)
+				}
+				if gjson.GetBytes(out, "request.generationConfig.thinkingConfig.thinkingLevel").Exists() {
+					t.Fatalf("unexpected thinkingLevel injected when budget is explicit: %s", out)
+				}
+			}
+		})
+	}
+}
+
 func TestExtractSessionID(t *testing.T) {
 	body := []byte(`{"request":{"sessionId":"abc123  "}}`)
 	if got := ExtractSessionID(body); got != "abc123" {
@@ -288,6 +397,48 @@ func TestResolveSemanticRetryModel_LowersExplicitTierAliases(t *testing.T) {
 			body := []byte(`{"generationConfig":{"thinkingConfig":{"thinkingLevel":"` + tc.level + `"}}}`)
 			if got := ResolveSemanticRetryModel(tc.model, body); got != tc.want {
 				t.Fatalf("ResolveSemanticRetryModel(%q, %s) = %q, want %q", tc.model, body, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestResolveWireFromBody_Gemini37FlashIdentity(t *testing.T) {
+	cases := []struct {
+		name  string
+		model string
+		body  string
+		want  string
+	}{
+		{
+			name:  "base model no body",
+			model: "gemini-3.7-flash",
+			body:  "",
+			want:  "gemini-3.7-flash",
+		},
+		{
+			name:  "prefixed model",
+			model: "models/gemini-3.7-flash",
+			body:  `{"generationConfig":{"thinkingConfig":{"thinkingLevel":"high"}}}`,
+			want:  "gemini-3.7-flash",
+		},
+		{
+			name:  "uppercase model",
+			model: "GEMINI-3.7-FLASH",
+			body:  `{"generationConfig":{"thinkingConfig":{"thinkingLevel":"low"}}}`,
+			want:  "gemini-3.7-flash",
+		},
+		{
+			name:  "wrapped request",
+			model: "gemini-3.7-flash",
+			body:  `{"request":{"generationConfig":{"thinkingConfig":{"thinkingLevel":"high"}}}}`,
+			want:  "gemini-3.7-flash",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := ResolveWireFromBody(tc.model, []byte(tc.body))
+			if got != tc.want {
+				t.Fatalf("ResolveWireFromBody(%q): got %q want %q", tc.model, got, tc.want)
 			}
 		})
 	}

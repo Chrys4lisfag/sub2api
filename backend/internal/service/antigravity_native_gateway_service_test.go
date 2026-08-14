@@ -125,6 +125,87 @@ func TestWrapNativeV1Internal_SynchronizesPrebuiltEnvelopeRetryTier(t *testing.T
 	}
 }
 
+func TestWrapNativeV1Internal_Gemini37UsesThinkingLevel(t *testing.T) {
+	body := []byte(`{"contents":[{"role":"user","parts":[{"text":"hi"}]}]}`)
+	out, err := wrapNativeV1Internal("proj", "gemini-3.7-flash", body)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	thinkingConfig := "request.generationConfig.thinkingConfig"
+	if got := gjson.GetBytes(out, thinkingConfig+".thinkingLevel").String(); got != "MEDIUM" {
+		t.Fatalf("thinkingLevel: got %q, want MEDIUM", got)
+	}
+	if gjson.GetBytes(out, thinkingConfig+".thinkingBudget").Exists() ||
+		gjson.GetBytes(out, thinkingConfig+".thinking_budget").Exists() {
+		t.Fatalf("Gemini 3.7 synthesized numeric thinking budget: %s", out)
+	}
+	if !gjson.GetBytes(out, thinkingConfig+".includeThoughts").Bool() {
+		t.Fatal("includeThoughts: got false, want true")
+	}
+}
+
+func TestWrapNativeV1Internal_Gemini37PreservesExplicitThinkingDirective(t *testing.T) {
+	tests := []struct {
+		name string
+		body string
+		path string
+		want string
+	}{
+		{
+			name: "camel case level",
+			body: `{"generationConfig":{"thinkingConfig":{"thinkingLevel":"HIGH"}}}`,
+			path: "request.generationConfig.thinkingConfig.thinkingLevel",
+			want: "HIGH",
+		},
+		{
+			name: "snake case budget",
+			body: `{"generationConfig":{"thinkingConfig":{"thinking_budget":1234}}}`,
+			path: "request.generationConfig.thinkingConfig.thinking_budget",
+			want: "1234",
+		},
+		{
+			name: "SDK config level",
+			body: `{"config":{"thinkingConfig":{"thinking_level":"high"}}}`,
+			path: "request.config.thinkingConfig.thinking_level",
+			want: "high",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			out, err := wrapNativeV1Internal("proj", "models/gemini-3.7-flash", []byte(tt.body))
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if got := gjson.GetBytes(out, tt.path).String(); got != tt.want {
+				t.Fatalf("%s: got %q, want %q", tt.path, got, tt.want)
+			}
+			if gjson.GetBytes(out, "request.generationConfig.thinkingConfig.thinkingLevel").String() == "MEDIUM" {
+				t.Fatalf("default thinkingLevel replaced explicit directive: %s", out)
+			}
+		})
+	}
+}
+
+func TestWrapNativeV1Internal_Gemini37PrebuiltRetryUsesThinkingLevel(t *testing.T) {
+	already := []byte(`{"project":"proj-x","model":"gemini-3.6-flash-medium","request":{"generationConfig":{"thinkingConfig":{}},"contents":[]},"userAgent":"antigravity","requestId":"agent-abc"}`)
+	out, err := wrapNativeV1Internal("ignored", "gemini-3.7-flash", already)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got := gjson.GetBytes(out, "model").String(); got != "gemini-3.7-flash" {
+		t.Fatalf("model: got %q, want gemini-3.7-flash", got)
+	}
+	thinkingConfig := "request.generationConfig.thinkingConfig"
+	if got := gjson.GetBytes(out, thinkingConfig+".thinkingLevel").String(); got != "MEDIUM" {
+		t.Fatalf("thinkingLevel: got %q, want MEDIUM", got)
+	}
+	if gjson.GetBytes(out, thinkingConfig+".thinkingBudget").Exists() {
+		t.Fatalf("prebuilt Gemini 3.7 retry synthesized numeric budget: %s", out)
+	}
+}
+
 func TestWrapNativeV1Internal_EmptyBody(t *testing.T) {
 	out, err := wrapNativeV1Internal("proj", "gemini-3.6-flash-high", nil)
 	if err != nil {

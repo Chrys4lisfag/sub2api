@@ -743,7 +743,7 @@ func jsonEscape(s string) string {
 func wrapNativeV1Internal(projectID, model string, geminiBody []byte) ([]byte, error) {
 	// Idempotent passthrough for a caller-provided full envelope. Semantic
 	// retries are the exception: keep the prebuilt envelope, but synchronize
-	// its top-level model and tier budget with the handler's lowered model.
+	// its top-level model and thinking defaults with the handler's model.
 	if len(geminiBody) > 0 && gjson.ValidBytes(geminiBody) &&
 		strings.EqualFold(gjson.GetBytes(geminiBody, "userAgent").String(), "antigravity") {
 		if gjson.GetBytes(geminiBody, "model").String() == model {
@@ -758,9 +758,27 @@ func wrapNativeV1Internal(projectID, model string, geminiBody []byte) ([]byte, e
 			gjson.GetBytes(out, "request.config.thinkingConfig").Exists() {
 			thinkingConfigPath = "request.config.thinkingConfig"
 		}
-		out, err = sjson.SetBytes(out, thinkingConfigPath+".thinkingBudget", thinkingBudgetForModel(model))
-		if err != nil {
-			return nil, fmt.Errorf("set prebuilt envelope thinking budget: %w", err)
+		if isGemini37FlashModel(model) {
+			hasThinkingDirective := false
+			for _, base := range []string{"request.generationConfig.thinkingConfig", "request.config.thinkingConfig"} {
+				for _, key := range gemini37ThinkingDirectiveKeys {
+					if gjson.GetBytes(out, base+"."+key).Exists() {
+						hasThinkingDirective = true
+						break
+					}
+				}
+			}
+			if !hasThinkingDirective {
+				out, err = sjson.SetBytes(out, thinkingConfigPath+".thinkingLevel", "MEDIUM")
+				if err != nil {
+					return nil, fmt.Errorf("set prebuilt envelope thinking level: %w", err)
+				}
+			}
+		} else {
+			out, err = sjson.SetBytes(out, thinkingConfigPath+".thinkingBudget", thinkingBudgetForModel(model))
+			if err != nil {
+				return nil, fmt.Errorf("set prebuilt envelope thinking budget: %w", err)
+			}
 		}
 		return out, nil
 	}
@@ -838,6 +856,7 @@ func newSessionID() string {
 // thinkingBudget scales with model tier per the fetchAvailableModels probe:
 //
 //	gemini-3-flash             → -1 (dynamic)
+//	gemini-3.7-flash           → thinkingLevel=MEDIUM (no synthesized budget)
 //	gemini-3.5-flash-extra-low → 1000   (Low)
 //	gemini-3.5-flash-low       → 4000   (Medium)
 //	gemini-3-flash-agent       → 10000  (High)
@@ -886,9 +905,40 @@ func applyAgyDefaultsToInnerRequest(inner map[string]any, wireModel string) {
 	if _, present := tc["includeThoughts"]; !present {
 		tc["includeThoughts"] = true
 	}
+	if isGemini37FlashModel(wireModel) {
+		// Gemini 3.7 uses thinking levels. Preserve any explicit camelCase or
+		// snake_case level/budget; otherwise use Google's documented default.
+		if hasGemini37ThinkingDirective(tc) {
+			return
+		}
+		if config, ok := inner["config"].(map[string]any); ok {
+			if configThinking, ok := config["thinkingConfig"].(map[string]any); ok && hasGemini37ThinkingDirective(configThinking) {
+				return
+			}
+		}
+		tc["thinkingLevel"] = "MEDIUM"
+		return
+	}
 	if _, present := tc["thinkingBudget"]; !present {
 		tc["thinkingBudget"] = thinkingBudgetForModel(wireModel)
 	}
+}
+
+var gemini37ThinkingDirectiveKeys = []string{"thinkingLevel", "thinking_level", "thinkingBudget", "thinking_budget"}
+
+func hasGemini37ThinkingDirective(thinkingConfig map[string]any) bool {
+	for _, key := range gemini37ThinkingDirectiveKeys {
+		if _, present := thinkingConfig[key]; present {
+			return true
+		}
+	}
+	return false
+}
+
+func isGemini37FlashModel(model string) bool {
+	normalized := strings.ToLower(strings.TrimSpace(model))
+	normalized = strings.TrimPrefix(normalized, "models/")
+	return normalized == "gemini-3.7-flash"
 }
 
 // thinkingBudgetForModel returns the budget agy uses for each known wire

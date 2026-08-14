@@ -1,6 +1,6 @@
 # AGY Gemini Protocol Evidence and Replay Plan
 
-Date: 2026-08-01
+Date: 2026-08-14
 
 ## Scope and evidence rule
 
@@ -32,6 +32,65 @@ Observed matrix:
 | HIGH + `VALIDATED` | 5 | 1 |
 | HIGH + `AUTO` | 5 | 1 |
 | LOW + `VALIDATED` | 5 | 5 |
+
+## Gemini 3.7 Flash support, 2026-08-14
+
+Official Google sources establish:
+
+- Gemini 3.7 Flash is GA under the stable public model ID `gemini-3.7-flash`.
+- Default thinking level is `medium`; supported levels are `low`, `medium`, and `high`.
+- Context limit is 1M tokens and maximum output is 64K tokens.
+- Google's migration guidance says to replace `thinking_budget` with `thinking_level` and remove deprecated sampling parameters.
+- Google Antigravity announced Gemini 3.7 Flash as its new Flash model; the Gemini API guide says it is the new default model for the Antigravity agent.
+
+Primary sources:
+
+- <https://ai.google.dev/gemini-api/docs/latest-model>
+- <https://ai.google.dev/gemini-api/docs/models/gemini-3.7-flash>
+- <https://antigravity.google/blog/gemini-3-7-flash-in-google-antigravity>
+
+Implementation decision and evidence boundary:
+
+- Expose only `gemini-3.7-flash`. Do not invent `-high`, `-medium`, or `-low` aliases without `fetchAvailableModels` or hash-bound AGY wire evidence.
+- Public-to-wire routing is identity. `models/gemini-3.7-flash` is normalized to the same bare wire ID.
+- Native synthesized requests use `thinkingLevel: MEDIUM` only when neither a level nor a budget was supplied. They do not synthesize numeric `thinkingBudget` for 3.7. Explicit caller thinking configuration remains authoritative.
+- Existing 3.6 suffix aliases, budgets, semantic-empty ladder, and protocol conclusions remain unchanged.
+- No live `agy.exe` or IDA session is required for this standard public-ID addition. Fresh-binary work becomes necessary only if Google exposes hidden Cloud Code aliases, a different `model_enum` label, binary-specific budgets, or new envelope fields. Provider acceptance through the Antigravity Native Cloud Code endpoint remains a post-implementation live validation gap.
+
+Panel/backend pipeline:
+
+```text
+frontend Antigravity whitelist and account test priority
+    -> backend DefaultAntigravityModelMapping / static model registry
+    -> account model_mapping (migration adds identity entry)
+    -> ResolveWireFromBody / AntigravityWireModel
+    -> wrapNativeV1Internal generation defaults
+    -> agymimic RawRequest
+    -> /v1internal:generateContent or :streamGenerateContent
+```
+
+Issue found during integration: unknown models previously inherited synthesized `thinkingBudget: -1`. That fallback is appropriate for older dynamic-budget paths but conflicts with Google's 3.7 migration guidance. The 3.7 path is now level-based while preserving explicit caller settings and leaving older models untouched.
+
+Implemented surface:
+
+- Panel whitelist, scope label, and both account-test model priorities expose the base ID.
+- Static Claude/Gemini model lists and Antigravity Native candidate discovery expose the base ID.
+- Default account mapping and migration `176_add_gemini37_to_model_mapping.sql` add identity routing; existing exact per-account overrides win over the migration default. Runtime mapping completion respects wildcard overrides.
+- Wire routing normalizes case and an optional `models/` prefix, then keeps the stable base ID unchanged regardless of caller thinking level.
+- Legacy body rewriting and native synthesized envelopes default to medium thinking only when no explicit camelCase or snake_case level/budget exists. Native envelopes emit `thinkingLevel: MEDIUM` and no synthesized numeric budget.
+- Regression coverage exercises panel visibility, account-test selection, registry/mapping discovery, identity routing, explicit setting preservation, synthesized native envelopes, and prebuilt retry envelopes.
+
+Targeted validation completed:
+
+```text
+go test ./internal/domain ./internal/pkg/antigravity ./internal/service -count=1
+go test ./internal/service -run 'Gemini37|DefaultModelsListCandidateIDsAntigravityNative|AntigravityEnsuresGeminiDefaultPassthroughs|AntigravityRespectsWildcardOverride' -count=1
+pnpm test:run src/composables/__tests__/useModelWhitelist.spec.ts src/components/admin/account/__tests__/AccountTestModal.spec.ts
+pnpm typecheck
+git diff --check
+```
+
+These tests prove local routing and request-shape behavior. They do not prove live Cloud Code acceptance for this account/endpoint; that remains the explicit provider smoke-test gap.
 
 ## Direct answers saved for payload-parity work
 

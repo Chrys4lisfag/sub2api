@@ -200,6 +200,9 @@ var geminiModels = []modelDef{
 	{ID: "gemini-3.6-flash-high", DisplayName: "Gemini 3.6 Flash (High)", CreatedAt: "2026-07-21T00:00:00Z", IsReasoning: true},
 	{ID: "gemini-3.6-flash-medium", DisplayName: "Gemini 3.6 Flash (Medium)", CreatedAt: "2026-07-21T00:00:00Z"},
 	{ID: "gemini-3.6-flash-low", DisplayName: "Gemini 3.6 Flash (Low)", CreatedAt: "2026-07-21T00:00:00Z"},
+	// Gemini 3.7 Flash stable public ID. Google documents medium thinking
+	// as the default; no Antigravity tier-suffix wire aliases are evidenced.
+	{ID: "gemini-3.7-flash", DisplayName: "Gemini 3.7 Flash", CreatedAt: "2026-08-13T00:00:00Z"},
 	{ID: "gemini-3-pro-preview", DisplayName: "Gemini 3 Pro Preview", CreatedAt: "2025-06-01T00:00:00Z", IsReasoning: true},
 	{ID: "gemini-3-pro-image", DisplayName: "Gemini 3 Pro Image", CreatedAt: "2025-06-01T00:00:00Z"},
 }
