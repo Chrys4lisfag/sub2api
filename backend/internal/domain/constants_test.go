@@ -71,6 +71,10 @@ func TestDefaultAntigravityModelMapping_Gemini37FlashExactTiers(t *testing.T) {
 		"gemini-3.7-flash-high":   "gemini-3.7-flash-high",
 		"gemini-3.7-flash-medium": "gemini-3.7-flash-medium",
 		"gemini-3.7-flash-low":    "gemini-3.7-flash-low",
+		"gemini-3.8-flash":        "gemini-3.8-flash",
+		"gemini-3.8-flash-high":   "gemini-3.8-flash-high",
+		"gemini-3.8-flash-medium": "gemini-3.8-flash-medium",
+		"gemini-3.8-flash-low":    "gemini-3.8-flash-low",
 	}
 
 	for from, want := range cases {

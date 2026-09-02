@@ -93,6 +93,7 @@ describe('AccountTestModal', () => {
   beforeEach(() => {
     getAvailableModels.mockResolvedValue([
       { id: 'gemini-3.7-flash', display_name: 'Gemini 3.7 Flash' },
+      { id: 'gemini-3.8-flash', display_name: 'Gemini 3.8 Flash' },
       { id: 'gemini-3.6-flash', display_name: 'Gemini 3.6 Flash' },
       { id: 'gemini-3.6-flash-high', display_name: 'Gemini 3.6 Flash High' },
       { id: 'gemini-3.6-flash-medium', display_name: 'Gemini 3.6 Flash Medium' },
@@ -139,6 +140,7 @@ describe('AccountTestModal', () => {
     const modelIDs = wrapper.findAll('[data-model-id]').map((node) => node.attributes('data-model-id'))
     expect(modelIDs).toEqual(expect.arrayContaining([
       'gemini-3.7-flash',
+      'gemini-3.8-flash',
       'gemini-3.6-flash',
       'gemini-3.6-flash-high',
       'gemini-3.6-flash-medium',
@@ -148,6 +150,8 @@ describe('AccountTestModal', () => {
     expect(modelIDs).not.toContain('gemini-3.7-flash-high')
     expect(modelIDs).not.toContain('gemini-3.7-flash-medium')
     expect(modelIDs).not.toContain('gemini-3.7-flash-low')
+    expect(modelIDs).not.toContain('gemini-3.8-flash-high')
+    expect(modelIDs).not.toContain('gemini-3.8-flash-low')
   })
 
   it('gemini 图片模型测试会携带提示词并渲染图片预览', async () => {

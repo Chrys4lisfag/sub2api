@@ -239,6 +239,7 @@ const formatScopeName = (scope: string): string => {
     'gemini-3.5-flash-high': 'G35FH',
     'gemini-3.5-flash-medium': 'G35FM',
     'gemini-3.5-flash-low': 'G35FL',
+    'gemini-3.8-flash': 'G38F',
     'gemini-3.7-flash': 'G37F',
     'gemini-3.6-flash': 'G36F',
     'gemini-3.6-flash-high': 'G36FH',

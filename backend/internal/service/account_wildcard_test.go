@@ -516,6 +516,7 @@ func TestAccountGetModelMapping_AntigravityEnsuresGeminiDefaultPassthroughs(t *t
 		"gemini-3.5-flash-high", "gemini-3.5-flash-medium", "gemini-3.5-flash-low",
 		"gemini-3.6-flash", "gemini-3.6-flash-high", "gemini-3.6-flash-medium", "gemini-3.6-flash-low",
 		"gemini-3.7-flash", "gemini-3.7-flash-high", "gemini-3.7-flash-medium", "gemini-3.7-flash-low",
+		"gemini-3.8-flash", "gemini-3.8-flash-high", "gemini-3.8-flash-medium", "gemini-3.8-flash-low",
 	} {
 		if mapping[m] != m {
 			t.Fatalf("expected %s passthrough to be auto-filled, got: %q", m, mapping[m])

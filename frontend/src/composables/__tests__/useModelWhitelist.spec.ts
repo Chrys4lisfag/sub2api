@@ -44,6 +44,10 @@ describe('useModelWhitelist', () => {
     expect(models).not.toContain('gemini-3.7-flash-high')
     expect(models).not.toContain('gemini-3.7-flash-medium')
     expect(models).not.toContain('gemini-3.7-flash-low')
+    expect(models).toContain('gemini-3.8-flash')
+    expect(models).not.toContain('gemini-3.8-flash-high')
+    expect(models).not.toContain('gemini-3.8-flash-medium')
+    expect(models).not.toContain('gemini-3.8-flash-low')
     expect(models).toContain('gemini-3.6-flash')
     expect(models).toContain('gemini-3.6-flash-high')
     expect(models).toContain('gemini-3.6-flash-medium')
@@ -58,6 +62,10 @@ describe('useModelWhitelist', () => {
     expect(values).not.toContain('gemini-3.7-flash-high')
     expect(values).not.toContain('gemini-3.7-flash-medium')
     expect(values).not.toContain('gemini-3.7-flash-low')
+    expect(values).toContain('gemini-3.8-flash')
+    expect(values).not.toContain('gemini-3.8-flash-high')
+    expect(values).not.toContain('gemini-3.8-flash-medium')
+    expect(values).not.toContain('gemini-3.8-flash-low')
     expect(values).toContain('gemini-3.6-flash')
     expect(new Set(values).size).toBe(values.length)
   })
@@ -66,9 +74,11 @@ describe('useModelWhitelist', () => {
     const presets = getPresetMappingsByPlatform('antigravity_native')
     expect(presets).toEqual(getPresetMappingsByPlatform('antigravity'))
     expect(presets).toEqual(expect.arrayContaining([
-      expect.objectContaining({ from: 'gemini-3.7-flash', to: 'gemini-3.7-flash' })
+      expect.objectContaining({ from: 'gemini-3.7-flash', to: 'gemini-3.7-flash' }),
+      expect.objectContaining({ from: 'gemini-3.8-flash', to: 'gemini-3.8-flash' })
     ]))
     expect(presets.some((p) => p.from?.startsWith('gemini-3.7-flash-') || p.to?.startsWith('gemini-3.7-flash-'))).toBe(false)
+    expect(presets.some((p) => p.from?.startsWith('gemini-3.8-flash-') || p.to?.startsWith('gemini-3.8-flash-'))).toBe(false)
   })
 
   it('Claude 模型列表包含新发布的 Claude 模型', () => {

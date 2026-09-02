@@ -152,6 +152,55 @@ func TestWrapNativeV1Internal_Gemini37ExactBudgets(t *testing.T) {
 	}
 }
 
+func TestWrapNativeV1Internal_Gemini38ExactBudgets(t *testing.T) {
+	cases := []struct {
+		model      string
+		wantBudget int64
+	}{
+		{"gemini-3.8-flash-high", -1},
+		{"gemini-3.8-flash-medium", 4000},
+		{"gemini-3.8-flash-low", 1000},
+	}
+	body := []byte(`{"contents":[{"role":"user","parts":[{"text":"hi"}]}]}`)
+	for _, tc := range cases {
+		out, err := wrapNativeV1Internal("proj", tc.model, body)
+		if err != nil {
+			t.Fatalf("wrap %s: %v", tc.model, err)
+		}
+		thinking := "request.generationConfig.thinkingConfig"
+		if got := gjson.GetBytes(out, thinking+".thinkingBudget").Int(); got != tc.wantBudget {
+			t.Fatalf("%s budget = %d, want %d: %s", tc.model, got, tc.wantBudget, out)
+		}
+		if !gjson.GetBytes(out, thinking+".includeThoughts").Bool() {
+			t.Fatalf("%s includeThoughts missing: %s", tc.model, out)
+		}
+		if got := gjson.GetBytes(out, "model").String(); got != tc.model {
+			t.Fatalf("model = %q, want %q", got, tc.model)
+		}
+	}
+}
+
+func TestWrapNativeV1Internal_Gemini38PrebuiltRetrySynchronizesBudget(t *testing.T) {
+	already := []byte(`{"project":"proj-x","model":"gemini-3.8-flash-high","request":{"generationConfig":{"thinkingConfig":{"thinkingLevel":"MEDIUM","thinkingBudget":-1,"includeThoughts":false}},"contents":[]},"userAgent":"antigravity","requestId":"agent-abc"}`)
+	out, err := wrapNativeV1Internal("ignored", "gemini-3.8-flash-medium", already)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got := gjson.GetBytes(out, "model").String(); got != "gemini-3.8-flash-medium" {
+		t.Fatalf("model: got %q, want gemini-3.8-flash-medium", got)
+	}
+	thinking := "request.generationConfig.thinkingConfig"
+	if got := gjson.GetBytes(out, thinking+".thinkingBudget").Int(); got != 4000 {
+		t.Fatalf("budget = %d, want 4000: %s", got, out)
+	}
+	if !gjson.GetBytes(out, thinking+".includeThoughts").Bool() {
+		t.Fatalf("includeThoughts not restored: %s", out)
+	}
+	if gjson.GetBytes(out, thinking+".thinkingLevel").Exists() {
+		t.Fatalf("stale thinkingLevel remains: %s", out)
+	}
+}
+
 func TestWrapNativeV1Internal_Gemini37PreservesExplicitThinkingDirective(t *testing.T) {
 	tests := []struct {
 		name string

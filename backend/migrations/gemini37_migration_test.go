@@ -37,3 +37,16 @@ func TestMigration178_AddsGemini37VirtualAliasWithoutOverridingCustomMapping(t *
 	require.Contains(t, sql, "a.deleted_at IS NULL")
 	require.Contains(t, sql, "a.credentials->'model_mapping' <> '{}'::jsonb")
 }
+
+func TestMigration179_AddsGemini38VirtualAliasWithoutOverridingCustomMapping(t *testing.T) {
+	content, err := FS.ReadFile("179_add_gemini38_virtual_alias.sql")
+	require.NoError(t, err)
+
+	sql := string(content)
+	require.Contains(t, sql, `"gemini-3.8-flash": "gemini-3.8-flash"`)
+	// Existing per-account mapping must win over the injected default.
+	require.Contains(t, sql, "defaults.mapping || (a.credentials->'model_mapping')")
+	require.Contains(t, sql, "a.deleted_at IS NULL")
+	require.Contains(t, sql, "jsonb_typeof(a.credentials->'model_mapping') = 'object'")
+	require.NotContains(t, sql, "gemini-3.8-flash-high")
+}

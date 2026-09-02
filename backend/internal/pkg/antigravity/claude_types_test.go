@@ -20,6 +20,7 @@ func TestDefaultModels_ContainsNewAndLegacyImageModels(t *testing.T) {
 		"gemini-3.1-flash-image",
 		"gemini-3.1-flash-image-preview",
 		"gemini-3.7-flash",
+		"gemini-3.8-flash",
 	}
 
 	for _, id := range requiredIDs {
@@ -28,7 +29,10 @@ func TestDefaultModels_ContainsNewAndLegacyImageModels(t *testing.T) {
 		}
 	}
 
-	for _, tier := range []string{"gemini-3.7-flash-high", "gemini-3.7-flash-medium", "gemini-3.7-flash-low"} {
+	for _, tier := range []string{
+		"gemini-3.7-flash-high", "gemini-3.7-flash-medium", "gemini-3.7-flash-low",
+		"gemini-3.8-flash-high", "gemini-3.8-flash-medium", "gemini-3.8-flash-low",
+	} {
 		if _, ok := byID[tier]; ok {
 			t.Fatalf("did not expect internal tier %q in DefaultModels", tier)
 		}

@@ -140,6 +140,108 @@ Routing accepts camelCase or snake_case level fields in bare Gemini REST, Google
 
 `TestLiveGemini37VirtualAliasSlider` exercised the local working tree against the credential-derived real AGY endpoint. Low, medium, high, and absent-level/default-medium cases each selected the expected suffixed wire ID, serialized the exact captured numeric budget without `thinkingLevel`, received HTTP 200, and produced non-empty SSE text. This validates local alias resolution plus provider acceptance; production scheduling and deployed-image behavior remain separate release checks.
 
+## Gemini 3.8 Flash support, real-AGY evidence, 2026-09-02
+
+### Binary identity
+
+- path: `C:\Users\koval\AppData\Local\agy\bin\agy.exe`
+- version: `1.1.24`
+- size: `187,601,560` bytes
+- SHA-256: `7585871b1a34f9acc7f9c065f09e5bd1a7009519f0f219a4c43bb565c7880c95`
+- previous 1.1.13 binary retained on disk as `agy.exe.<ns>.old` (183,233,176 bytes)
+
+`agy.exe models` exposed exactly three Gemini 3.8 entries and no suffixless ID:
+
+- `gemini-3.8-flash-high` — `Gemini 3.8 Flash (High)`
+- `gemini-3.8-flash-medium` — `Gemini 3.8 Flash (Medium)`
+- `gemini-3.8-flash-low` — `Gemini 3.8 Flash (Low)`
+
+Unlike 3.7, there is no `gemini-3.8-flash-tiered` alias in the provider model list.
+
+Direct print-mode controls with a non-sensitive prompt returned process status 0, AGY JSON
+status `SUCCESS`, and non-empty `OK` output for all three exact IDs.
+
+### Hash-bound sanitized wire captures
+
+Runner `AGENT/scripts/run_mitm_agy_capture.py` pinned with `--expected-sha256 7585...80c95`,
+existing sanitizer addon unchanged. Artifacts stay outside the repository at
+`AGENT/logs/agy-38-{low,medium,high}-20260902.jsonl` plus `-meta.json`; each run recorded
+return code 0 and four captured rows.
+
+| Selected AGY ID | top-level `model` | `request.labels.model_enum` | emitted thinking config | provider result |
+|---|---|---|---|---|
+| `gemini-3.8-flash-low` | same | `MODEL_PLACEHOLDER_M320` | `includeThoughts: true`, `thinkingBudget: 1000` | HTTP 200, non-empty SSE text |
+| `gemini-3.8-flash-medium` | same | `MODEL_PLACEHOLDER_M319` | `includeThoughts: true`, `thinkingBudget: 4000` | HTTP 200, non-empty SSE text |
+| `gemini-3.8-flash-high` | same | `MODEL_PLACEHOLDER_M318` | `includeThoughts: true`, `thinkingBudget: -1` | HTTP 200, non-empty SSE text |
+
+`thinkingLevel` was absent from every captured 3.8 agent request, exactly as with 3.7. Numeric
+`thinkingBudget` is therefore the observed wire contract. Each run also contained one unrelated
+`gemini-3.1-flash-lite` checkpoint request whose thinking config is `includeThoughts: false`,
+`thinkingBudget: 0`; only the agent pair supports the table above. The `model_enum` labels are
+agent-request evidence and must not be invented on sub2api's checkpoint path.
+
+### Independent provider metadata confirmation
+
+A disposable allowlisting addon captured `/v1internal:fetchAvailableModels` and persisted only
+numeric and model-name fields. It reported, per 3.8 tier: `thinkingBudget` -1 / 4000 / 1000 for
+high / medium / low, `minThinkingBudget: 32`, `maxOutputTokens: 65536`, `supportsImages: true`,
+`supportsThinking: true`, `supportsVideo: true`. No input-token or context-window field exists in
+that response. The addon and its run artifacts were deleted after reading; only the three
+sanitized stream captures were retained.
+
+### What `high` means
+
+`high` is mapped, not unmapped: its captured budget is `-1`, which is AGY's dynamic
+(model-chosen, uncapped) budget rather than a missing value. Measured with one identical
+reasoning prompt through real AGY print mode:
+
+| tier | wire budget | thinking tokens reported |
+|---|---:|---:|
+| low | 1000 | 0 |
+| medium | 4000 | 139 |
+| high | -1 | 142 |
+
+`DefaultVariantThinkingLevel` intentionally has no 3.7 or 3.8 entries. Those families are routed
+through the numeric-budget path because their real requests carry no `thinkingLevel` at all;
+3.5 and 3.6 keep the level path because their own captures used levels.
+
+### Implementation contract
+
+Sub2api exposes one suffixless virtual client alias `gemini-3.8-flash`, resolved locally and
+never sent to AGY, mirroring the 3.7 contract.
+
+| client model | client thinking level | real AGY wire ID | emitted thinking config |
+|---|---|---|---|
+| `gemini-3.8-flash` | `low` or `minimal` | `gemini-3.8-flash-low` | `thinkingBudget: 1000`, `includeThoughts: true` |
+| `gemini-3.8-flash` | `medium`, absent, or unknown | `gemini-3.8-flash-medium` | `thinkingBudget: 4000`, `includeThoughts: true` |
+| `gemini-3.8-flash` | `high` | `gemini-3.8-flash-high` | `thinkingBudget: -1`, `includeThoughts: true` |
+
+Shared helpers were generalized rather than duplicated: `DefaultVariantThinkingBudget`,
+`LowerNumericBudgetTierOnce` (with `LowerGemini37TierOnce` kept as a thin alias),
+`IsNumericBudgetVirtualAlias`, and `NormalizeNumericBudgetTierBody` now cover both 3.7 and 3.8;
+`isGemini37FlashTier` and `thinkingBudgetForModel` gained the three 3.8 tiers. `maxOutputTokens`
+needed no change: the existing flash cap of 65536 already matches the provider metadata.
+Migration `179_add_gemini38_virtual_alias.sql` adds the identity alias to eligible existing
+mappings with custom mappings taking precedence, using the same shape as migration 178.
+
+### Local validation
+
+`TestLiveGemini38VirtualAliasSlider` exercised local working-tree code against the
+credential-derived real endpoint. Low, medium, high, and absent-level cases each selected the
+expected exact wire ID, serialized the captured numeric budget with no `thinkingLevel`, received
+HTTP 200, and produced non-empty SSE text. The ephemeral credential lived only in an
+ACL-protected private directory and was deleted afterwards.
+
+```text
+go test ./internal/pkg/antigravity ./internal/domain ./internal/service ./internal/handler ./migrations -count=1
+pnpm test:run src/composables/__tests__/useModelWhitelist.spec.ts src/components/admin/account/__tests__/AccountTestModal.spec.ts
+pnpm typecheck
+```
+
+All passed before commit. OMP harness gained a single `gemini-3.8-flash` entry whose
+`maxTokens: 65536` matches provider metadata; `contextWindow` and pricing are inherited family
+values and are explicitly not AGY-reported.
+
 ## AGY artifact and evidence source
 
 Hash-bound static-reversing artifact:

@@ -25,6 +25,18 @@ import (
 func AntigravityWireModel(modelName string) string {
 	normalized := strings.ToLower(strings.TrimSpace(strings.TrimPrefix(modelName, "models/")))
 	switch normalized {
+	// Gemini 3.8 Flash variants (exact identity wire IDs). Verified against
+	// real agy.exe 1.1.24 (sha256 7585871b...c95) `models` output and
+	// hash-bound stream captures on 2026-09-02.
+	case "gemini-3.8-flash-high",
+		"gemini-3.8-flash-medium",
+		"gemini-3.8-flash-low":
+		return normalized
+	case "gemini-3.8-flash":
+		// Virtual public picker alias. Real AGY never exposes a suffixless
+		// 3.8 ID; ResolveWireFromBody consults thinkingLevel, and body-less
+		// callers fall back to the real medium tier.
+		return "gemini-3.8-flash-medium"
 	// Gemini 3.7 Flash variants (exact identity wire IDs)
 	case "gemini-3.7-flash-high",
 		"gemini-3.7-flash-medium",
@@ -110,6 +122,22 @@ func AntigravityWireModel(modelName string) string {
 func ResolveWireFromBody(publicName string, body []byte) string {
 	normalized := strings.ToLower(strings.TrimSpace(strings.TrimPrefix(publicName, "models/")))
 	switch normalized {
+	case "gemini-3.8-flash":
+		// Virtual picker alias only. The suffixless name is never sent to
+		// AGY: its low/medium/high slider selects one exact real wire ID.
+		if len(body) == 0 || !gjson.ValidBytes(body) {
+			return "gemini-3.8-flash-medium"
+		}
+		switch extractThinkingLevel(body) {
+		case "high":
+			return "gemini-3.8-flash-high"
+		case "minimal", "low":
+			return "gemini-3.8-flash-low"
+		case "medium", "":
+			return "gemini-3.8-flash-medium"
+		default:
+			return "gemini-3.8-flash-medium"
+		}
 	case "gemini-3.7-flash":
 		// Virtual picker alias only. The suffixless name is never sent to
 		// AGY: its low/medium/high slider selects one exact real wire ID.
@@ -202,6 +230,17 @@ func ResolveSemanticRetryModel(publicName string, body []byte) string {
 	normalized := strings.ToLower(strings.TrimSpace(strings.TrimPrefix(publicName, "models/")))
 	level := extractThinkingLevel(body)
 	switch normalized {
+	case "gemini-3.8-flash-high":
+		switch level {
+		case "medium":
+			return "gemini-3.8-flash-medium"
+		case "minimal", "low":
+			return "gemini-3.8-flash-low"
+		}
+	case "gemini-3.8-flash-medium":
+		if level == "minimal" || level == "low" {
+			return "gemini-3.8-flash-low"
+		}
 	case "gemini-3.7-flash-high":
 		switch level {
 		case "medium":
@@ -283,35 +322,49 @@ func DefaultVariantThinkingLevel(modelName string) string {
 	}
 }
 
-// DefaultVariantThinkingBudget returns the implied thinking budget for
-// Gemini 3.7 Flash variant model IDs (-high: -1, -medium: 4000, -low: 1000).
-// Returns (0, false) when the model is not a known 3.7 variant.
+// DefaultVariantThinkingBudget returns the implied numeric thinking budget for
+// exact Gemini 3.7/3.8 Flash tier IDs (-high: -1, -medium: 4000, -low: 1000).
+// Both families were captured from real AGY with identical numeric budgets:
+// 3.7 from agy 1.1.13 on 2026-08-14, 3.8 from agy 1.1.24 on 2026-09-02, and
+// the provider's own fetchAvailableModels metadata reports the same values.
+// Returns (0, false) when the model is not a known numeric-budget tier.
 func DefaultVariantThinkingBudget(modelName string) (int, bool) {
 	normalized := strings.ToLower(strings.TrimSpace(strings.TrimPrefix(modelName, "models/")))
 	switch normalized {
-	case "gemini-3.7-flash-high":
+	case "gemini-3.7-flash-high", "gemini-3.8-flash-high":
 		return -1, true
-	case "gemini-3.7-flash-medium":
+	case "gemini-3.7-flash-medium", "gemini-3.8-flash-medium":
 		return 4000, true
-	case "gemini-3.7-flash-low":
+	case "gemini-3.7-flash-low", "gemini-3.8-flash-low":
 		return 1000, true
 	default:
 		return 0, false
 	}
 }
 
-// LowerGemini37TierOnce returns the next exact real-AGY tier after a
-// semantic-empty retry. Suffixless and already-low names are not lowerable.
-func LowerGemini37TierOnce(modelName string) (string, bool) {
+// LowerNumericBudgetTierOnce returns the next exact real-AGY tier after a
+// semantic-empty retry for the numeric-budget Flash families (3.7 and 3.8).
+// Suffixless and already-low names are not lowerable.
+func LowerNumericBudgetTierOnce(modelName string) (string, bool) {
 	normalized := strings.ToLower(strings.TrimSpace(strings.TrimPrefix(modelName, "models/")))
 	switch normalized {
 	case "gemini-3.7-flash-high":
 		return "gemini-3.7-flash-medium", true
 	case "gemini-3.7-flash-medium":
 		return "gemini-3.7-flash-low", true
+	case "gemini-3.8-flash-high":
+		return "gemini-3.8-flash-medium", true
+	case "gemini-3.8-flash-medium":
+		return "gemini-3.8-flash-low", true
 	default:
 		return modelName, false
 	}
+}
+
+// LowerGemini37TierOnce is the historical name retained for callers and tests
+// written before Gemini 3.8 shared the same numeric-budget tier ladder.
+func LowerGemini37TierOnce(modelName string) (string, bool) {
+	return LowerNumericBudgetTierOnce(modelName)
 }
 
 // ApplyGemini37RetryThinkingBudget replaces level/budget aliases with the
@@ -325,6 +378,21 @@ func ApplyGemini37RetryThinkingBudget(body []byte, modelName string) []byte {
 // thinkingLevel into the exact numeric shape observed from real AGY. The
 // caller must first resolve modelName to one of the three exact tier IDs.
 func NormalizeGemini37BaseRequestBody(body []byte, modelName string) []byte {
+	return normalizeGemini37TierThinking(body, modelName)
+}
+
+// IsNumericBudgetVirtualAlias reports whether the public model name is one of
+// the suffixless virtual picker aliases whose slider selects an exact real-AGY
+// tier with a captured numeric thinkingBudget (Gemini 3.7 and 3.8 Flash).
+func IsNumericBudgetVirtualAlias(publicName string) bool {
+	normalized := strings.ToLower(strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(publicName), "models/")))
+	return normalized == "gemini-3.7-flash" || normalized == "gemini-3.8-flash"
+}
+
+// NormalizeNumericBudgetTierBody converts a virtual suffixless picker's
+// thinkingLevel into the exact numeric shape observed from real AGY. The
+// caller must first resolve modelName to one exact tier ID.
+func NormalizeNumericBudgetTierBody(body []byte, modelName string) []byte {
 	return normalizeGemini37TierThinking(body, modelName)
 }
 
@@ -408,8 +476,8 @@ func ApplyWireModelToBody(body []byte) []byte {
 			out = updated
 		}
 	}
-	if strings.EqualFold(strings.TrimPrefix(strings.TrimSpace(publicName), "models/"), "gemini-3.7-flash") {
-		out = NormalizeGemini37BaseRequestBody(out, wire)
+	if IsNumericBudgetVirtualAlias(publicName) {
+		out = NormalizeNumericBudgetTierBody(out, wire)
 	} else {
 		out = applyDefaultThinkingLevel(out, publicName)
 		out = applyDefaultThinkingBudget(out, publicName)

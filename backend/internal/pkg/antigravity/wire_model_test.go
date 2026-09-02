@@ -205,6 +205,136 @@ func TestApplyWireModelToBody_Gemini37VirtualAlias(t *testing.T) {
 	}
 }
 
+func TestAntigravityWireModel_Gemini38Tiers(t *testing.T) {
+	cases := map[string]string{
+		"gemini-3.8-flash-high":        "gemini-3.8-flash-high",
+		"gemini-3.8-flash-medium":      "gemini-3.8-flash-medium",
+		"gemini-3.8-flash-low":         "gemini-3.8-flash-low",
+		"models/gemini-3.8-flash-high": "gemini-3.8-flash-high",
+		"GEMINI-3.8-FLASH-LOW":         "gemini-3.8-flash-low",
+		"gemini-3.8-flash":             "gemini-3.8-flash-medium",
+	}
+	for in, want := range cases {
+		if got := AntigravityWireModel(in); got != want {
+			t.Errorf("AntigravityWireModel(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+func TestResolveWireFromBody_Gemini38VirtualAlias(t *testing.T) {
+	cases := []struct {
+		name string
+		body string
+		want string
+	}{
+		{name: "bare high", body: `{"generationConfig":{"thinkingConfig":{"thinkingLevel":"HIGH"}}}`, want: "gemini-3.8-flash-high"},
+		{name: "sdk medium", body: `{"config":{"thinkingConfig":{"thinkingLevel":"medium"}}}`, want: "gemini-3.8-flash-medium"},
+		{name: "snake low", body: `{"generationConfig":{"thinkingConfig":{"thinking_level":"low"}}}`, want: "gemini-3.8-flash-low"},
+		{name: "wrapped minimal", body: `{"request":{"config":{"thinkingConfig":{"thinkingLevel":"minimal"}}}}`, want: "gemini-3.8-flash-low"},
+		{name: "missing defaults medium", body: `{"contents":[]}`, want: "gemini-3.8-flash-medium"},
+		{name: "unknown defaults medium", body: `{"generationConfig":{"thinkingConfig":{"thinkingLevel":"unexpected"}}}`, want: "gemini-3.8-flash-medium"},
+		{name: "invalid json defaults medium", body: `{`, want: "gemini-3.8-flash-medium"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := ResolveWireFromBody("gemini-3.8-flash", []byte(tc.body)); got != tc.want {
+				t.Fatalf("wire model = %q, want %q", got, tc.want)
+			}
+		})
+	}
+
+	pinned := []byte(`{"generationConfig":{"thinkingConfig":{"thinkingLevel":"low"}}}`)
+	if got := ResolveWireFromBody("gemini-3.8-flash-high", pinned); got != "gemini-3.8-flash-high" {
+		t.Fatalf("explicit 3.8 tier was rerouted: %q", got)
+	}
+}
+
+func TestDefaultVariantThinkingBudget_Gemini38(t *testing.T) {
+	cases := []struct {
+		in         string
+		wantBudget int
+		wantOK     bool
+	}{
+		{"gemini-3.8-flash-high", -1, true},
+		{"gemini-3.8-flash-medium", 4000, true},
+		{"gemini-3.8-flash-low", 1000, true},
+		{"models/gemini-3.8-flash-medium", 4000, true},
+		{"GEMINI-3.8-FLASH-LOW", 1000, true},
+		{"gemini-3.8-flash", 0, false},
+	}
+	for _, tc := range cases {
+		budget, ok := DefaultVariantThinkingBudget(tc.in)
+		if budget != tc.wantBudget || ok != tc.wantOK {
+			t.Errorf("DefaultVariantThinkingBudget(%q) = (%d, %v), want (%d, %v)", tc.in, budget, ok, tc.wantBudget, tc.wantOK)
+		}
+	}
+}
+
+func TestApplyWireModelToBody_Gemini38VirtualAlias(t *testing.T) {
+	body := []byte(`{"model":"gemini-3.8-flash","config":{"thinkingConfig":{"thinkingLevel":"high"}}}`)
+	out := ApplyWireModelToBody(body)
+	if got := gjson.GetBytes(out, "model").String(); got != "gemini-3.8-flash-high" {
+		t.Fatalf("model = %q, want high tier: %s", got, out)
+	}
+	if got := gjson.GetBytes(out, "config.thinkingConfig.thinkingBudget").Int(); got != -1 {
+		t.Fatalf("budget = %d, want -1: %s", got, out)
+	}
+	if gjson.GetBytes(out, "config.thinkingConfig.thinkingLevel").Exists() {
+		t.Fatalf("thinkingLevel reached wire body: %s", out)
+	}
+
+	defaulted := ApplyWireModelToBody([]byte(`{"model":"gemini-3.8-flash","contents":[]}`))
+	if got := gjson.GetBytes(defaulted, "model").String(); got != "gemini-3.8-flash-medium" {
+		t.Fatalf("default model = %q, want medium: %s", got, defaulted)
+	}
+	if got := gjson.GetBytes(defaulted, "generationConfig.thinkingConfig.thinkingBudget").Int(); got != 4000 {
+		t.Fatalf("default budget = %d, want 4000: %s", got, defaulted)
+	}
+}
+
+func TestGemini38SemanticRetryLadder(t *testing.T) {
+	medium, ok := LowerNumericBudgetTierOnce("models/GEMINI-3.8-FLASH-HIGH")
+	if !ok || medium != "gemini-3.8-flash-medium" {
+		t.Fatalf("high lower = (%q, %v), want medium", medium, ok)
+	}
+	low, ok := LowerNumericBudgetTierOnce(medium)
+	if !ok || low != "gemini-3.8-flash-low" {
+		t.Fatalf("medium lower = (%q, %v), want low", low, ok)
+	}
+	if got, ok := LowerNumericBudgetTierOnce(low); ok || got != low {
+		t.Fatalf("low lower = (%q, %v), want unchanged", got, ok)
+	}
+
+	body := []byte(`{"generationConfig":{"thinkingConfig":{"thinkingLevel":"MEDIUM","thinking_budget":-1}}}`)
+	out := ApplyGemini37RetryThinkingBudget(body, medium)
+	if got := gjson.GetBytes(out, "generationConfig.thinkingConfig.thinkingBudget").Int(); got != 4000 {
+		t.Fatalf("retry budget = %d, want 4000: %s", got, out)
+	}
+	if gjson.GetBytes(out, "generationConfig.thinkingConfig.thinkingLevel").Exists() {
+		t.Fatalf("stale thinkingLevel remains: %s", out)
+	}
+
+	if got := ResolveSemanticRetryModel("gemini-3.8-flash-high", []byte(`{"generationConfig":{"thinkingConfig":{"thinkingLevel":"low"}}}`)); got != "gemini-3.8-flash-low" {
+		t.Fatalf("retry model = %q, want gemini-3.8-flash-low", got)
+	}
+	if got := ResolveSemanticRetryModel("gemini-3.8-flash-medium", []byte(`{"generationConfig":{"thinkingConfig":{"thinkingLevel":"minimal"}}}`)); got != "gemini-3.8-flash-low" {
+		t.Fatalf("retry model = %q, want gemini-3.8-flash-low", got)
+	}
+}
+
+func TestIsNumericBudgetVirtualAlias(t *testing.T) {
+	for _, in := range []string{"gemini-3.7-flash", "gemini-3.8-flash", "models/GEMINI-3.8-FLASH"} {
+		if !IsNumericBudgetVirtualAlias(in) {
+			t.Errorf("IsNumericBudgetVirtualAlias(%q) = false, want true", in)
+		}
+	}
+	for _, in := range []string{"gemini-3.8-flash-high", "gemini-3.6-flash", "gemini-3.5-flash", ""} {
+		if IsNumericBudgetVirtualAlias(in) {
+			t.Errorf("IsNumericBudgetVirtualAlias(%q) = true, want false", in)
+		}
+	}
+}
+
 func TestGemini37SemanticRetryBudget(t *testing.T) {
 	medium, ok := LowerGemini37TierOnce("models/GEMINI-3.7-FLASH-HIGH")
 	if !ok || medium != "gemini-3.7-flash-medium" {

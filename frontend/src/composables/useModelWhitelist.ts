@@ -86,6 +86,8 @@ const antigravityModels = [
   'gemini-3.5-flash-high',
   'gemini-3.5-flash-medium',
   'gemini-3.5-flash-low',
+  // Gemini 3.8 Flash virtual alias; thinking slider selects exact AGY tier.
+  'gemini-3.8-flash',
   // Gemini 3.7 Flash virtual alias; thinking slider selects exact AGY tier.
   'gemini-3.7-flash',
   // Gemini 3.6 Flash (2026-07 — daily-only for now)
@@ -352,6 +354,7 @@ const antigravityPresetMappings = [
   { label: '3.1-Pro-Low透传', from: 'gemini-3.1-pro-low', to: 'gemini-3.1-pro-low', color: 'bg-yellow-100 text-yellow-700 hover:bg-yellow-200 dark:bg-yellow-900/30 dark:text-yellow-400' },
   { label: '3.1-Pro-Preview→Pro-Agent', from: 'gemini-3.1-pro-preview', to: 'gemini-pro-agent', color: 'bg-amber-100 text-amber-700 hover:bg-amber-200 dark:bg-amber-900/30 dark:text-amber-400' },
   // Gemini 通配符映射
+  { label: '3.8-Flash透传', from: 'gemini-3.8-flash', to: 'gemini-3.8-flash', color: 'bg-lime-100 text-lime-700 hover:bg-lime-200 dark:bg-lime-900/30 dark:text-lime-400' },
   { label: '3.7-Flash透传', from: 'gemini-3.7-flash', to: 'gemini-3.7-flash', color: 'bg-lime-100 text-lime-700 hover:bg-lime-200 dark:bg-lime-900/30 dark:text-lime-400' },
   { label: 'Gemini 3→Flash', from: 'gemini-3*', to: 'gemini-3-flash', color: 'bg-yellow-100 text-yellow-700 hover:bg-yellow-200 dark:bg-yellow-900/30 dark:text-yellow-400' },
   { label: 'Gemini 2.5→Flash', from: 'gemini-2.5*', to: 'gemini-2.5-flash', color: 'bg-orange-100 text-orange-700 hover:bg-orange-200 dark:bg-orange-900/30 dark:text-orange-400' },

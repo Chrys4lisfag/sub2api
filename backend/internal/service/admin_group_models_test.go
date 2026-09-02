@@ -18,4 +18,8 @@ func TestDefaultModelsListCandidateIDsAntigravityNative(t *testing.T) {
 	require.NotContains(t, models, "gemini-3.7-flash-high")
 	require.NotContains(t, models, "gemini-3.7-flash-medium")
 	require.NotContains(t, models, "gemini-3.7-flash-low")
+	require.Contains(t, models, "gemini-3.8-flash")
+	require.NotContains(t, models, "gemini-3.8-flash-high")
+	require.NotContains(t, models, "gemini-3.8-flash-medium")
+	require.NotContains(t, models, "gemini-3.8-flash-low")
 }

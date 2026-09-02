@@ -436,11 +436,11 @@ func (s *AntigravityNativeGatewayService) ForwardGemini(
 	if wireModel == "" {
 		wireModel = originalModel
 	}
-	if strings.EqualFold(strings.TrimPrefix(strings.TrimSpace(originalModel), "models/"), "gemini-3.7-flash") {
+	if antigravity.IsNumericBudgetVirtualAlias(originalModel) {
 		// The public base name is virtual. Convert its UI-level directive to
 		// the exact numeric tier shape observed from real AGY before any
 		// preprocessing or v1internal wrapping.
-		body = antigravity.NormalizeGemini37BaseRequestBody(body, wireModel)
+		body = antigravity.NormalizeNumericBudgetTierBody(body, wireModel)
 	}
 
 	// Run the tool-list preprocessing pipeline (schema normalize +
@@ -868,6 +868,7 @@ func newSessionID() string {
 //
 //	gemini-3-flash             → -1 (dynamic)
 //	gemini-3.7-flash-low/medium/high → 1000 / 4000 / -1
+//	gemini-3.8-flash-low/medium/high → 1000 / 4000 / -1
 //	gemini-3.5-flash-extra-low → 1000   (Low)
 //	gemini-3.5-flash-low       → 4000   (Medium)
 //	gemini-3-flash-agent       → 10000  (High)
@@ -937,7 +938,8 @@ func isGemini37FlashTier(model string) bool {
 	normalized := strings.ToLower(strings.TrimSpace(model))
 	normalized = strings.TrimPrefix(normalized, "models/")
 	switch normalized {
-	case "gemini-3.7-flash-low", "gemini-3.7-flash-medium", "gemini-3.7-flash-high":
+	case "gemini-3.7-flash-low", "gemini-3.7-flash-medium", "gemini-3.7-flash-high",
+		"gemini-3.8-flash-low", "gemini-3.8-flash-medium", "gemini-3.8-flash-high":
 		return true
 	default:
 		return false
@@ -976,6 +978,15 @@ func thinkingBudgetForModel(wire string) int {
 	case "gemini-3.7-flash-medium":
 		return 4000
 	case "gemini-3.7-flash-high":
+		return -1
+	// 3.8 Flash tiers (verified 2026-09-02 from real agy.exe 1.1.24,
+	// SHA-256 7585871b...880c95: hash-bound stream captures plus the
+	// provider's own fetchAvailableModels metadata)
+	case "gemini-3.8-flash-low":
+		return 1000
+	case "gemini-3.8-flash-medium":
+		return 4000
+	case "gemini-3.8-flash-high":
 		return -1
 	// 3.6 Flash tiers (verified 2026-07-21 via fetchAvailableModels probe)
 	case "gemini-3.6-flash-low":

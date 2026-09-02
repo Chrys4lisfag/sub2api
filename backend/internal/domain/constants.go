@@ -155,6 +155,13 @@ var DefaultAntigravityModelMapping = map[string]string{
 	"gemini-3.7-flash-high":   "gemini-3.7-flash-high",
 	"gemini-3.7-flash-medium": "gemini-3.7-flash-medium",
 	"gemini-3.7-flash-low":    "gemini-3.7-flash-low",
+	// Gemini 3.8 Flash (real agy.exe 1.1.24, 2026-09-02). The suffixless
+	// entry is a virtual picker alias; ResolveWireFromBody selects one
+	// exact tier before provider dispatch.
+	"gemini-3.8-flash":        "gemini-3.8-flash",
+	"gemini-3.8-flash-high":   "gemini-3.8-flash-high",
+	"gemini-3.8-flash-medium": "gemini-3.8-flash-medium",
+	"gemini-3.8-flash-low":    "gemini-3.8-flash-low",
 	// 注: gemini-3-pro-image 同样已弃用，不在白名单。
 	// 其他官方模型
 	"gpt-oss-120b-medium":    "gpt-oss-120b-medium",

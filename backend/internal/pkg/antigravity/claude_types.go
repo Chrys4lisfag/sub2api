@@ -203,6 +203,10 @@ var geminiModels = []modelDef{
 	// Gemini 3.7 Flash virtual picker alias. thinkingLevel selects one of
 	// the exact low/medium/high real-AGY tier IDs before provider dispatch.
 	{ID: "gemini-3.7-flash", DisplayName: "Gemini 3.7 Flash", CreatedAt: "2026-08-13T00:00:00Z", IsReasoning: true},
+	// Gemini 3.8 Flash virtual picker alias. Real AGY 1.1.24 exposes only
+	// the exact low/medium/high tiers; thinkingLevel selects one of them
+	// before provider dispatch.
+	{ID: "gemini-3.8-flash", DisplayName: "Gemini 3.8 Flash", CreatedAt: "2026-09-02T00:00:00Z", IsReasoning: true},
 	{ID: "gemini-3-pro-preview", DisplayName: "Gemini 3 Pro Preview", CreatedAt: "2025-06-01T00:00:00Z", IsReasoning: true},
 	{ID: "gemini-3-pro-image", DisplayName: "Gemini 3 Pro Image", CreatedAt: "2025-06-01T00:00:00Z"},
 }
