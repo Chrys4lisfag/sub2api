@@ -456,7 +456,17 @@ func (s *AntigravityNativeGatewayService) ForwardGemini(
 	// the model can see it on the very first turn and choose to call it
 	// for discovery — fixing the chicken-and-egg where prior versions
 	// only declared it inside an already-running loop.
-	useAggregator := accountToolAggregatorEnabled(account)
+	// Tool AGGREGATION/INJECTION is Gemini-specific behavior: the MCP
+	// catalog text, the call_mcp_tool aggregator declaration and the
+	// agy_list_tools discovery tool are all sub2api inventions layered on
+	// top of Gemini requests. Non-Gemini families served by the same
+	// cloudcode-pa endpoint (Claude 4.6, GPT-OSS) must NOT receive them:
+	// real agy.exe sends those models a plain request whose only tools are
+	// the caller's own declarations. Disabling the aggregator here keeps
+	// SDK-shape normalization and JSON-Schema conversion (both required
+	// for upstream acceptance) while skipping every injection branch,
+	// which is gated on useAggregator.
+	useAggregator := accountToolAggregatorEnabled(account) && !nativeSkipsToolInjection(wireModel)
 	aggregatorName := s.resolveMcpAggregatorName(ctx, account)
 	discoveryMode := s.resolveMcpDiscoveryMode(ctx)
 	toolCallMode := s.resolveToolCallMode(ctx)
@@ -632,28 +642,7 @@ func (s *AntigravityNativeGatewayService) ForwardGemini(
 	return s.passNonStreamingGemini(ctx, c, account.ID, resp, startTime, originalModel, wireModel, action, envelope, toolReport)
 }
 
-// Forward handles Claude-format requests. Native does not implement the
-// Claude/Anthropic protocol in V1 (agymimic talks Gemini-format to
-// daily-cloudcode-pa). Returns an UpstreamFailoverError so the gateway
-// handler's failover loop hops to the next eligible account in the same
-// group rather than retrying this one — keeps multi-platform groups
-// (where admins mix native + legacy accounts) working transparently.
-func (s *AntigravityNativeGatewayService) Forward(
-	ctx context.Context,
-	c *gin.Context,
-	account *Account,
-	body []byte,
-	isStickySession bool,
-) (*ForwardResult, error) {
-	msg := `{"type":"error","error":{"type":"invalid_request_error","message":"native antigravity accounts do not support the Anthropic /v1/messages protocol — use the Gemini /v1beta endpoints, or route this request to a legacy antigravity account"}}`
-	return nil, &UpstreamFailoverError{
-		StatusCode:             http.StatusBadRequest,
-		ResponseBody:           []byte(msg),
-		ResponseHeaders:        http.Header{"Content-Type": []string{"application/json"}},
-		ForceCacheBilling:      false,
-		RetryableOnSameAccount: false,
-	}
-}
+// Forward (Anthropic /v1/messages) lives in antigravity_native_claude.go.
 
 // ────────────────────────────────────────────────────────────────────────────
 // helpers
@@ -883,7 +872,14 @@ func applyAgyDefaultsToInnerRequest(inner map[string]any, wireModel string) {
 
 	// toolConfig.functionCallingConfig.mode: agy sends "NONE" to let the
 	// model decide if a tool call is needed. Caller can override to AUTO/ANY.
-	if _, present := inner["toolConfig"]; !present {
+	//
+	// Claude is the exception: hash-bound agy.exe captures (2026-09-02) show
+	// NO toolConfig at all on Claude requests, and the sanitizer used for
+	// those captures preserves the `toolConfig` / `mode` keys, so the absence
+	// is real rather than redaction. Match the capture and leave it unset;
+	// the Gemini default stays as-is because it is already proven in
+	// production.
+	if _, present := inner["toolConfig"]; !present && !nativeIsClaudeModel(wireModel) {
 		inner["toolConfig"] = map[string]any{
 			"functionCallingConfig": map[string]any{
 				"mode": "NONE",
@@ -898,7 +894,7 @@ func applyAgyDefaultsToInnerRequest(inner map[string]any, wireModel string) {
 		inner["generationConfig"] = gc
 	}
 	if _, present := gc["maxOutputTokens"]; !present {
-		gc["maxOutputTokens"] = 16384
+		gc["maxOutputTokens"] = defaultNativeMaxOutputTokens(wireModel)
 	} else {
 		// Clamp to the per-model upper bound. cloudcode-pa enforces
 		// hard caps that vary by wire model — exceeding them returns
@@ -917,6 +913,10 @@ func applyAgyDefaultsToInnerRequest(inner map[string]any, wireModel string) {
 	if _, present := tc["includeThoughts"]; !present {
 		tc["includeThoughts"] = true
 	}
+	if nativeIsClaudeModel(wireModel) {
+		applyClaudeThinkingDefaults(gc, tc, wireModel)
+		return
+	}
 	if isGemini37FlashTier(wireModel) {
 		if hasGemini37ThinkingDirective(tc) {
 			return
@@ -932,6 +932,55 @@ func applyAgyDefaultsToInnerRequest(inner map[string]any, wireModel string) {
 	if _, present := tc["thinkingBudget"]; !present {
 		tc["thinkingBudget"] = thinkingBudgetForModel(wireModel)
 	}
+}
+
+// applyClaudeThinkingDefaults synthesizes the captured Claude thinking config
+// while respecting the caller's output-token ceiling.
+//
+// Antigravity's Claude backend enforces the Anthropic rule
+// `max_tokens` > `thinking.budget_tokens` and rejects violations with
+// HTTP 400 INVALID_ARGUMENT ("`max_tokens` must be greater than
+// `thinking.budget_tokens`") — observed live on 2026-09-02 with
+// maxOutputTokens=1024 and the captured budget of 1024.
+//
+// Real agy.exe never trips this because it always sends maxOutputTokens
+// 64000. A caller asking for a small max_tokens still must not 400, and
+// silently raising their ceiling would violate their explicit budget, so
+// thinking is disabled instead (the same {includeThoughts:false,
+// thinkingBudget:0} shape agy.exe itself sends on non-thinking requests).
+func applyClaudeThinkingDefaults(gc, tc map[string]any, wireModel string) {
+	if _, present := tc["thinkingBudget"]; present {
+		return
+	}
+	budget := thinkingBudgetForModel(wireModel)
+	maxOut, ok := numericConfigValue(gc["maxOutputTokens"])
+	if ok && budget > 0 && maxOut <= budget {
+		tc["includeThoughts"] = false
+		tc["thinkingBudget"] = 0
+		return
+	}
+	tc["thinkingBudget"] = budget
+}
+
+// numericConfigValue reads a JSON-decoded number in any of the shapes the
+// decoders in this package produce (json.Number via UseNumber, float64 from
+// plain Unmarshal, or a plain int from Go callers).
+func numericConfigValue(v any) (int, bool) {
+	switch x := v.(type) {
+	case json.Number:
+		n, err := x.Int64()
+		if err != nil {
+			return 0, false
+		}
+		return int(n), true
+	case float64:
+		return int(x), true
+	case int:
+		return x, true
+	case int64:
+		return int(x), true
+	}
+	return 0, false
 }
 
 func isGemini37FlashTier(model string) bool {
@@ -1027,11 +1076,32 @@ func thinkingBudgetForModel(wire string) int {
 // Conservative default: 65535 for any non-flash wire model.
 func maxOutputTokensCapForModel(wire string) int {
 	w := strings.ToLower(strings.TrimSpace(wire))
+	// Claude on Antigravity: real agy.exe 1.1.24 emits exactly 64000 for
+	// both claude-sonnet-4-6 and claude-opus-4-6-thinking (hash-bound
+	// captures, 2026-09-02). Treat that as the ceiling rather than the
+	// Gemini 16-bit boundary.
+	if nativeIsClaudeModel(w) {
+		return nativeClaudeMaxOutputTokens
+	}
 	if strings.Contains(w, "flash") {
 		return 65536
 	}
 	// Pro tier + unknown future models — clamp to 16-bit-1 boundary.
 	return 65535
+}
+
+// nativeClaudeMaxOutputTokens is the generationConfig.maxOutputTokens real
+// agy.exe sends for Antigravity's Claude 4.6 models.
+const nativeClaudeMaxOutputTokens = 64000
+
+// defaultNativeMaxOutputTokens returns the value to synthesize when the
+// caller supplied no maxOutputTokens. Gemini keeps the historical 16384
+// checkpoint-profile default; Claude uses the captured agy.exe value.
+func defaultNativeMaxOutputTokens(wireModel string) int {
+	if nativeIsClaudeModel(wireModel) {
+		return nativeClaudeMaxOutputTokens
+	}
+	return 16384
 }
 
 // clampMaxOutputTokens normalizes the user-supplied maxOutputTokens
@@ -3014,6 +3084,24 @@ func nativeFamilyForModel(model string) string {
 		return "gemini"
 	}
 	return "others"
+}
+
+// nativeIsClaudeModel reports whether the wire model is one of the Claude
+// models Antigravity serves through the same cloudcode-pa endpoint. Verified
+// against real agy.exe 1.1.24/1.1.25 `models` output on 2026-09-02:
+// claude-sonnet-4-6 and claude-opus-4-6-thinking.
+func nativeIsClaudeModel(model string) bool {
+	m := strings.ToLower(strings.TrimSpace(strings.TrimPrefix(model, "models/")))
+	return strings.HasPrefix(m, "claude-")
+}
+
+// nativeSkipsToolInjection reports whether sub2api's Gemini-only tool
+// aggregation layer must be bypassed for this wire model. Real agy.exe sends
+// non-Gemini models (Claude, GPT-OSS) requests whose tool declarations are
+// exactly the caller's own, with no call_mcp_tool aggregator, no
+// agy_list_tools discovery declaration and no injected MCP catalog text.
+func nativeSkipsToolInjection(model string) bool {
+	return nativeFamilyForModel(model) != "gemini"
 }
 
 // nativeModelInFamily reports whether the given upstream model name

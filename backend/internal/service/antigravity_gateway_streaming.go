@@ -781,11 +781,19 @@ func (s *AntigravityGatewayService) writeGoogleError(c *gin.Context, status int,
 
 // handleClaudeStreamToNonStreaming 收集上游流式响应，转换为 Claude 非流式格式返回
 // 用于处理客户端非流式请求但上游只支持流式的情况
+// handleClaudeStreamToNonStreaming keeps the legacy method surface while the
+// implementation is shared with PlatformAntigravityNative, which speaks the
+// same Gemini-shaped upstream protocol and therefore needs the identical
+// Gemini SSE -> Claude response translation.
 func (s *AntigravityGatewayService) handleClaudeStreamToNonStreaming(c *gin.Context, resp *http.Response, startTime time.Time, originalModel string) (*antigravityStreamResult, error) {
+	return claudeStreamToNonStreamingShared(s.settingService, c, resp, startTime, originalModel)
+}
+
+func claudeStreamToNonStreamingShared(setting *SettingService, c *gin.Context, resp *http.Response, startTime time.Time, originalModel string) (*antigravityStreamResult, error) {
 	scanner := bufio.NewScanner(resp.Body)
 	maxLineSize := defaultMaxLineSize
-	if s.settingService.cfg != nil && s.settingService.cfg.Gateway.MaxLineSize > 0 {
-		maxLineSize = s.settingService.cfg.Gateway.MaxLineSize
+	if setting.cfg != nil && setting.cfg.Gateway.MaxLineSize > 0 {
+		maxLineSize = setting.cfg.Gateway.MaxLineSize
 	}
 	scanBuf := getSSEScannerBuf64K()
 	scanner.Buffer(scanBuf[:0], maxLineSize)
@@ -831,8 +839,8 @@ func (s *AntigravityGatewayService) handleClaudeStreamToNonStreaming(c *gin.Cont
 
 	// 上游数据间隔超时保护（防止上游挂起长期占用连接）
 	streamInterval := time.Duration(0)
-	if s.settingService.cfg != nil && s.settingService.cfg.Gateway.StreamDataIntervalTimeout > 0 {
-		streamInterval = time.Duration(s.settingService.cfg.Gateway.StreamDataIntervalTimeout) * time.Second
+	if setting.cfg != nil && setting.cfg.Gateway.StreamDataIntervalTimeout > 0 {
+		streamInterval = time.Duration(setting.cfg.Gateway.StreamDataIntervalTimeout) * time.Second
 	}
 	var intervalTicker *time.Ticker
 	if streamInterval > 0 {
@@ -871,7 +879,7 @@ func (s *AntigravityGatewayService) handleClaudeStreamToNonStreaming(c *gin.Cont
 			}
 
 			// 解包 v1internal 响应
-			inner, parseErr := s.unwrapV1InternalResponse([]byte(payload))
+			inner, parseErr := unwrapV1InternalResponseBody([]byte(payload))
 			if parseErr != nil {
 				continue
 			}
@@ -936,7 +944,7 @@ returnResponse:
 	claudeResp, agUsage, err := antigravity.TransformGeminiToClaude(geminiBody, originalModel)
 	if err != nil {
 		logger.LegacyPrintf("service.antigravity_gateway", "[antigravity-Forward] transform_error error=%v body=%s", err, string(geminiBody))
-		return nil, s.writeClaudeError(c, http.StatusBadGateway, "upstream_error", "Failed to parse upstream response")
+		return nil, writeClaudeProtocolError(c, http.StatusBadGateway, "upstream_error", "Failed to parse upstream response")
 	}
 
 	c.Data(http.StatusOK, "application/json", claudeResp)
@@ -952,8 +960,14 @@ returnResponse:
 	return &antigravityStreamResult{usage: usage, firstTokenMs: firstTokenMs}, nil
 }
 
-// handleClaudeStreamingResponse 处理 Claude 流式响应（Gemini SSE → Claude SSE 转换）
+// handleClaudeStreamingResponse keeps the legacy method surface; see
+// claudeStreamingResponseShared for the implementation shared with the
+// native gateway.
 func (s *AntigravityGatewayService) handleClaudeStreamingResponse(c *gin.Context, resp *http.Response, startTime time.Time, originalModel string) (*antigravityStreamResult, error) {
+	return claudeStreamingResponseShared(s.settingService, c, resp, startTime, originalModel)
+}
+
+func claudeStreamingResponseShared(setting *SettingService, c *gin.Context, resp *http.Response, startTime time.Time, originalModel string) (*antigravityStreamResult, error) {
 	c.Header("Content-Type", "text/event-stream")
 	c.Header("Cache-Control", "no-cache")
 	c.Header("Connection", "keep-alive")
@@ -970,8 +984,8 @@ func (s *AntigravityGatewayService) handleClaudeStreamingResponse(c *gin.Context
 	// 使用 Scanner 并限制单行大小，避免 ReadString 无上限导致 OOM
 	scanner := bufio.NewScanner(resp.Body)
 	maxLineSize := defaultMaxLineSize
-	if s.settingService.cfg != nil && s.settingService.cfg.Gateway.MaxLineSize > 0 {
-		maxLineSize = s.settingService.cfg.Gateway.MaxLineSize
+	if setting.cfg != nil && setting.cfg.Gateway.MaxLineSize > 0 {
+		maxLineSize = setting.cfg.Gateway.MaxLineSize
 	}
 	scanBuf := getSSEScannerBuf64K()
 	scanner.Buffer(scanBuf[:0], maxLineSize)
@@ -1022,8 +1036,8 @@ func (s *AntigravityGatewayService) handleClaudeStreamingResponse(c *gin.Context
 	defer close(done)
 
 	streamInterval := time.Duration(0)
-	if s.settingService.cfg != nil && s.settingService.cfg.Gateway.StreamDataIntervalTimeout > 0 {
-		streamInterval = time.Duration(s.settingService.cfg.Gateway.StreamDataIntervalTimeout) * time.Second
+	if setting.cfg != nil && setting.cfg.Gateway.StreamDataIntervalTimeout > 0 {
+		streamInterval = time.Duration(setting.cfg.Gateway.StreamDataIntervalTimeout) * time.Second
 	}
 	var intervalTicker *time.Ticker
 	if streamInterval > 0 {
@@ -1037,8 +1051,8 @@ func (s *AntigravityGatewayService) handleClaudeStreamingResponse(c *gin.Context
 
 	// 下游 keepalive：防止代理/Cloudflare Tunnel 因连接空闲而断开
 	keepaliveInterval := time.Duration(0)
-	if s.settingService.cfg != nil && s.settingService.cfg.Gateway.StreamKeepaliveInterval > 0 {
-		keepaliveInterval = time.Duration(s.settingService.cfg.Gateway.StreamKeepaliveInterval) * time.Second
+	if setting.cfg != nil && setting.cfg.Gateway.StreamKeepaliveInterval > 0 {
+		keepaliveInterval = time.Duration(setting.cfg.Gateway.StreamKeepaliveInterval) * time.Second
 	}
 	var keepaliveTicker *time.Ticker
 	if keepaliveInterval > 0 {
@@ -1143,6 +1157,32 @@ func (s *AntigravityGatewayService) handleClaudeStreamingResponse(c *gin.Context
 			}
 		}
 	}
+}
+
+// unwrapV1InternalResponseBody peels the v1internal `{"response": {...}}`
+// wrapper with a zero-copy gjson read. Shared by the legacy and native
+// antigravity gateways.
+func unwrapV1InternalResponseBody(body []byte) ([]byte, error) {
+	var probe struct {
+		Response json.RawMessage `json:"response"`
+	}
+	if err := json.Unmarshal(body, &probe); err == nil && len(probe.Response) > 0 {
+		return probe.Response, nil
+	}
+	return body, nil
+}
+
+// writeClaudeProtocolError writes an Anthropic-shaped error envelope.
+func writeClaudeProtocolError(c *gin.Context, status int, errType, message string) error {
+	MarkResponseCommitted(c)
+	c.JSON(status, gin.H{
+		"type": "error",
+		"error": gin.H{
+			"type":    errType,
+			"message": message,
+		},
+	})
+	return nil
 }
 
 func (s *AntigravityGatewayService) extractImageInputSize(body []byte) string {

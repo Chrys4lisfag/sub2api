@@ -242,6 +242,116 @@ All passed before commit. OMP harness gained a single `gemini-3.8-flash` entry w
 `maxTokens: 65536` matches provider metadata; `contextWindow` and pricing are inherited family
 values and are explicitly not AGY-reported.
 
+## Claude 4.6 on antigravity_native, real-AGY evidence and contract, 2026-09-02
+
+### Binary identity
+
+Two binaries were involved because agy.exe self-updated mid-session; both were
+hash-pinned before use and both agree:
+
+- `agy.exe` 1.1.24 — size 187,601,560 — SHA-256 `7585871b1a34f9acc7f9c065f09e5bd1a7009519f0f219a4c43bb565c7880c95`
+- `agy.exe` 1.1.25 — size 188,758,168 — SHA-256 `dbc665f942b59e56a0d3317aa01b93acc9521bdaa76277b922d82ef90eba2b3c`
+
+`agy.exe models` lists exactly two Claude entries: `claude-sonnet-4-6`
+("Claude Sonnet 4.6 (Thinking)") and `claude-opus-4-6-thinking`
+("Claude Opus 4.6 (Thinking)").
+
+### Hash-bound sanitized wire captures
+
+Artifacts stay outside the repository at
+`AGENT/logs/agy-claude46-{sonnet,opus}-20260902.jsonl` plus `-meta.json`
+(return code 0, four rows each).
+
+Antigravity serves Claude through the SAME Gemini-shaped
+`cloudcode-pa /v1internal:streamGenerateContent` envelope it uses for Gemini —
+only the model name differs:
+
+| field | claude-sonnet-4-6 | claude-opus-4-6-thinking |
+|---|---|---|
+| `payload.model` | `claude-sonnet-4-6` | `claude-opus-4-6-thinking` |
+| `payload.requestType` | `agent` | `agent` |
+| `request.labels.model_enum` | `MODEL_PLACEHOLDER_M35` | `MODEL_PLACEHOLDER_M26` |
+| `generationConfig.maxOutputTokens` | 64000 | 64000 |
+| `thinkingConfig.includeThoughts` | true | true |
+| `thinkingConfig.thinkingBudget` | 1024 | 1024 |
+| `toolConfig` | ABSENT | ABSENT |
+| response | Gemini-shaped `candidates[].content.parts[]`, HTTP 200 | same |
+
+`toolConfig` is absent from every captured request, Gemini agent requests
+included. This is genuine, not redaction: the capture sanitizer preserves the
+`toolConfig` key (it matches its key allowlist regex) and keeps `mode` string
+values. sub2api's existing Gemini path injects `toolConfig.functionCallingConfig.mode = "NONE"`
+and is proven in production, so that deviation was left untouched; Claude
+matches the capture and sends no `toolConfig`.
+
+### Prior state (all verified read-only before changes)
+
+- `/antigravity-native/v1/messages` was routed and authenticated, but
+  `AntigravityNativeGatewayService.Forward` was a hard 400 stub telling callers
+  to use the Gemini endpoints. Claude was therefore unusable on native.
+- Claude model IDs were already present in `DefaultAntigravityModelMapping`,
+  the shared frontend whitelist and native `IsModelSupported`, so the gap was
+  purely protocol support.
+- `thinkingBudgetForModel` already returned the correct captured 1024.
+- The Gemini-only tool pipeline (`preprocessNativeBody` → `applyToolPreprocessing`)
+  had no model-family guard, so a Claude request would have received the
+  `call_mcp_tool` aggregator declaration, the `agy_list_tools` discovery
+  declaration and injected MCP catalog text that real agy.exe never sends.
+
+### Implemented contract
+
+1. **Anthropic protocol on native.** `Forward` now translates
+   Anthropic → Gemini with the existing pure legacy translator
+   (`antigravity.TransformClaudeToGeminiWithOptions`), keeps only its inner
+   `request`, and rebuilds the envelope with `wrapNativeV1Internal` so Claude
+   inherits the native checkpoint profile, session id and per-model defaults.
+   Responses reuse the legacy pure stream/non-stream processors, which were
+   extracted into `claudeStreamingResponseShared` /
+   `claudeStreamToNonStreamingShared` (the legacy methods are now thin
+   wrappers, so both platforms share one translator).
+2. **No tool injection for non-Gemini families.** `nativeSkipsToolInjection`
+   disables the aggregator for Claude and GPT-OSS. Schema normalization and
+   Google-SDK shape lifting still run — both are required for upstream
+   acceptance — but the caller's declarations pass through verbatim with no
+   aggregator, no discovery tool and no catalog text.
+3. **Captured token defaults.** `maxOutputTokens` defaults to 64000 for Claude
+   and is capped at 64000 (`nativeClaudeMaxOutputTokens`) instead of the Gemini
+   16-bit boundary. A caller value below the cap is preserved verbatim.
+4. **Anthropic thinking constraint.** The upstream enforces
+   `max_tokens` > `thinking.budget_tokens` and returned live HTTP 400
+   `INVALID_ARGUMENT` ("`max_tokens` must be greater than
+   `thinking.budget_tokens`") for maxOutputTokens=1024 with the captured
+   budget of 1024. Real agy.exe never trips this because it always sends 64000.
+   `applyClaudeThinkingDefaults` therefore synthesizes the captured budget only
+   when it fits under the caller's ceiling and otherwise disables thinking
+   (`includeThoughts:false, thinkingBudget:0`) rather than silently raising the
+   caller's ceiling. Explicit caller budgets are always preserved.
+5. **Errors** are returned in Anthropic shape (`claudeErrorBody`) with the same
+   failover/pause semantics ForwardGemini uses (403 validation/violation, 401
+   re-auth, 429 family exhaustion, version-rejection fingerprint refresh).
+6. **Out of scope:** OpenAI `/v1/chat/completions` for native Claude. No
+   OpenAI→Anthropic (or OpenAI→Gemini-for-Claude) translator exists in the
+   repository, so adding it is a separate feature rather than a wiring change.
+
+### Validation
+
+`TestLiveClaude46NativeEnvelope` runs the real path — Anthropic body →
+translator → inner request → `preprocessNativeBody` with injection off →
+`wrapNativeV1Internal` → real cloudcode-pa POST — and asserts the serialized
+envelope plus a non-empty SSE text part. All three cases passed for both
+models: caller ceiling equal to the budget (thinking disabled, HTTP 200),
+caller ceiling above the cap (clamped to 64000, budget 1024, HTTP 200), and no
+caller ceiling (64000 + budget 1024, HTTP 200). The probe also asserts the
+caller's `mcp__*` tool survives while the aggregator and discovery
+declarations are absent.
+
+```text
+go test ./internal/service ./internal/pkg/antigravity ./internal/handler ./internal/domain ./migrations -count=1
+```
+
+All passed. The ephemeral credential used by the live probe lived only in an
+ACL-protected private directory and was deleted afterwards.
+
 ## AGY artifact and evidence source
 
 Hash-bound static-reversing artifact:
