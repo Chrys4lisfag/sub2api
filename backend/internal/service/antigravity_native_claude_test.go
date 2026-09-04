@@ -1,6 +1,7 @@
 package service
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"strings"
@@ -357,5 +358,54 @@ func TestWrapNativeV1Internal_ClaudeKeepsExplicitSubFloorBudget(t *testing.T) {
 	}
 	if got := gjson.GetBytes(out, "request.generationConfig.thinkingConfig.thinkingBudget").Int(); got != 512 {
 		t.Fatalf("explicit sub-floor budget was rewritten to %d: %s", got, out)
+	}
+}
+
+// A permanent client-side 400 must not consume same-account retries: observed
+// in production on 2026-09-04, a sub-floor thinking budget produced 3
+// same-account retries and then 10 account switches on a request that could
+// never succeed. Only version rejections may retry on the same account, which
+// is exactly what ForwardGemini does.
+func TestClaudeUpstreamFailureRetrySemantics(t *testing.T) {
+	svc := &AntigravityNativeGatewayService{}
+	account := &Account{ID: 7}
+	invalidBudget := []byte(`{"error":{"code":400,"message":"{\"type\":\"error\",\"error\":{\"type\":\"invalid_request_error\",\"message\":\"thinking.enabled.budget_tokens: Input should be greater than or equal to 1024\"}}","status":"INVALID_ARGUMENT"}}`)
+
+	err := svc.claudeUpstreamFailure(context.Background(), account, "claude-sonnet-4-6",
+		&http.Response{StatusCode: http.StatusBadRequest, Header: http.Header{}}, invalidBudget)
+
+	failover, ok := err.(*UpstreamFailoverError)
+	if !ok {
+		t.Fatalf("expected *UpstreamFailoverError, got %T", err)
+	}
+	if failover.RetryableOnSameAccount {
+		t.Error("invalid-request 400 must not be retried on the same account")
+	}
+	if failover.StatusCode != http.StatusBadRequest {
+		t.Errorf("status = %d, want 400", failover.StatusCode)
+	}
+	// The provider's precise message must reach the client in Anthropic shape.
+	var parsed struct {
+		Type  string `json:"type"`
+		Error struct {
+			Type    string `json:"type"`
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	if jsonErr := json.Unmarshal(failover.ResponseBody, &parsed); jsonErr != nil {
+		t.Fatalf("response body is not JSON: %s", failover.ResponseBody)
+	}
+	if parsed.Type != "error" || parsed.Error.Type != "invalid_request_error" {
+		t.Errorf("unexpected error envelope: %s", failover.ResponseBody)
+	}
+	if !strings.Contains(parsed.Error.Message, "1024") {
+		t.Errorf("upstream detail lost, client cannot self-correct: %s", failover.ResponseBody)
+	}
+
+	// A 5xx is also not a same-account retry (only version rejection is).
+	serverErr := svc.claudeUpstreamFailure(context.Background(), account, "claude-sonnet-4-6",
+		&http.Response{StatusCode: http.StatusBadGateway, Header: http.Header{}}, []byte(`{"error":{"message":"boom"}}`))
+	if fo, ok := serverErr.(*UpstreamFailoverError); !ok || fo.RetryableOnSameAccount {
+		t.Errorf("502 must not set RetryableOnSameAccount: %#v", serverErr)
 	}
 }

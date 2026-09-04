@@ -287,6 +287,14 @@ func extractNativeInnerRequest(wrapped []byte) ([]byte, error) {
 // claudeUpstreamFailure maps a non-200 upstream response to the same failover
 // semantics ForwardGemini uses, but with an Anthropic-shaped body so Claude
 // clients can parse the error.
+//
+// Same-account retries are reserved for version rejections, exactly as
+// ForwardGemini does. Anything else — notably a 400 caused by an invalid
+// client request such as a sub-floor thinking budget — is permanent for this
+// payload, so retrying it burns the same-account retry budget and then every
+// account in the group on a request that can never succeed. Observed in
+// production on 2026-09-04: one bad budget produced 3 same-account retries
+// followed by 10 account switches.
 func (s *AntigravityNativeGatewayService) claudeUpstreamFailure(
 	ctx context.Context,
 	account *Account,
@@ -294,8 +302,8 @@ func (s *AntigravityNativeGatewayService) claudeUpstreamFailure(
 	resp *http.Response,
 	raw []byte,
 ) error {
-	retryable := true
-	if isAntigravityVersionRejection(resp.StatusCode, raw) {
+	retryable := isAntigravityVersionRejection(resp.StatusCode, raw)
+	if retryable {
 		slog.WarnContext(ctx, "native claude: upstream rejected version, forcing fingerprint refresh",
 			slog.Int64("account_id", account.ID),
 			slog.Int("status", resp.StatusCode))
@@ -309,12 +317,10 @@ func (s *AntigravityNativeGatewayService) claudeUpstreamFailure(
 		case forbiddenTypeViolation:
 			s.pauseAccountForViolation(ctx, account, upstreamMsg, raw)
 		}
-		retryable = false
 	}
 	if (resp.StatusCode == http.StatusBadRequest || resp.StatusCode == http.StatusUnauthorized) &&
 		nativeBodyIndicatesReauth(raw) {
 		s.pauseAccountForReauth(ctx, account, extractAgyErrorMessage(raw), raw)
-		retryable = false
 	}
 	if resp.StatusCode == http.StatusTooManyRequests {
 		s.nativeMarkFamilyExhaustedInCache(ctx, account, mappedModel, raw)
