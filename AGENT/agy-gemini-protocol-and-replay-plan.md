@@ -422,6 +422,79 @@ is only possible at all when `max_tokens >= 1025`.
    accidentally low `max_tokens` is therefore visible to operators in logs and
    to clients on the response.
 
+## Claude 4.6 measured limits and client wiring, 2026-09-04
+
+### Context window is 1,000,000 — not the 250,000 the omp catalog claims
+
+Probed by sending a deliberately oversized prompt; the endpoint states its own
+limit, for both models:
+
+```text
+claude-sonnet-4-6        -> prompt is too long: 2917140 tokens > 1000000 maximum
+claude-opus-4-6-thinking -> prompt is too long: 2917138 tokens > 1000000 maximum
+```
+
+The bundled omp catalog (`packages/catalog/src/models.json`, provider
+`google-antigravity`) lists `contextWindow: 250000` for these ids, which is
+wrong for this endpoint. `fetchAvailableModels` exposes NO input-token limit
+field for Claude, so the oversized probe is the only available evidence.
+`maxOutputTokens` 64000 is corroborated three ways: the agy captures, the
+provider metadata, and `packages/catalog/src/wire/gemini-headers.ts:130`.
+
+### Effort DOES work for Claude, via budget rather than tiers
+
+Two distinct mechanisms must not be confused:
+
+- `agy.exe --effort` is a MODEL-TIER router and is rejected for Claude
+  ("--effort is not supported for model claude-sonnet-4-6"). There are no
+  Claude tier ids.
+- Anthropic's `thinking.budget_tokens` is a numeric per-request budget. It is
+  accepted, forwarded verbatim by sub2api, and demonstrably changes behavior.
+
+Measured on one fixed multi-step arithmetic prompt through
+`/antigravity-native/v1/messages`:
+
+| effort (omp `budget` mode) | budget_tokens | thinking chars | latency |
+|---|---:|---:|---:|
+| minimal | 1024 | 2277 – 2846 | ~34 s |
+| medium | 8192 | 3041 | ~53 s |
+| high | 16384 | 4152 – 5967 | ~59–77 s |
+
+So an omp effort slider on these models is meaningful: it scales the thinking
+budget, not a tier.
+
+### omp client wiring (models.yml)
+
+Claude lives in the SAME `antigravity-native` provider entry as the Gemini
+models, using per-model protocol overrides, which the config schema allows
+(`models-config-schema-bundle.ts:172-199` exposes `api?` and `baseUrl?` on a
+model):
+
+- `api: anthropic-messages` (the only Anthropic id in `ApiSchema`, :86-88)
+- `baseUrl: http://<host>/antigravity-native` — deliberately WITHOUT `/v1`,
+  because `normalizeAnthropicBaseUrl` (`providers/anthropic.ts:131-137`) strips a
+  trailing `/v1` and the transport then requests `${baseUrl}/v1/messages` (:2216)
+- `thinking: {mode: budget, efforts: [minimal, low, medium, high]}` — `budget`
+  maps efforts to `ANTHROPIC_THINKING` (`stream.ts:1784`) = 1024 / 4096 / 8192 /
+  16384, all at or above the provider's 1024 floor, and omp adds the budget on
+  top of `max_tokens` so `max_tokens > budget_tokens` always holds
+
+The Gemini models keep the provider-level `google-generative-ai` + `/v1beta`.
+
+### Terminal request errors no longer trigger failover
+
+An oversized prompt previously cost 26 account switches and surfaced as a
+generic 502, hiding the actionable message. Payload-level 400s
+(`claudeRequestIsPermanentlyInvalid`: prompt too long, sub-floor
+`budget_tokens`, `max_tokens` vs budget rule) are now answered directly with
+the provider's own text. Re-auth 400s deliberately stay non-terminal so the
+account can still be paused and rotated.
+
+Verified in production after deploy: oversized prompt returns HTTP 400
+`prompt is too long: 2917140 tokens > 1000000 maximum` with
+`failover_switch_account=0`, `failover_same_account_retry=0`, and a normal
+request still returns 200.
+
 ## AGY artifact and evidence source
 
 Hash-bound static-reversing artifact:
