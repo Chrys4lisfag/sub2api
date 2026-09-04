@@ -1,8 +1,13 @@
 package service
 
 import (
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"github.com/gin-gonic/gin"
+	"github.com/tidwall/gjson"
 )
 
 // Probe matrix recorded live on 2026-09-04 against the real upstream:
@@ -116,4 +121,49 @@ func TestTurnShapeSummaryLeaksNothing(t *testing.T) {
 	if !strings.Contains(shape, "functionCalls=1 signed=1") || !strings.Contains(shape, "thoughts=1") {
 		t.Fatalf("shape summary lost structure: %s", shape)
 	}
+}
+
+// Regression guard for the production panic on 2026-09-04: both protocol error
+// writers MUST return a non-nil error. Handlers treat a nil error as success
+// and dereference the (nil) *ForwardResult while recording usage, which
+// panicked the usage worker at gemini_v1beta_handler.go:598.
+func TestProtocolErrorWritersReturnNonNilError(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	t.Run("gemini", func(t *testing.T) {
+		rec := httptest.NewRecorder()
+		c, _ := gin.CreateTestContext(rec)
+		c.Request = httptest.NewRequest(http.MethodPost, "/x", nil)
+
+		err := writeGeminiProtocolError(c, http.StatusBadRequest, "INVALID_ARGUMENT", nativeTrailingModelTurnMessage)
+		if err == nil {
+			t.Fatal("writeGeminiProtocolError returned nil error; handlers would deref a nil result")
+		}
+		if rec.Code != http.StatusBadRequest {
+			t.Fatalf("status = %d, want 400", rec.Code)
+		}
+		if got := gjson.Get(rec.Body.String(), "error.status").String(); got != "INVALID_ARGUMENT" {
+			t.Fatalf("error.status = %q: %s", got, rec.Body.String())
+		}
+		if got := gjson.Get(rec.Body.String(), "error.message").String(); !strings.Contains(got, "model/assistant turn") {
+			t.Fatalf("message not propagated: %s", rec.Body.String())
+		}
+	})
+
+	t.Run("claude", func(t *testing.T) {
+		rec := httptest.NewRecorder()
+		c, _ := gin.CreateTestContext(rec)
+		c.Request = httptest.NewRequest(http.MethodPost, "/x", nil)
+
+		err := writeClaudeProtocolError(c, http.StatusBadRequest, "invalid_request_error", "boom")
+		if err == nil {
+			t.Fatal("writeClaudeProtocolError returned nil error; handlers would deref a nil result")
+		}
+		if rec.Code != http.StatusBadRequest {
+			t.Fatalf("status = %d, want 400", rec.Code)
+		}
+		if got := gjson.Get(rec.Body.String(), "error.type").String(); got != "invalid_request_error" {
+			t.Fatalf("error.type = %q: %s", got, rec.Body.String())
+		}
+	})
 }

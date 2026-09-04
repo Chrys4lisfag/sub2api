@@ -1,6 +1,7 @@
 package service
 
 import (
+	"fmt"
 	"strings"
 
 	"github.com/gin-gonic/gin"
@@ -117,9 +118,15 @@ func itoa(v int) string {
 	return digits
 }
 
-// writeGeminiProtocolError writes a Gemini-shaped error envelope and marks the
-// response committed so the failover loop does not treat the request as
-// retryable.
+// writeGeminiProtocolError writes a Gemini-shaped error envelope, marks the
+// response committed so the failover loop does not retry, and returns a
+// non-nil error.
+//
+// The non-nil return is load-bearing: gateway handlers dereference the
+// *ForwardResult when the error is nil, so `return nil, writeGeminiProtocolError(...)`
+// with a nil error panics the usage worker (seen in production 2026-09-04 at
+// gemini_v1beta_handler.go:598). MarkResponseCommitted keeps the handler from
+// overwriting the body we already wrote.
 func writeGeminiProtocolError(c *gin.Context, status int, statusEnum, message string) error {
 	MarkResponseCommitted(c)
 	c.JSON(status, gin.H{
@@ -129,5 +136,5 @@ func writeGeminiProtocolError(c *gin.Context, status int, statusEnum, message st
 			"status":  statusEnum,
 		},
 	})
-	return nil
+	return fmt.Errorf("%s", message)
 }

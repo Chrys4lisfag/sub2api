@@ -1172,7 +1172,16 @@ func unwrapV1InternalResponseBody(body []byte) ([]byte, error) {
 	return body, nil
 }
 
-// writeClaudeProtocolError writes an Anthropic-shaped error envelope.
+// writeClaudeProtocolError writes an Anthropic-shaped error envelope and
+// returns a non-nil error describing it.
+//
+// Returning an error is REQUIRED, not cosmetic: callers use
+// `return nil, writeClaudeProtocolError(...)`, and the gateway handlers only
+// skip usage recording (which dereferences the *ForwardResult) when the error
+// is non-nil. Returning nil here yields (nil result, nil error) and panics the
+// usage worker with a nil pointer dereference — observed in production on
+// 2026-09-04 at gemini_v1beta_handler.go:598. This mirrors the original
+// AntigravityGatewayService.writeClaudeError contract.
 func writeClaudeProtocolError(c *gin.Context, status int, errType, message string) error {
 	MarkResponseCommitted(c)
 	c.JSON(status, gin.H{
@@ -1182,7 +1191,7 @@ func writeClaudeProtocolError(c *gin.Context, status int, errType, message strin
 			"message": message,
 		},
 	})
-	return nil
+	return fmt.Errorf("%s", message)
 }
 
 func (s *AntigravityGatewayService) extractImageInputSize(body []byte) string {
