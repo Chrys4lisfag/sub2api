@@ -90,6 +90,23 @@ func (s *AntigravityNativeGatewayService) Forward(
 		(claudeReq.Thinking.Type == "enabled" || claudeReq.Thinking.Type == "adaptive")
 	mappedModel = applyThinkingModelSuffix(mappedModel, thinkingEnabled)
 
+	// Fail an unsatisfiable thinking budget locally, before any upstream call.
+	// The provider floors budget_tokens at 1024 (live-probed 2026-09-04) and a
+	// violation is permanent for this payload, so sending it upstream only
+	// burns one account after another and finally reports 502 — hiding the
+	// precise, actionable reason from the caller. Answer directly instead.
+	if thinkingEnabled && claudeReq.Thinking.BudgetTokens > 0 &&
+		claudeReq.Thinking.BudgetTokens < nativeClaudeMinThinkingBudget {
+		slog.WarnContext(ctx, "native claude: rejecting sub-floor thinking budget before dispatch",
+			slog.Int64("account_id", account.ID),
+			slog.String("model", originalModel),
+			slog.Int("requested_budget_tokens", claudeReq.Thinking.BudgetTokens),
+			slog.Int("min_thinking_budget", nativeClaudeMinThinkingBudget))
+		return nil, writeClaudeProtocolError(c, http.StatusBadRequest, "invalid_request_error",
+			fmt.Sprintf("thinking.budget_tokens must be greater than or equal to %d for %s; max_tokens must also be greater than budget_tokens",
+				nativeClaudeMinThinkingBudget, originalModel))
+	}
+
 	// Non-Claude models over the Anthropic protocol stay unsupported: the
 	// Gemini families are reachable (and already validated) through the
 	// /antigravity-native/v1beta endpoints, and silently re-shaping a Gemini
