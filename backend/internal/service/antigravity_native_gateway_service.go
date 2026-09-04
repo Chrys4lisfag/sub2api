@@ -934,32 +934,88 @@ func applyAgyDefaultsToInnerRequest(inner map[string]any, wireModel string) {
 	}
 }
 
+// nativeClaudeMinThinkingBudget is the provider's hard floor on
+// thinking.budget_tokens for Antigravity's Claude models. Probed live on
+// 2026-09-04: budgets of 128 / 256 / 512 / 1023 all return HTTP 400
+// "thinking.enabled.budget_tokens: Input should be greater than or equal to
+// 1024", while 1024 succeeds. A budget therefore cannot be scaled down to fit
+// a small maxOutputTokens — thinking is either >= 1024 or off.
+const nativeClaudeMinThinkingBudget = 1024
+
 // applyClaudeThinkingDefaults synthesizes the captured Claude thinking config
 // while respecting the caller's output-token ceiling.
 //
-// Antigravity's Claude backend enforces the Anthropic rule
-// `max_tokens` > `thinking.budget_tokens` and rejects violations with
-// HTTP 400 INVALID_ARGUMENT ("`max_tokens` must be greater than
-// `thinking.budget_tokens`") — observed live on 2026-09-02 with
-// maxOutputTokens=1024 and the captured budget of 1024.
+// Two upstream rules bound this:
 //
-// Real agy.exe never trips this because it always sends maxOutputTokens
-// 64000. A caller asking for a small max_tokens still must not 400, and
-// silently raising their ceiling would violate their explicit budget, so
-// thinking is disabled instead (the same {includeThoughts:false,
-// thinkingBudget:0} shape agy.exe itself sends on non-thinking requests).
+//   - `max_tokens` must be GREATER THAN `thinking.budget_tokens` (live 400 on
+//     2026-09-02 with maxOutputTokens=1024 and the captured budget of 1024).
+//   - `thinking.budget_tokens` must be >= 1024 (live 400 on 2026-09-04, see
+//     nativeClaudeMinThinkingBudget).
+//
+// Together they mean a caller whose maxOutputTokens is <= 1024 cannot have
+// thinking at all. Real agy.exe never hits this because it always sends
+// maxOutputTokens 64000.
+//
+// Policy, in order of preference:
+//
+//  1. An EXPLICIT caller thinking budget is never touched — the caller owns
+//     that decision, and if it violates an upstream rule the provider's own
+//     precise 400 is surfaced instead of being silently rewritten.
+//  2. Otherwise the captured default is injected when it fits.
+//  3. When it cannot fit, thinking is left OFF rather than silently raising
+//     the caller's explicit output ceiling. This case is reported by
+//     claudeThinkingSuppressed so callers get a WARN log and a response
+//     header instead of an invisible capability change.
 func applyClaudeThinkingDefaults(gc, tc map[string]any, wireModel string) {
 	if _, present := tc["thinkingBudget"]; present {
 		return
 	}
 	budget := thinkingBudgetForModel(wireModel)
-	maxOut, ok := numericConfigValue(gc["maxOutputTokens"])
-	if ok && budget > 0 && maxOut <= budget {
+	if claudeThinkingCannotFit(gc, budget) {
 		tc["includeThoughts"] = false
 		tc["thinkingBudget"] = 0
 		return
 	}
 	tc["thinkingBudget"] = budget
+}
+
+// claudeThinkingCannotFit reports whether the default budget would violate the
+// `max_tokens` > `budget_tokens` rule for the caller's ceiling.
+func claudeThinkingCannotFit(gc map[string]any, budget int) bool {
+	if budget <= 0 {
+		return false
+	}
+	maxOut, ok := numericConfigValue(gc["maxOutputTokens"])
+	if !ok {
+		return false
+	}
+	return maxOut <= budget
+}
+
+// claudeThinkingSuppressed reports whether a Claude request will run WITHOUT
+// thinking purely because the caller's maxOutputTokens cannot host the
+// provider's minimum budget, and returns that ceiling for logging. It only
+// fires when the caller did not ask for thinking themselves, so an explicit
+// caller budget is never described as suppressed.
+func claudeThinkingSuppressed(inner map[string]any, wireModel string) (int, bool) {
+	if inner == nil || !nativeIsClaudeModel(wireModel) {
+		return 0, false
+	}
+	gc, _ := inner["generationConfig"].(map[string]any)
+	if gc == nil {
+		return 0, false
+	}
+	if tc, _ := gc["thinkingConfig"].(map[string]any); tc != nil {
+		if _, explicit := tc["thinkingBudget"]; explicit {
+			return 0, false
+		}
+	}
+	budget := thinkingBudgetForModel(wireModel)
+	if !claudeThinkingCannotFit(gc, budget) {
+		return 0, false
+	}
+	maxOut, _ := numericConfigValue(gc["maxOutputTokens"])
+	return maxOut, true
 }
 
 // numericConfigValue reads a JSON-decoded number in any of the shapes the

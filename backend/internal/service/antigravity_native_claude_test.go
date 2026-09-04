@@ -275,3 +275,87 @@ func TestNumericConfigValue(t *testing.T) {
 		t.Error("string must not parse as numeric config value")
 	}
 }
+
+// The provider floors thinking.budget_tokens at 1024 (live-probed 2026-09-04:
+// 128/256/512/1023 all 400, 1024 succeeds), so a caller ceiling at or below
+// that cannot host thinking. That downgrade must be detectable rather than
+// silent.
+func TestClaudeThinkingSuppressionIsDetectable(t *testing.T) {
+	cases := []struct {
+		name          string
+		body          string
+		model         string
+		wantSuppress  bool
+		wantMaxTokens int
+	}{
+		{
+			name:          "ceiling equals floor",
+			body:          `{"generationConfig":{"maxOutputTokens":1024},"contents":[]}`,
+			model:         "claude-sonnet-4-6",
+			wantSuppress:  true,
+			wantMaxTokens: 1024,
+		},
+		{
+			name:          "ceiling below floor",
+			body:          `{"generationConfig":{"maxOutputTokens":256},"contents":[]}`,
+			model:         "claude-opus-4-6-thinking",
+			wantSuppress:  true,
+			wantMaxTokens: 256,
+		},
+		{
+			name:         "ceiling above floor",
+			body:         `{"generationConfig":{"maxOutputTokens":4096},"contents":[]}`,
+			model:        "claude-sonnet-4-6",
+			wantSuppress: false,
+		},
+		{
+			name:         "explicit caller budget is never called suppressed",
+			body:         `{"generationConfig":{"maxOutputTokens":512,"thinkingConfig":{"thinkingBudget":1024}},"contents":[]}`,
+			model:        "claude-sonnet-4-6",
+			wantSuppress: false,
+		},
+		{
+			name:         "no ceiling means defaults apply",
+			body:         `{"generationConfig":{},"contents":[]}`,
+			model:        "claude-sonnet-4-6",
+			wantSuppress: false,
+		},
+		{
+			name:         "gemini is unaffected",
+			body:         `{"generationConfig":{"maxOutputTokens":512},"contents":[]}`,
+			model:        "gemini-3.8-flash-medium",
+			wantSuppress: false,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			maxOut, suppressed := claudeThinkingSuppressedInBody([]byte(tc.body), tc.model)
+			if suppressed != tc.wantSuppress {
+				t.Fatalf("suppressed = %v, want %v", suppressed, tc.wantSuppress)
+			}
+			if tc.wantSuppress && maxOut != tc.wantMaxTokens {
+				t.Fatalf("maxOutputTokens = %d, want %d", maxOut, tc.wantMaxTokens)
+			}
+		})
+	}
+
+	// The map-based predicate used by applyAgyDefaultsToInnerRequest must
+	// agree with the body-based one used by the request path.
+	inner := map[string]any{"generationConfig": map[string]any{"maxOutputTokens": 1024}}
+	if _, suppressed := claudeThinkingSuppressed(inner, "claude-sonnet-4-6"); !suppressed {
+		t.Fatal("map predicate disagrees with body predicate")
+	}
+}
+
+// An explicit caller budget below the provider floor is left untouched so the
+// provider's own precise error surfaces instead of a silent rewrite.
+func TestWrapNativeV1Internal_ClaudeKeepsExplicitSubFloorBudget(t *testing.T) {
+	body := []byte(`{"generationConfig":{"maxOutputTokens":8192,"thinkingConfig":{"thinkingBudget":512}},"contents":[]}`)
+	out, err := wrapNativeV1Internal("proj", "claude-sonnet-4-6", body)
+	if err != nil {
+		t.Fatalf("wrap: %v", err)
+	}
+	if got := gjson.GetBytes(out, "request.generationConfig.thinkingConfig.thinkingBudget").Int(); got != 512 {
+		t.Fatalf("explicit sub-floor budget was rewritten to %d: %s", got, out)
+	}
+}

@@ -352,6 +352,76 @@ go test ./internal/service ./internal/pkg/antigravity ./internal/handler ./inter
 All passed. The ephemeral credential used by the live probe lived only in an
 ACL-protected private directory and was deleted afterwards.
 
+## Claude 4.6 thinking controls: no levels, hard budget floor, 2026-09-04
+
+### There is no low/medium/high for Claude
+
+`agy.exe` itself answers this. Its CLI exposes `--effort low|medium|high`, and
+the binary rejects it for both Claude models:
+
+```text
+--model claude-sonnet-4-6        --effort high  -> "--effort is not supported for model \"claude-sonnet-4-6\""
+--model claude-opus-4-6-thinking --effort low   -> "--effort is not supported for model \"claude-opus-4-6-thinking\""
+```
+
+Corroborating evidence:
+
+- `agy.exe models` lists exactly one entry per Claude model, both already
+  labeled "(Thinking)". There are no `-high`/`-medium`/`-low` Claude IDs, and
+  `fetchAvailableModels` contains none either.
+- Claude metadata carries a single `thinkingBudget: 1024` with NO
+  `minThinkingBudget` field, unlike Gemini 3.7/3.8 which expose the
+  `-1 / 4000 / 1000` ladder plus `minThinkingBudget: 32`.
+
+`--effort` is Gemini-only, and it behaves exactly like sub2api's virtual alias:
+
+```text
+--model gemini-3.8-flash-high --effort low -> "conflicts with --effort=low"  (tier already pinned)
+--model gemini-3.8-flash      --effort low -> SUCCESS                        (effort selects the tier)
+```
+
+So no Claude thinking slider may be exposed. The only real knob is the
+Anthropic-native `thinking.budget_tokens`, which sub2api passes through verbatim.
+
+Verified across three consecutive self-updates of the binary — 1.1.24
+(`7585871b…880c95`), 1.1.25 (`dbc665f9…2b3c`) and 1.1.26
+(`17a09d8c8b5a0bc3cc36904deed78126a56d5c47ccf28186743acb848f5f780d`) — with
+identical results. The capture runner gained a reusable `--effort` passthrough.
+
+### Two hard upstream bounds on Claude thinking
+
+Probed live on 2026-09-04 against the real endpoint:
+
+| maxOutputTokens | thinkingBudget | result |
+|---:|---:|---|
+| 1024 | 128 / 256 / 512 / 1023 | 400 `thinking.enabled.budget_tokens: Input should be greater than or equal to 1024` |
+| 512 / 256 | 256 / 128 | 400, same message |
+| 1024 | 1024 | 400 `max_tokens must be greater than thinking.budget_tokens` |
+| 1025 | 1024 | 200 |
+| 2048 | 1024 | 200 |
+| 1024 | 0 | 200 |
+
+So `budget >= 1024` AND `max_tokens > budget`. A budget can therefore never be
+scaled down to fit a small ceiling: thinking is either >= 1024 or off, and it
+is only possible at all when `max_tokens >= 1025`.
+
+### Policy, and why it is not silent
+
+1. An **explicit** caller `thinking.budget_tokens` is never rewritten — not
+   even a sub-floor one. The provider's own precise 400 is surfaced instead of
+   a magic rewrite that hides the caller's mistake.
+2. The captured default (1024) is injected whenever it fits.
+3. Only when the caller pinned `max_tokens <= 1024` — the exact suppression
+   window, since 1025 already works — is thinking left off, because the
+   alternatives are worse: silently raising the caller's explicit output
+   ceiling, or failing a request the provider would have served.
+4. That third case is **reported, not silent**: `claudeThinkingSuppressed` /
+   `claudeThinkingSuppressedInBody` drive a WARN log carrying account, model,
+   the caller's ceiling, the 1024 floor and the remedy, plus the response
+   header `x-sub2api-thinking: disabled_max_tokens_below_min_budget`. An
+   accidentally low `max_tokens` is therefore visible to operators in logs and
+   to clients on the response.
+
 ## AGY artifact and evidence source
 
 Hash-bound static-reversing artifact:

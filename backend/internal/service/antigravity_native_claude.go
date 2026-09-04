@@ -163,6 +163,22 @@ func (s *AntigravityNativeGatewayService) Forward(
 		return nil, fmt.Errorf("native claude: tool preprocess: %w", err)
 	}
 
+	// Surface the one case where sub2api declines to add thinking: the caller
+	// pinned max_tokens at or below the provider's 1024 budget floor, so no
+	// valid thinking budget exists. Never let that pass unnoticed — a WARN log
+	// plus a response header make the downgrade observable to both operators
+	// and clients (an accidental low max_tokens is otherwise invisible).
+	if maxOut, suppressed := claudeThinkingSuppressedInBody(innerBody, mappedModel); suppressed {
+		slog.WarnContext(ctx, "native claude: thinking disabled, caller max_tokens below provider minimum budget",
+			slog.Int64("account_id", account.ID),
+			slog.String("model", originalModel),
+			slog.String("wire_model", mappedModel),
+			slog.Int("max_output_tokens", maxOut),
+			slog.Int("min_thinking_budget", nativeClaudeMinThinkingBudget),
+			slog.String("remedy", "raise max_tokens above the minimum thinking budget to re-enable thinking"))
+		c.Header("x-sub2api-thinking", "disabled_max_tokens_below_min_budget")
+	}
+
 	envelope, err := wrapNativeV1Internal(cli.ProjectID(), mappedModel, innerBody)
 	if err != nil {
 		return nil, fmt.Errorf("native claude: envelope: %w", err)
@@ -342,4 +358,28 @@ func claudeErrorBody(status int, raw []byte) []byte {
 		return []byte(`{"type":"error","error":{"type":"api_error","message":"upstream request failed"}}`)
 	}
 	return payload
+}
+
+// claudeThinkingSuppressedInBody is the []byte form of claudeThinkingSuppressed
+// used by the request path, which handles the inner request as raw JSON.
+func claudeThinkingSuppressedInBody(body []byte, wireModel string) (int, bool) {
+	if !nativeIsClaudeModel(wireModel) || !gjson.ValidBytes(body) {
+		return 0, false
+	}
+	gc := gjson.GetBytes(body, "generationConfig")
+	if !gc.IsObject() {
+		return 0, false
+	}
+	if gc.Get("thinkingConfig.thinkingBudget").Exists() {
+		return 0, false
+	}
+	maxOut := gc.Get("maxOutputTokens")
+	if !maxOut.Exists() {
+		return 0, false
+	}
+	budget := thinkingBudgetForModel(wireModel)
+	if budget <= 0 || int(maxOut.Int()) > budget {
+		return 0, false
+	}
+	return int(maxOut.Int()), true
 }
