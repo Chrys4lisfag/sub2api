@@ -226,6 +226,23 @@ func (s *AntigravityNativeGatewayService) Forward(
 	if resp.StatusCode != http.StatusOK {
 		raw, _ := io.ReadAll(resp.Body)
 		logNativeUpstreamError(ctx, account.ID, originalModel, mappedModel, "streamGenerateContent", claudeReq.Stream, resp.StatusCode, resp.Header, raw, envelope)
+
+		// A payload-level 400 (oversized prompt, invalid thinking budget, …)
+		// can never be fixed by another account: every account would repeat
+		// the same validation failure. Answer the caller directly with the
+		// provider's own message instead of entering the failover loop, which
+		// otherwise burns the whole group and reports a generic 502 — observed
+		// 2026-09-04: one oversized prompt caused 26 account switches and the
+		// precise "prompt is too long: … > 1000000 maximum" never reached the
+		// client.
+		if resp.StatusCode == http.StatusBadRequest && claudeRequestIsPermanentlyInvalid(raw) {
+			slog.WarnContext(ctx, "native claude: terminal invalid request, skipping failover",
+				slog.Int64("account_id", account.ID),
+				slog.String("model", originalModel),
+				slog.String("upstream_message", sanitizeUpstreamErrorMessage(strings.TrimSpace(extractAntigravityErrorMessage(raw)))))
+			return nil, writeClaudeProtocolError(c, http.StatusBadRequest, "invalid_request_error",
+				claudeUpstreamMessage(raw, http.StatusBadRequest))
+		}
 		return nil, s.claudeUpstreamFailure(ctx, account, mappedModel, resp, raw)
 	}
 
@@ -405,4 +422,51 @@ func claudeThinkingSuppressedInBody(body []byte, wireModel string) (int, bool) {
 		return 0, false
 	}
 	return int(maxOut.Int()), true
+}
+
+// claudeRequestIsPermanentlyInvalid reports whether an upstream 400 describes a
+// request that no account can satisfy, so failover is pointless. Detected from
+// the provider's own Anthropic-shaped validation messages, e.g.
+// "prompt is too long: 2917140 tokens > 1000000 maximum" or
+// "thinking.enabled.budget_tokens: Input should be greater than or equal to 1024"
+// (both observed live 2026-09-04).
+func claudeRequestIsPermanentlyInvalid(raw []byte) bool {
+	if isPromptTooLongError(raw) {
+		return true
+	}
+	msg := strings.ToLower(strings.TrimSpace(extractAntigravityErrorMessage(raw)))
+	if msg == "" {
+		msg = strings.ToLower(string(raw))
+	}
+	// Re-auth signals must keep their own handling (account-specific).
+	if nativeBodyIndicatesReauth(raw) {
+		return false
+	}
+	for _, marker := range []string{
+		"budget_tokens",
+		"invalid_request_error",
+		"input should be",
+		"is too long",
+		"must be greater than",
+	} {
+		if strings.Contains(msg, marker) {
+			return true
+		}
+	}
+	return false
+}
+
+// claudeUpstreamMessage extracts the provider's message for client display,
+// falling back to a generic description when none can be parsed.
+func claudeUpstreamMessage(raw []byte, status int) string {
+	msg := sanitizeUpstreamErrorMessage(strings.TrimSpace(extractAntigravityErrorMessage(raw)))
+	if msg == "" {
+		return fmt.Sprintf("upstream returned HTTP %d", status)
+	}
+	// The Antigravity wrapper nests the Anthropic error JSON inside `message`;
+	// surface the inner human-readable text when present.
+	if inner := gjson.Get(msg, "error.message"); inner.Exists() && strings.TrimSpace(inner.String()) != "" {
+		return inner.String()
+	}
+	return msg
 }

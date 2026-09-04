@@ -409,3 +409,41 @@ func TestClaudeUpstreamFailureRetrySemantics(t *testing.T) {
 		t.Errorf("502 must not set RetryableOnSameAccount: %#v", serverErr)
 	}
 }
+
+// Payload-level 400s are permanent for every account, so they must be
+// classified as terminal (no failover). Messages are the provider's own,
+// observed live on 2026-09-04.
+func TestClaudeRequestIsPermanentlyInvalid(t *testing.T) {
+	promptTooLong := []byte(`{"error":{"code":400,"message":"{\"type\":\"error\",\"error\":{\"type\":\"invalid_request_error\",\"message\":\"prompt is too long: 2917140 tokens > 1000000 maximum\"}}","status":"INVALID_ARGUMENT"}}`)
+	subFloorBudget := []byte(`{"error":{"code":400,"message":"{\"type\":\"error\",\"error\":{\"type\":\"invalid_request_error\",\"message\":\"thinking.enabled.budget_tokens: Input should be greater than or equal to 1024\"}}","status":"INVALID_ARGUMENT"}}`)
+	maxTokensRule := []byte(`{"error":{"code":400,"message":"{\"type\":\"error\",\"error\":{\"type\":\"invalid_request_error\",\"message\":\"` + "`max_tokens`" + ` must be greater than ` + "`thinking.budget_tokens`" + `\"}}","status":"INVALID_ARGUMENT"}}`)
+
+	for name, body := range map[string][]byte{
+		"prompt too long":  promptTooLong,
+		"sub-floor budget": subFloorBudget,
+		"max_tokens rule":  maxTokensRule,
+	} {
+		if !claudeRequestIsPermanentlyInvalid(body) {
+			t.Errorf("%s: expected terminal classification", name)
+		}
+	}
+
+	// Re-auth keeps its own account-specific handling and must NOT be terminal.
+	reauth := []byte(`{"error":{"code":400,"message":"invalid_grant: Re-auth Required","status":"INVALID_ARGUMENT"}}`)
+	if claudeRequestIsPermanentlyInvalid(reauth) {
+		t.Error("re-auth 400 must stay non-terminal so the account can be paused/rotated")
+	}
+}
+
+// The client must receive the provider's actionable text, not a generic error.
+func TestClaudeUpstreamMessageUnwrapsProviderText(t *testing.T) {
+	raw := []byte(`{"error":{"code":400,"message":"{\"type\":\"error\",\"error\":{\"type\":\"invalid_request_error\",\"message\":\"prompt is too long: 2917140 tokens > 1000000 maximum\"}}","status":"INVALID_ARGUMENT"}}`)
+	got := claudeUpstreamMessage(raw, http.StatusBadRequest)
+	if !strings.Contains(got, "1000000 maximum") {
+		t.Fatalf("provider detail lost: %q", got)
+	}
+
+	if got := claudeUpstreamMessage(nil, http.StatusBadGateway); !strings.Contains(got, "502") {
+		t.Fatalf("fallback message missing status: %q", got)
+	}
+}
