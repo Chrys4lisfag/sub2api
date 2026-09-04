@@ -180,6 +180,21 @@ func (s *AntigravityNativeGatewayService) Forward(
 		return nil, fmt.Errorf("native claude: tool preprocess: %w", err)
 	}
 
+	// Anthropic legitimately allows a trailing assistant turn (prefill), but
+	// this upstream refuses any request whose final Gemini turn is a model
+	// turn, and misreports it as a missing thought_signature when that turn
+	// holds an unsigned function call. Reject locally with the accurate reason
+	// instead of failing over across accounts.
+	if endsWithModelTurn, shape := geminiRequestEndsWithModelTurn(innerBody); endsWithModelTurn {
+		slog.WarnContext(ctx, "native claude: rejecting request ending with an assistant turn",
+			slog.Int64("account_id", account.ID),
+			slog.String("model", originalModel),
+			slog.String("wire_model", mappedModel),
+			slog.String("last_turn", shape))
+		return nil, writeClaudeProtocolError(c, http.StatusBadRequest, "invalid_request_error",
+			nativeTrailingModelTurnMessage)
+	}
+
 	// Surface the one case where sub2api declines to add thinking: the caller
 	// pinned max_tokens at or below the provider's 1024 budget floor, so no
 	// valid thinking budget exists. Never let that pass unnoticed — a WARN log

@@ -541,6 +541,20 @@ func (s *AntigravityNativeGatewayService) ForwardGemini(
 			slog.String("err", loopErr.Error()))
 	}
 
+	// Reject the one client-side shape upstream always refuses, before burning
+	// an account on it. Upstream reports a trailing model turn as a MISSING
+	// thought_signature whenever that turn holds an unsigned function call,
+	// which historically sent debugging in the wrong direction; see
+	// native_request_shape.go for the probe matrix.
+	if endsWithModelTurn, shape := geminiRequestEndsWithModelTurn(body); endsWithModelTurn {
+		slog.WarnContext(ctx, "native: rejecting request ending with a model turn",
+			slog.Int64("account_id", account.ID),
+			slog.String("model", originalModel),
+			slog.String("wire_model", wireModel),
+			slog.String("last_turn", shape))
+		return nil, writeGeminiProtocolError(c, http.StatusBadRequest, "INVALID_ARGUMENT", nativeTrailingModelTurnMessage)
+	}
+
 	// Wrap the now-normalized body in the v1internal envelope.
 	envelope, err := wrapNativeV1Internal(cli.ProjectID(), wireModel, body)
 	if err != nil {
