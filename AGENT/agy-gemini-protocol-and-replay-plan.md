@@ -495,6 +495,83 @@ Verified in production after deploy: oversized prompt returns HTTP 400
 `failover_switch_account=0`, `failover_same_account_retry=0`, and a normal
 request still returns 200.
 
+## The "missing thought_signature" report is a trailing-model-turn symptom, 2026-09-04
+
+### Reported symptom
+
+A user hit, through this gateway:
+
+```text
+Google API error (400): Function call is missing a thought_signature in functionCall parts.
+… Additional data, function call default_api:read , position 147.
+```
+
+### Probe matrix (live, real endpoint)
+
+| request shape | result |
+|---|---|
+| unsigned functionCall mid-history (163 parts, ends with functionResponse) | **200** |
+| parallel model turn: signed first call + unsigned second call | **200** |
+| trailing model turn holding an UNSIGNED functionCall | 400 "missing a thought_signature" |
+| trailing model turn holding a SIGNED functionCall | 400 "Requests ending with a model turn are not supported." |
+| trailing model turn with text only | 400 "Requests ending with a model turn are not supported." |
+
+Conclusion: a missing signature is NOT itself rejected. Unsigned calls are
+accepted in well-formed histories. The fault is a request whose final
+`contents` entry is a model turn; upstream just runs signature validation
+first, so an unsigned pending call masks the real cause. Confirmed on both
+gemini-3.7-flash and gemini-3.8-flash. Injecting the
+`skip_thought_signature_validator` sentinel only swaps the message for
+"Requests ending with a model turn are not supported" — it does not make the
+request work, so sentinel injection was deliberately NOT implemented.
+
+### Where the unsigned call comes from (client side)
+
+omp only adds the sentinel when the model's `compat` says so
+(`packages/ai/src/providers/google-shared.ts:254-257`):
+
+```ts
+requiresFallback = compat.requiresSkipThoughtSignature
+                || (isFirstToolCall && compat.requiresSkipThoughtSignatureOnFirstFunctionCall)
+```
+
+The bundled catalog sets `requiresSkipThoughtSignatureOnFirstFunctionCall: true`
+for google-antigravity Gemini, but a hand-written `models.yml` provider entry
+does not inherit it and CANNOT set it — those keys are absent from the
+config-facing compat schema (`models-config-schema-bundle.ts:24-66`).
+Separately, signatures are dropped whenever the provider or model changes
+mid-conversation (`google-shared.ts:217`, `:152-154`), which is how a pending
+call ends up unsigned.
+
+### What sub2api now does
+
+Both native paths detect the shape BEFORE calling upstream
+(`native_request_shape.go`) and answer with the accurate reason, terminally
+(no failover, no account cycling):
+
+- Gemini path: 400 `INVALID_ARGUMENT`
+- Anthropic path: 400 `invalid_request_error` (note Anthropic legitimately
+  allows a trailing assistant turn for prefill; this upstream does not)
+
+The message names the real problem and pre-empts the misleading signature
+error. Log lines carry only structural facts — part kinds, counts and whether
+calls were signed — never text, arguments or signatures.
+
+### Regression found and fixed while verifying
+
+The first deploy panicked the usage worker twice
+(`usage_record.task_panic`, nil pointer at `gemini_v1beta_handler.go:598`).
+Cause: the shared Claude error writer extracted earlier in the day returned
+`nil`, while the original `AntigravityGatewayService.writeClaudeError` returned
+`fmt.Errorf(...)`. Handlers treat a nil error as success and dereference the
+(nil) `*ForwardResult` when recording usage. Both protocol error writers now
+return a non-nil error, with a regression test pinning that contract.
+
+Verified in production after the fix: trailing-model-turn requests return the
+explanatory 400, well-formed requests with unsigned calls still return 200,
+plain chat returns 200, and `task_panic` / `failover_same_account_retry`
+counts are 0.
+
 ## AGY artifact and evidence source
 
 Hash-bound static-reversing artifact:
