@@ -541,6 +541,19 @@ func (s *AntigravityNativeGatewayService) ForwardGemini(
 			slog.String("err", loopErr.Error()))
 	}
 
+	// Stamp the skip sentinel onto unsigned function calls. Clients lose
+	// signatures on provider/model switches, history compaction and replays,
+	// and upstream then rejects the ENTIRE request. Reproduced and fixed
+	// against a real 1.9 MB omp capture; see
+	// EnsureGeminiNativeFunctionCallSignatures for the evidence.
+	if signedBody, injected := EnsureGeminiNativeFunctionCallSignatures(body); injected > 0 {
+		body = signedBody
+		slog.InfoContext(ctx, "native: stamped skip sentinel on unsigned function calls",
+			slog.Int64("account_id", account.ID),
+			slog.String("model", originalModel),
+			slog.Int("injected", injected))
+	}
+
 	// Reject the one client-side shape upstream always refuses, before burning
 	// an account on it. Upstream reports a trailing model turn as a MISSING
 	// thought_signature whenever that turn holds an unsigned function call,

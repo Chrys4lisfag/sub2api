@@ -146,6 +146,105 @@ func cleanGeminiPartList(value any) bool {
 	return changed
 }
 
+// EnsureGeminiNativeFunctionCallSignatures stamps the upstream skip sentinel
+// onto the FIRST unsigned functionCall part of each model turn and reports how
+// many parts it touched.
+//
+// Why this is needed. Upstream validates that function calls carry a
+// thoughtSignature and rejects the whole request with
+// "Function call is missing a thought_signature in functionCall parts" when
+// one does not. Clients legitimately end up with unsigned calls: signatures
+// are bound to the account/model that produced them, so any provider or model
+// switch, history compaction, or session replay drops them. Reproduced from a
+// real 1.9 MB omp capture (1000 contents entries, 464 function calls, 31 of
+// them unsigned): as captured -> 400; with this sentinel -> 200.
+//
+// Only the first call in a turn is stamped. Real agy emits the signature on
+// the leading call of a parallel batch and leaves the siblings bare, and a
+// probe confirmed upstream accepts signed-first + unsigned-secondary turns, so
+// stamping siblings would deviate from the wire format for no benefit.
+//
+// This never overwrites an existing signature: a valid one must reach upstream
+// untouched, and a cross-account one is separately rewritten to the dummy
+// value by CleanGeminiNativeThoughtSignatures.
+//
+// A trailing model turn is NOT rescued by this, and deliberately so: upstream
+// then answers "Requests ending with a model turn are not supported". That
+// shape is rejected earlier by geminiRequestEndsWithModelTurn.
+func EnsureGeminiNativeFunctionCallSignatures(body []byte) ([]byte, int) {
+	if len(body) == 0 || !gjson.ValidBytes(body) {
+		return body, 0
+	}
+
+	decoder := json.NewDecoder(bytes.NewReader(body))
+	decoder.UseNumber()
+	var data map[string]any
+	if err := decoder.Decode(&data); err != nil {
+		return body, 0
+	}
+	injected := signUnsignedGeminiFunctionCalls(data)
+	if injected == 0 {
+		return body, 0
+	}
+	result, err := json.Marshal(data)
+	if err != nil {
+		return body, 0
+	}
+	return result, injected
+}
+
+// signUnsignedGeminiFunctionCalls walks `contents` (and the nested
+// `request.contents` used by the v1internal envelope). cachedContent is left
+// alone: it is a server-side handle, not a turn we are replaying.
+func signUnsignedGeminiFunctionCalls(data map[string]any) int {
+	injected := 0
+	if contents, ok := data["contents"].([]any); ok {
+		for _, item := range contents {
+			content, ok := item.(map[string]any)
+			if !ok {
+				continue
+			}
+			role, _ := content["role"].(string)
+			if role != "model" && role != "assistant" {
+				continue
+			}
+			injected += signFirstUnsignedFunctionCall(content["parts"])
+		}
+	}
+	if request, ok := data["request"].(map[string]any); ok {
+		injected += signUnsignedGeminiFunctionCalls(request)
+	}
+	return injected
+}
+
+// signFirstUnsignedFunctionCall stamps at most one part: the leading
+// functionCall of the turn, and only when it carries no signature.
+func signFirstUnsignedFunctionCall(value any) int {
+	parts, ok := value.([]any)
+	if !ok {
+		return 0
+	}
+	for _, item := range parts {
+		part, ok := item.(map[string]any)
+		if !ok {
+			continue
+		}
+		if _, isCall := part["functionCall"]; !isCall {
+			continue
+		}
+		// First call in the turn decides: signed -> nothing to do (siblings
+		// are bare by design); unsigned -> stamp it and stop.
+		if sig, exists := part["thoughtSignature"]; exists {
+			if s, isStr := sig.(string); !isStr || s != "" {
+				return 0
+			}
+		}
+		part["thoughtSignature"] = antigravity.DummyThoughtSignature
+		return 1
+	}
+	return 0
+}
+
 // LowerGeminiNativeThinkingForSemanticRetry lowers explicit thinking by one
 // tier after an HTTP-successful response contained no usable model output.
 // The retry ladder is HIGH -> MEDIUM -> LOW, so LOW is reached only after a
