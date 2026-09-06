@@ -572,6 +572,184 @@ explanatory 400, well-formed requests with unsigned calls still return 200,
 plain chat returns 200, and `task_panic` / `failover_same_account_retry`
 counts are 0.
 
+## Tool-aggregation audit: keep it, do not gate on tool count, 2026-09-05
+
+Question raised: should the `call_mcp_tool` aggregator + prompt injection be
+disabled, or only activate above ~100 tools, since interception is suspected of
+breaking smooth streaming and of duplicating omp's own system-prompt tool docs?
+
+### Live settings audited (production)
+
+```text
+antigravity_native_tool_call_mode      = single_name
+antigravity_native_mcp_discovery_mode  = both
+antigravity_native_mcp_aggregator_name = ""        -> default call_mcp_tool
+20 antigravity_native accounts, 0 per-account tool_aggregator overrides (ON)
+```
+
+### The ">100 tools errors" premise is not the recorded rationale
+
+`antigravity_native_tools.go:1-14` records the reason as sidestepping Gemini's
+**"empty-args under tool overload"** failure mode (a behavioral defect), NOT an
+HTTP tool-count cap. Capacity probes therefore cannot refute it.
+
+### Capacity: no count cap; the wall is the 1M input-token budget
+
+| Declarations | Payload | Result |
+|---|---|---|
+| 128 / 200 / 800 simple | small | 200 |
+| 100 fat (12 props + long descriptions) | 578 KB | 200 |
+| 250 fat | 1.4 MB | 200 |
+| 500 fat | 2.9 MB | 400 `input token count exceeds the maximum number of tokens allowed 1048576` |
+
+The public Gemini API's ~128-function limit does NOT apply to cloudcode-pa.
+Consequence: a **count-based** threshold measures the wrong variable — 800 tiny
+tools pass while 500 fat ones fail. Any future guard must key on estimated
+declaration bytes/tokens.
+
+### Empty-args behavioral probe (tool named explicitly, then ambiguously)
+
+| Model | Tools | Outcome |
+|---|---:|---|
+| gemini-3.8-flash | 5 / 201 / 401 | args correct 3/3 each |
+| gemini-3.8-flash | 401, ambiguous prompt | args correct 3/3 |
+| gemini-3.5-flash | 5 / 101 / 201 / 401 | no call at all — **also at 5 tools**, so unrelated to overload |
+| gemini-3.1-pro | 5 | correct 2/2 |
+| gemini-3.1-pro | 250 | 1 correct + 1 no-call, then 5/5 correct on rerun |
+
+The originally recorded failure (2026-07-21) was on **3.1 Pro High at 200+
+tools**, while 3.5 Flash High succeeded at 229. So flash models passing today is
+EXPECTED and is not counter-evidence. 3.1 Pro remains flaky-but-mostly-working,
+which is why the aggregator stays in the tree.
+
+### The layer is inert for omp / xd:// traffic
+
+Both injection sites (`antigravity_native_tools.go:125` and `:152`) are gated on:
+
+```go
+if useAggregator && len(report.McpTools) > 0 {
+```
+
+`report.McpTools` only collects `mcp__`-prefixed names (`:98`); everything else is
+kept verbatim as `BuiltinTools` (`:119`). Measured byte delta on an omp-shaped
+request (16 builtin tools, docs already in the system prompt, zero `mcp__*`):
+
+```text
+OMP-SHAPED (0 mcp tools): before=2665B after=2665B delta=0B  mcp=0 builtin=16
+WITH 3 MCP TOOLS:         before=3166B after=5715B delta=2549B mcp=3 builtin=16
+```
+
+So there is **no double-spend** of omp's default tools. omp's `tools.xdevPromptDocs`
+inlines docs only for *discoverable* tools mounted under `xd://` precisely to keep
+their schemas OFF the request; top-level tools travel as `functionDeclarations`
+with no prompt-text copy. Each tool is described once, by the client. Only schema
+normalization (`parametersJsonSchema` -> `parameters`) runs on our side.
+
+Production over 24h (7132 native requests): `mcp_tools_count: 0` on **7101**; the
+31 non-zero rows were this audit's own probes.
+
+### Streaming is not intercepted in this configuration
+
+The only streaming-hostile path is the discovery loop, which forces a
+non-streaming `generateContent` plus one buffered flush. Its trigger requires ALL
+of `toolCallMode == agy_mimic && modeDeclaresListTool(discoveryMode) &&
+aggregatorOn && len(mcpTools) > 0`. Production runs `single_name`, so it is
+structurally unreachable — `agy_list_tools` loop runs in 24h: **0**. Per-chunk SSE
+handling is an allocation-free name check before any parse.
+
+### Verdict
+
+- Change **no** setting. Keep `single_name` (that is what keeps the loop off).
+- Do **not** remove the aggregator: 3.1 Pro is the model that exhibits the defect.
+- Do **not** add a `>100 tools` gate; if a guard is ever wanted, use declaration
+  bytes/tokens, and default it to today's behavior (no silent change).
+- Only if a client starts sending `mcp__*` tools does the ~2.5 KB block land on top
+  of omp's own docs; that is the sole scenario worth a threshold.
+
+## Unsigned function calls: sentinel injection shipped, 2026-09-06
+
+Second, DISTINCT variant of the thought_signature 400 — this one hit our own
+operator through omp and is a genuine gateway-side gap, unlike the
+trailing-model-turn case documented above.
+
+### Capture
+
+`C:\Users\koval\.omp\logs\http-400-requests\1788718206100-iwlh43e5aepk.json`
+(1.9 MB), `POST /antigravity-native/v1beta/models/gemini-3.8-flash:streamGenerateContent?alt=sse`.
+
+```text
+contents entries: 1000        last role: user   <- so the trailing-turn guard correctly stays out
+parts total:      1627
+functionCalls:    464   signed: 433   UNSIGNED: 31
+unsigned by name: bash 24, write 4, read 2, hub 1
+unsigned turns:   42, 44, 610, 613, then a dense run 944..998
+```
+
+Upstream's reported "position 987" matches none of the obvious indexings (flat
+part index, model-only part index, turn index) — do NOT try to locate the
+offending call from it; enumerate unsigned calls instead.
+
+The clustering is diagnostic: signatures survive normally, then a
+provider/model switch, history compaction or session replay strips them from
+the recent tail. omp only injects the sentinel when model `compat` carries
+`requiresSkipThoughtSignature` / `...OnFirstFunctionCall`, which a hand-written
+`models.yml` provider entry can neither inherit nor set, so nothing re-signs
+them client-side.
+
+### Replay proof (real payload, real endpoint)
+
+| Body | Result |
+|---|---|
+| as captured | 400 `Function call is missing a thought_signature` |
+| all 31 unsigned calls stamped with `skip_thought_signature_validator` | **200** |
+| only the FIRST unsigned call per model turn stamped | **200** |
+
+The capture contained no parallel batches (`turns_with_multiple_calls=0`), and
+an earlier probe showed upstream accepts signed-first + unsigned-secondary
+turns, so the narrower first-call-only rule is both sufficient and faithful to
+real agy's wire format.
+
+### Shipped
+
+Commit `b39465b66` "fix: stamp skip sentinel on unsigned function calls".
+
+- `EnsureGeminiNativeFunctionCallSignatures(body) ([]byte, int)` in
+  `gemini_native_signature_cleaner.go`: walks `contents` and nested
+  `request.contents`, model/assistant turns only, stamps
+  `antigravity.DummyThoughtSignature` on the leading `functionCall` of a turn
+  when it is unsigned, and returns the count. Never overwrites an existing
+  signature (a real one must pass through; a cross-account one is separately
+  rewritten by `CleanGeminiNativeThoughtSignatures`). Skips `cachedContent`
+  (server-side handle, not a replayed turn). Decodes with `UseNumber` so 64-bit
+  ids in tool arguments do not degrade to float64.
+- Wired into `ForwardGemini` just before the trailing-model-turn guard, logging
+  `native: stamped skip sentinel on unsigned function calls` with the count.
+- 9 unit tests in `gemini_native_signature_injection_test.go` cover the stamp,
+  signature preservation, bare siblings, user-turn/tool-argument immunity, the
+  v1internal envelope, invalid bodies, integer-literal preservation, and a
+  30-turn mixed batch.
+
+### Production verification (deployed `b39465b66`)
+
+| Check | Result |
+|---|---|
+| operator's captured body, UNMODIFIED, streaming | 200 |
+| same body, non-streaming | 200 |
+| plain chat | 200 |
+| trailing model turn | 400 with our accurate message (guard still wins) |
+| logs | `stamped=3` (`injected=31` and `injected=1`), `sigerr=0`, `panics=0` |
+
+Rollback image tag: `rollback-signature-20260906`.
+
+### Rule of thumb
+
+Two different 400s share one upstream message:
+
+1. history ends with a model turn -> shape defect, sentinel does NOT help, we
+   reject locally with an accurate message;
+2. history is well formed but a function call is unsigned -> we now stamp the
+   sentinel and the request succeeds.
+
 ## AGY artifact and evidence source
 
 Hash-bound static-reversing artifact:
